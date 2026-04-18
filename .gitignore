@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+
+# Audio / Render
+stems_output/
+render_output/
+render_temp/
+*.mp3
+*.wav
+*.flac
+*.mp4
+
+# IDE
+.vscode/
+.idea/
+.DS_Store

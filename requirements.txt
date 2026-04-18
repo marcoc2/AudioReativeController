@@ -1,0 +1,8 @@
+numpy
+librosa
+pygame
+scipy
+soundfile
+audio-separator[cpu]
+loguru
+pathlib
