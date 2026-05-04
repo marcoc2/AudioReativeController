@@ -9,12 +9,12 @@
 
 - [x] **1.1** `core/rhythm/grid.py` — classe `RhythmGrid` (BPM, fórmula de compasso, fases, subdivisões)
 - [x] **1.1.t** `tests/test_grid.py` — cobrir `phase`, `beat_phase`, `is_beat`, `is_downbeat`, subdivisões (15 testes, todos passando)
-- [ ] **1.2** `core/rhythm/analyzer.py` — `analyze(y, sr) -> RhythmGrid` via `librosa.beat.beat_track`
-- [ ] **1.2.c** Cache por `file_hash` em `rhythm_cache/<hash>.json`
-- [ ] **R1** Refactor `VisualObject` — loop produz lista de objetos, não desenha inline (pré-requisito de 4.x/5.x, feito junto do 1.3)
-- [ ] **1.3** Refactor loop de `animation_generator.py` — usa `grid.phase()` e `grid.is_downbeat()`
-- [ ] **1.4** CLI `--bars N` — renderiza N compassos em vez de N segundos
-- [ ] **1.5** CLI `--subdivision {quarter,eighth,16th,...}` — resolução mínima do grid
+- [x] **1.2** `core/rhythm/analyzer.py` — `analyze(y, sr)` e `analyze_file(path)` via `librosa.beat.beat_track`
+- [x] **1.2.c** Cache por `file_hash` em `rhythm_cache/<hash>_<time_sig>.json` (gitignored)
+- [x] **R1** Refactor `VisualObject` — loop produz lista de objetos, não desenha inline (`core/visual.py`: `VisualObject`, `Frame`, `render_frame`; `build_frame` em `animation_generator.py`)
+- [x] **1.3** Integração mínima — `grid.phase()` modula raio (breath), `grid.is_downbeat()` pisca ring branco
+- [x] **1.4** CLI `--bars N` — renderiza N compassos (sobrescreve `--duration`)
+- [x] **1.5** CLI `--subdivision {whole..64th}` + `--time-sig 4/4|3/4|6/8|...`
 
 ---
 
@@ -22,19 +22,21 @@
 
 ### Épico 2 — MIDI
 
-- [ ] **2.1** `core/rhythm/midi_reader.py` — lê MIDI via `mido`, extrai BPM/timestamps/velocity; kick (C2) → downbeat
-- [ ] **2.2** CLI `--midi path.mid` — substitui analyzer automático
-- [ ] **2.3** Mapeamento canal MIDI → objeto visual (`midi_map.yaml`)
-- [ ] **2.4** Velocity → intensidade visual (raio do objeto)
-- [ ] **Deps** adicionar `mido>=1.3` ao `requirements.txt` (pular `pretty_midi` — redundante)
+- [x] **2.1** `core/rhythm/midi_reader.py` — lê MIDI via `mido`, extrai BPM/timestamps/velocity; kick (C2) → downbeat (auto-classifica espaçamento por bar/beat)
+- [x] **2.1.t** `tests/test_midi_reader.py` — 7 testes (tempo, downbeats, dense kicks, fallback, velocity, missing)
+- [x] **2.2** CLI `--midi path.mid` — substitui analyzer automático (coexiste com áudio para features espectrais)
+- [ ] **2.3** Mapeamento canal MIDI → objeto visual (`midi_map.yaml`) — postponed, depende de R1
+- [x] **2.4** Velocity → intensidade visual (envelope linear-decay 300ms; kick→left, snare→right)
+- [x] **Deps** `mido>=1.3` adicionado ao `requirements.txt`
 
 ### Épico 3 — Features de áudio (não depende de nada)
 
-- [ ] **3.1** Spectral Centroid — `features['centroid']`
-- [ ] **3.2** Chroma Features — `features['chroma']` (12-vec) + `dominant_pitch`
-- [ ] **3.3** Spectral Flux — `features['flux']`
-- [ ] **3.4** Onset Detection — `features['onset']: bool` via `np.searchsorted`
-- [ ] **3.5** Energia por sub-banda (sub-bass, bass, low-mid, mid, high-mid, presence, brilliance) — `features['subbands']`
+- [x] **3.1** Spectral Centroid — `features['centroid']` (normalizado por Nyquist)
+- [x] **3.2** Chroma Features — `features['chroma']` (12-vec) + `dominant_pitch`
+- [x] **3.3** Spectral Flux — `features['flux']` (positive diff sum, normalizado)
+- [x] **3.4** Onset Detection — `features['onset']: bool` via máscara por frame
+- [x] **3.5** Energia por sub-banda (sub-bass, bass, low-mid, mid, high-mid, presence, brilliance) — `features['subbands']`
+- [x] **3.t** `tests/test_features.py` — 6 testes (shapes, centroid, flux/onset, chroma, sub-band, get_features_at_time)
 - [ ] **Util** `core/cache.py` unificando file_hash de stems + rhythm (refactor oportunista)
 
 ---

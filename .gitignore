@@ -11,6 +11,7 @@ env/
 stems_output/
 render_output/
 render_temp/
+rhythm_cache/
 *.mp3
 *.wav
 *.flac
