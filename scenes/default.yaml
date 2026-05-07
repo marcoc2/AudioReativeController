@@ -30,3 +30,12 @@ controls:
 
   dominant_pitch:
     source: dominant_pitch
+
+  sub_bass:
+    source: subbands.sub_bass
+
+  bass_energy:
+    source: subbands.bass
+
+  solo_intensity:
+    source: stems.solo

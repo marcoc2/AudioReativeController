@@ -1,5 +1,6 @@
 import os
 import sys
+import colorsys
 import numpy as np
 import pygame
 from pathlib import Path
@@ -25,6 +26,18 @@ except ImportError:
     sys.exit(1)
 
 
+def _hue_color(hue: float, saturation: float = 1.0, value: float = 1.0) -> tuple:
+    r, g, b = colorsys.hsv_to_rgb(hue % 1.0, saturation, value)
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
+def _centroid_color(centroid: float, value: float = 1.0) -> tuple:
+    """Map spectral centroid (0..1) to RGB. Low=warm (red), high=cool (cyan/blue)."""
+    hue = centroid * 0.67  # red(0.0) → green(0.33) → blue(0.67)
+    r, g, b = colorsys.hsv_to_rgb(hue, 1.0, value)
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
 def _velocity_envelope(times: np.ndarray, vels: np.ndarray, t: float, decay: float = 0.3) -> float:
     """Linear-decay envelope for the most recent note at or before t."""
     if len(times) == 0:
@@ -45,6 +58,8 @@ def build_frame(
     kick_vels: np.ndarray,
     snare_times: np.ndarray,
     snare_vels: np.ndarray,
+    ride_times: np.ndarray,
+    ride_vels: np.ndarray,
     l_y_px: int,
     r_y_px: int,
     resolution: tuple,
@@ -62,11 +77,13 @@ def build_frame(
     breath     = 1.0 + 0.15 * np.cos(2 * np.pi * bar_phase)
 
     if midi_notes:
-        l_amp = _velocity_envelope(kick_times,  kick_vels,  sl.t)
-        r_amp = _velocity_envelope(snare_times, snare_vels, sl.t)
+        l_amp    = _velocity_envelope(kick_times,  kick_vels,  sl.t)
+        r_amp    = _velocity_envelope(snare_times, snare_vels, sl.t)
+        ride_amp = _velocity_envelope(ride_times,  ride_vels,  sl.t, decay=0.12)
     else:
-        l_amp = min(1.0, sl.controls.get("kick_intensity", 0))
-        r_amp = sl.controls.get("snare_intensity", 0)
+        l_amp    = min(1.0, sl.controls.get("kick_intensity", 0))
+        r_amp    = sl.controls.get("snare_intensity", 0)
+        ride_amp = sl.controls.get("centroid", 0)
 
     l_r = l_amp * breath
     r_r = r_amp * breath
@@ -74,15 +91,68 @@ def build_frame(
     lx, ly = 0.25, l_y_px / H
     rx, ry = 0.75, r_y_px / H
 
+    centroid       = sl.controls.get("centroid", 0.5)
+    flux           = sl.controls.get("flux", 0.0)
+    dominant_pitch = int(sl.controls.get("dominant_pitch", 0))
+
+    c_full = _centroid_color(centroid, value=1.0)
+    c_core = _centroid_color(centroid, value=0.55)
+    c_ring = _centroid_color(centroid, value=0.85)
+
+    # Polygon parameters driven by pitch and flux
+    n_verts  = 3 + (dominant_pitch % 6)          # 3..8 sides
+    rotation = beat_phase * 2 * np.pi / n_verts  # rotates once per beat
+    jitter   = flux * 0.4                         # jagged when spectral flux is high
+
     objects: list[VisualObject] = []
 
     if l_r > 0.01:
-        objects.append(VisualObject(id="kick",      x=lx, y=ly, radius=l_r,       color=(255,  50,  50)))
-        objects.append(VisualObject(id="kick_core", x=lx, y=ly, radius=l_r * 0.3, color=(255, 150, 150), in_trail=False))
+        objects.append(VisualObject(id="kick", x=lx, y=ly, radius=l_r, color=c_full,
+                                    shape="polygon", n_vertices=n_verts,
+                                    rotation=rotation, vertex_jitter=jitter))
+        objects.append(VisualObject(id="kick_core", x=lx, y=ly, radius=l_r * 0.3,
+                                    color=c_core, in_trail=False,
+                                    shape="polygon", n_vertices=n_verts,
+                                    rotation=rotation + np.pi / n_verts,
+                                    vertex_jitter=jitter * 0.5))
 
     if r_r > 0.01:
-        objects.append(VisualObject(id="snare",      x=rx, y=ry, radius=r_r,       color=(255, 180,  50)))
-        objects.append(VisualObject(id="snare_core", x=rx, y=ry, radius=r_r * 0.3, color=(255, 230, 200), in_trail=False))
+        objects.append(VisualObject(id="snare", x=rx, y=ry, radius=r_r, color=c_ring,
+                                    shape="polygon", n_vertices=n_verts,
+                                    rotation=-rotation, vertex_jitter=jitter))
+        objects.append(VisualObject(id="snare_core", x=rx, y=ry, radius=r_r * 0.3,
+                                    color=c_core, in_trail=False,
+                                    shape="polygon", n_vertices=n_verts,
+                                    rotation=-rotation + np.pi / n_verts,
+                                    vertex_jitter=jitter * 0.5))
+
+    # Solo mandala: 6 polygon petals orbiting the center, hue-cycling
+    solo_intensity = sl.controls.get("solo_intensity", 0.0)
+    if solo_intensity > 0.05:
+        n_petals = 6
+        orbit_r  = 0.18 + solo_intensity * 0.12   # how far from center
+        petal_r  = 0.12 + solo_intensity * 0.35   # size of each petal
+        for i in range(n_petals):
+            angle   = bar_phase * 2 * np.pi + (2 * np.pi * i / n_petals)
+            px      = 0.5 + orbit_r * np.cos(angle)
+            py      = 0.5 + orbit_r * np.sin(angle)
+            hue     = (bar_phase + i / n_petals) % 1.0
+            color   = _hue_color(hue, saturation=0.9, value=1.0)
+            rot     = angle + beat_phase * 2 * np.pi
+            objects.append(VisualObject(
+                id=f"solo_{i}", x=px, y=py, radius=petal_r,
+                color=color, alpha=int(solo_intensity * 210),
+                shape="polygon", n_vertices=n_verts,
+                rotation=rot, vertex_jitter=jitter * 1.8,
+                in_trail=True,
+            ))
+
+    # Ride: thin expanding ring at center, fast decay
+    if ride_amp > 0.02:
+        ride_r = 0.15 + ride_amp * 0.6
+        objects.append(VisualObject(id="ride", x=0.5, y=0.5, radius=ride_r,
+                                    color=c_full, filled=False, ring_width=2,
+                                    alpha=int(ride_amp * 200)))
 
     # Downbeat ring: derived from bar_phase (continuous), not a stored boolean.
     # Threshold ≈ half a frame's worth of bar, so it fires for ~1 frame.
@@ -100,7 +170,8 @@ def generate_animation_mp4(audio_path, output_mp4, start_sec=0.0, duration_sec=1
                            resolution=(1024, 1024), contrast=0.45, mode="demucs",
                            preset="none", speed=0.25, trail_count=0, scale=1.0,
                            bars=None, subdivision="quarter", time_signature=(4, 4),
-                           midi_path=None, midi_offset=0.0, scene_path=None):
+                           midi_path=None, midi_offset=0.0, scene_path=None,
+                           prebuilt_stems=None):
     audio_path = Path(audio_path)
     if not audio_path.exists():
         return
@@ -108,7 +179,8 @@ def generate_animation_mp4(audio_path, output_mp4, start_sec=0.0, duration_sec=1
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*60}\n[Animation Gen] STARTING OFFLINE RENDER\n  Input: {audio_path.name}\n{'='*60}\n")
-    extractor = AudioFeatureExtractor(str(audio_path), fps=fps, separation_mode=mode)
+    extractor = AudioFeatureExtractor(str(audio_path), fps=fps, separation_mode=mode,
+                                      prebuilt_stems=prebuilt_stems)
     extractor.contrast_level = contrast
     extractor.update_num_bands(32)
 
@@ -137,11 +209,14 @@ def generate_animation_mp4(audio_path, output_mp4, start_sec=0.0, duration_sec=1
     pipeline = ARCPipeline.from_yaml(extractor, grid, str(_scene_path))
     print(f"[Pipeline] scene={Path(_scene_path).name}  controls={list(pipeline._mappings)}")
 
-    KICK, SNARE = 36, 38
-    kick_times  = np.array([n.time     for n in midi_notes if n.pitch == KICK],  dtype=float)
-    kick_vels   = np.array([n.velocity for n in midi_notes if n.pitch == KICK],  dtype=float)
-    snare_times = np.array([n.time     for n in midi_notes if n.pitch == SNARE], dtype=float)
-    snare_vels  = np.array([n.velocity for n in midi_notes if n.pitch == SNARE], dtype=float)
+    KICK, SNARE, RIDE = 36, 38, 51
+    _empty = np.array([], dtype=float)
+    kick_times  = np.array([n.time     for n in midi_notes if n.pitch == KICK],  dtype=float) if midi_notes else _empty
+    kick_vels   = np.array([n.velocity for n in midi_notes if n.pitch == KICK],  dtype=float) if midi_notes else _empty
+    snare_times = np.array([n.time     for n in midi_notes if n.pitch == SNARE], dtype=float) if midi_notes else _empty
+    snare_vels  = np.array([n.velocity for n in midi_notes if n.pitch == SNARE], dtype=float) if midi_notes else _empty
+    ride_times  = np.array([n.time     for n in midi_notes if n.pitch == RIDE],  dtype=float) if midi_notes else _empty
+    ride_vels   = np.array([n.velocity for n in midi_notes if n.pitch == RIDE],  dtype=float) if midi_notes else _empty
 
     if bars is not None:
         duration_sec = bars * grid.bar_duration
@@ -182,10 +257,25 @@ def generate_animation_mp4(audio_path, output_mp4, start_sec=0.0, duration_sec=1
 
         frame = build_frame(
             sl, midi_notes, kick_times, kick_vels, snare_times, snare_vels,
+            ride_times, ride_vels,
             l_y_px, r_y_px, resolution, fps, pipeline.bar_duration,
         )
 
-        surface.fill((0, 0, 0))
+        bass_pulse     = (sl.controls.get("sub_bass", 0) * 0.65
+                          + sl.controls.get("bass_energy", 0) * 0.35)
+        solo_intensity = sl.controls.get("solo_intensity", 0.0)
+
+        if solo_intensity > 0.05:
+            solo_hue = (sl.bar_phase + sl.beat_phase * 0.25) % 1.0
+            sr, sg, sb = colorsys.hsv_to_rgb(solo_hue, 0.75, solo_intensity * 0.28)
+            bg_r = int(max(bass_pulse * 50, sr * 255))
+            bg_g = int(max(bass_pulse *  9, sg * 255))
+            bg_b = int(max(bass_pulse * 14, sb * 255))
+        else:
+            bg   = int(bass_pulse * 50)
+            bg_r, bg_g, bg_b = bg, int(bg * 0.18), int(bg * 0.28)
+
+        surface.fill((bg_r, bg_g, bg_b))
         render_frame(surface, frame, max_r,
                      trail_frames=list(trail_history) if trail_count > 0 else None)
 
@@ -231,6 +321,8 @@ if __name__ == "__main__":
                         help="Shift MIDI events by N seconds (positive = MIDI starts later)")
     parser.add_argument("--scene",       default=None,
                         help="Scene YAML file (default: scenes/default.yaml)")
+    parser.add_argument("--stems",       nargs="*", default=None,
+                        help="Pre-built stems: name=path [name=path ...] e.g. guitar=input/guitar.wav")
     parser.add_argument("--out",     default=None)
     parser.add_argument("--mode",    default="demucs")
     parser.add_argument("--preset",  default="none", choices=["none", "zigzag"])
@@ -249,4 +341,5 @@ if __name__ == "__main__":
         bars=args.bars, subdivision=args.subdivision,
         time_signature=(num, den), midi_path=args.midi,
         midi_offset=args.midi_offset, scene_path=args.scene,
+        prebuilt_stems=dict(s.split("=", 1) for s in args.stems) if args.stems else None,
     )

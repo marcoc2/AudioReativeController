@@ -35,7 +35,8 @@ class AudioFeatureExtractor:
     """
     Advanced feature extractor with dynamic AI separation modes.
     """
-    def __init__(self, file_path, fps=60, temporal_smoothing=0.7, frequency_smoothing=1.5, separation_mode="demucs"):
+    def __init__(self, file_path, fps=60, temporal_smoothing=0.7, frequency_smoothing=1.5, separation_mode="demucs",
+                 prebuilt_stems=None):
         self.file_path = Path(file_path)             # Absolute path to the audio file
         self.fps = fps                               # Frames per second for the output animation
         self.sample_rate = 0                         # Audio sample rate (e.g., 44100Hz)
@@ -64,6 +65,7 @@ class AudioFeatureExtractor:
         self.n_fft = 2048                            # FFT window size (frequency resolution)
         self.hop_length = 512                        # Samples between analysis windows (time resolution)
         self.stem_service = StemService() if StemService else None # Interface for AI separation service
+        self.prebuilt_stems = prebuilt_stems or {}  # {name: file_path} — skips AI when provided
 
         self.load_audio()
         self.precompute_features()
@@ -84,6 +86,8 @@ class AudioFeatureExtractor:
         if self.frequency_smoothing > 0:
             self.spectrogram = gaussian_filter1d(self.spectrogram, sigma=self.frequency_smoothing, axis=0)
         self._separate_stems()
+        if self.prebuilt_stems:
+            self._load_prebuilt_stems()
         self._calculate_percentiles()
         self._precompute_audio_features()
         self.times = librosa.frames_to_time(np.arange(self.spectrogram.shape[1]), sr=self.sample_rate, hop_length=self.hop_length)
@@ -142,6 +146,21 @@ class AudioFeatureExtractor:
                 energy = np.zeros(n_frames)
             e_max = float(energy.max())
             self.subbands[name] = energy / (e_max + 1e-6) if e_max > 0 else energy
+
+    def _load_prebuilt_stems(self):
+        """Load extra audio files into stems_energy. Called after normal separation."""
+        n_frames = self.spectrogram.shape[1]
+        for name, path in self.prebuilt_stems.items():
+            try:
+                sy, _ = librosa.load(path, sr=self.sample_rate)
+                energy = librosa.feature.rms(y=sy, hop_length=self.hop_length)[0]
+                energy = energy[:n_frames] if len(energy) >= n_frames else np.pad(energy, (0, n_frames - len(energy)))
+                e_max = float(energy.max())
+                self.stems_energy[name] = (energy / e_max) ** 1.3 if e_max > 0 else energy
+                print(f"[Stems] loaded {name} <- {Path(path).name}")
+            except Exception as e:
+                print(f"[Stems] failed to load {name} ({path}): {e}")
+                self.stems_energy[name] = np.zeros(n_frames)
 
     def _separate_stems(self):
         if not self.stem_service:
@@ -222,9 +241,9 @@ class AudioFeatureExtractor:
         idx = np.searchsorted(self.times, time_sec) - 1
         idx = max(0, min(idx, self.spectrogram.shape[1] - 1))
         stems_out = {}
-        for s_type in self.stem_types:
+        for s_type in self.stems_energy:
             energy = self.stems_energy[s_type][idx] if idx < len(self.stems_energy[s_type]) else 0
-            if apply_gate:
+            if apply_gate and s_type in self.stem_types:
                 energy = max(0, (energy - self.vocal_threshold) / (1.0 - self.vocal_threshold + 1e-6))
             stems_out[s_type] = energy
         band_energies, raw_spectrum = [], self.spectrogram[:, idx]
@@ -246,8 +265,8 @@ class AudioFeatureExtractor:
             prev_bands = self.prev_features["bands"]
             smoothed["bands"] = np.array([self.apply_gravity(band_energies[i], prev_bands[i] if i < len(prev_bands) else 0) for i in range(len(band_energies))])
             smoothed_stems, prev_stems = {}, self.prev_features["stems"]
-            for s_type in self.stem_types: smoothed_stems[s_type] = self.apply_gravity(stems_out[s_type], prev_stems.get(s_type, 0))
-            smoothed["stems"], smoothed["vocal"], smoothed["spectrum"] = smoothed_stems, smoothed_stems["vocals"], (1 - f) * raw_spectrum + f * self.prev_features["spectrum"]
+            for s_type in stems_out: smoothed_stems[s_type] = self.apply_gravity(stems_out[s_type], prev_stems.get(s_type, 0))
+            smoothed["stems"], smoothed["vocal"], smoothed["spectrum"] = smoothed_stems, smoothed_stems.get("vocals", 0.0), (1 - f) * raw_spectrum + f * self.prev_features["spectrum"]
             b_point, m_point = _bm_points(self.num_bands)
             smoothed["bass"]  = _safe_mean(smoothed["bands"][:b_point])
             smoothed["mid"]   = _safe_mean(smoothed["bands"][b_point:m_point])
