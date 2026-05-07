@@ -1,0 +1,32 @@
+# Default scene — mirrors the built-in behaviour of animation_generator.
+# Each control maps a source feature to a named value that build_frame consumes.
+#
+# source paths:
+#   flat key          → features["key"]            e.g. centroid, flux, onset
+#   subbands.<name>   → features["subbands"][name]  e.g. subbands.bass
+#   stems.<name>      → features["stems"][name]     e.g. stems.vocals
+#   bar_phase         → grid.phase(t)
+#   beat_phase        → grid.beat_phase(t)
+#
+# optional transforms (applied in order):
+#   scale: N          → value *= N
+#   range: [lo, hi]   → remap 0..1 to lo..hi
+#   clip:  [lo, hi]   → clamp result
+
+controls:
+  kick_intensity:
+    source: subbands.bass
+    scale: 1.2
+    clip: [0.0, 1.0]
+
+  snare_intensity:
+    source: stems.vocals
+
+  centroid:
+    source: centroid
+
+  flux:
+    source: flux
+
+  dominant_pitch:
+    source: dominant_pitch

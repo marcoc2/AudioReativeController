@@ -7,3 +7,4 @@ audio-separator[cpu]
 loguru
 pathlib
 mido>=1.3
+PyYAML>=6.0

@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 try:
     from core.feature_extractor import AudioFeatureExtractor
     from core.motion import create_zigzag_preset
+    from core.pipeline import ARCPipeline, FrameSlice
     from core.rhythm.analyzer import analyze
     from core.rhythm.grid import SUBDIVISIONS
     from core.rhythm.midi_reader import read_midi
@@ -38,10 +39,7 @@ def _velocity_envelope(times: np.ndarray, vels: np.ndarray, t: float, decay: flo
 
 
 def build_frame(
-    frame_idx: int,
-    time_sec: float,
-    features: dict,
-    grid,
+    sl: FrameSlice,
     midi_notes: list,
     kick_times: np.ndarray,
     kick_vels: np.ndarray,
@@ -51,24 +49,24 @@ def build_frame(
     r_y_px: int,
     resolution: tuple,
     fps: int,
+    bar_duration: float,
 ) -> Frame:
-    """Produce a Frame from current audio features and grid state.
+    """Produce a Frame from a FrameSlice and MIDI state.
 
-    All continuous quantities drive the VisualObjects produced here.
     Discrete rendering decisions (downbeat ring, etc.) are derived from
     bar_phase — no boolean flags stored on Frame.
     """
     W, H = resolution
-    bar_phase  = grid.phase(time_sec)
-    beat_phase = grid.beat_phase(time_sec)
+    bar_phase  = sl.bar_phase
+    beat_phase = sl.beat_phase
     breath     = 1.0 + 0.15 * np.cos(2 * np.pi * bar_phase)
 
     if midi_notes:
-        l_amp = _velocity_envelope(kick_times,  kick_vels,  time_sec)
-        r_amp = _velocity_envelope(snare_times, snare_vels, time_sec)
+        l_amp = _velocity_envelope(kick_times,  kick_vels,  sl.t)
+        r_amp = _velocity_envelope(snare_times, snare_vels, sl.t)
     else:
-        l_amp = min(1.0, features.get("bass",  0) * 1.2)
-        r_amp = features["stems"].get("vocals", 0)
+        l_amp = min(1.0, sl.controls.get("kick_intensity", 0))
+        r_amp = sl.controls.get("snare_intensity", 0)
 
     l_r = l_amp * breath
     r_r = r_amp * breath
@@ -88,12 +86,12 @@ def build_frame(
 
     # Downbeat ring: derived from bar_phase (continuous), not a stored boolean.
     # Threshold ≈ half a frame's worth of bar, so it fires for ~1 frame.
-    downbeat_thresh = 0.5 / fps / max(grid.bar_duration, 1e-6)
+    downbeat_thresh = 0.5 / fps / max(bar_duration, 1e-6)
     if bar_phase < downbeat_thresh or bar_phase > (1.0 - downbeat_thresh):
         objects.append(VisualObject(id="ring_left",  x=lx, y=ly, radius=1.1, color=(255, 255, 255), filled=False, ring_width=4, in_trail=False))
         objects.append(VisualObject(id="ring_right", x=rx, y=ry, radius=1.1, color=(255, 255, 255), filled=False, ring_width=4, in_trail=False))
 
-    return Frame(frame_idx=frame_idx, t=time_sec,
+    return Frame(frame_idx=sl.frame, t=sl.t,
                  bar_phase=bar_phase, beat_phase=beat_phase,
                  objects=objects)
 
@@ -102,7 +100,7 @@ def generate_animation_mp4(audio_path, output_mp4, start_sec=0.0, duration_sec=1
                            resolution=(1024, 1024), contrast=0.45, mode="demucs",
                            preset="none", speed=0.25, trail_count=0, scale=1.0,
                            bars=None, subdivision="quarter", time_signature=(4, 4),
-                           midi_path=None):
+                           midi_path=None, midi_offset=0.0, scene_path=None):
     audio_path = Path(audio_path)
     if not audio_path.exists():
         return
@@ -117,7 +115,16 @@ def generate_animation_mp4(audio_path, output_mp4, start_sec=0.0, duration_sec=1
     midi_notes = []
     if midi_path:
         grid, midi_notes = read_midi(midi_path, time_signature=time_signature, fps=fps)
-        print(f"[Rhythm/MIDI] {Path(midi_path).name}  notes={len(midi_notes)}")
+        if midi_offset != 0.0:
+            for n in midi_notes:
+                n.time += midi_offset
+            if grid.beats is not None:
+                grid.beats = grid.beats + midi_offset
+            if grid.downbeats is not None:
+                grid.downbeats = grid.downbeats + midi_offset
+            grid.start_offset += midi_offset
+        print(f"[Rhythm/MIDI] {Path(midi_path).name}  notes={len(midi_notes)}"
+              + (f"  offset={midi_offset:+.3f}s" if midi_offset != 0.0 else ""))
     else:
         grid = analyze(extractor.y, sr=extractor.sample_rate,
                        time_signature=time_signature, fps=fps)
@@ -125,6 +132,10 @@ def generate_animation_mp4(audio_path, output_mp4, start_sec=0.0, duration_sec=1
     print(f"[Rhythm] BPM={grid.bpm:.1f}  bar={grid.bar_duration:.2f}s  "
           f"subdivision={subdivision} ({subdiv_step:.3f}s)  "
           f"beats={len(grid.beats) if grid.beats is not None else 0}")
+
+    _scene_path = scene_path or (Path(__file__).parent / "scenes" / "default.yaml")
+    pipeline = ARCPipeline.from_yaml(extractor, grid, str(_scene_path))
+    print(f"[Pipeline] scene={Path(_scene_path).name}  controls={list(pipeline._mappings)}")
 
     KICK, SNARE = 36, 38
     kick_times  = np.array([n.time     for n in midi_notes if n.pitch == KICK],  dtype=float)
@@ -165,14 +176,13 @@ def generate_animation_mp4(audio_path, output_mp4, start_sec=0.0, duration_sec=1
         l_y_px = m_left.update(1.0 / fps)  if m_left  else center_y
         r_y_px = m_right.update(1.0 / fps) if m_right else center_y
 
-        features = extractor.get_features_at_time(time_sec, apply_gate=False)
-        if not features:
+        sl = pipeline.query(time_sec, frame_idx)
+        if sl is None:
             break
 
         frame = build_frame(
-            frame_idx, time_sec, features, grid,
-            midi_notes, kick_times, kick_vels, snare_times, snare_vels,
-            l_y_px, r_y_px, resolution, fps,
+            sl, midi_notes, kick_times, kick_vels, snare_times, snare_vels,
+            l_y_px, r_y_px, resolution, fps, pipeline.bar_duration,
         )
 
         surface.fill((0, 0, 0))
@@ -189,9 +199,13 @@ def generate_animation_mp4(audio_path, output_mp4, start_sec=0.0, duration_sec=1
 
     pygame.quit()
     subprocess.run(
-        ["ffmpeg", "-y", "-framerate", str(fps),
+        ["ffmpeg", "-y",
+         "-framerate", str(fps),
          "-i", str(temp_dir / "%04d.png"),
+         "-ss", str(start_sec), "-i", str(audio_path),
          "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+         "-c:a", "aac", "-b:a", "192k",
+         "-shortest",
          str(output_mp4)],
         capture_output=True,
     )
@@ -211,8 +225,12 @@ if __name__ == "__main__":
                         help="Minimum grid resolution for rhythm-aware primitives")
     parser.add_argument("--time-sig", default="4/4",
                         help="Time signature, e.g. 4/4, 3/4, 6/8")
-    parser.add_argument("--midi",    default=None,
+    parser.add_argument("--midi",        default=None,
                         help="MIDI file: overrides audio-based beat tracking")
+    parser.add_argument("--midi-offset", type=float, default=0.0,
+                        help="Shift MIDI events by N seconds (positive = MIDI starts later)")
+    parser.add_argument("--scene",       default=None,
+                        help="Scene YAML file (default: scenes/default.yaml)")
     parser.add_argument("--out",     default=None)
     parser.add_argument("--mode",    default="demucs")
     parser.add_argument("--preset",  default="none", choices=["none", "zigzag"])
@@ -230,4 +248,5 @@ if __name__ == "__main__":
         trail_count=args.trail, scale=args.scale,
         bars=args.bars, subdivision=args.subdivision,
         time_signature=(num, den), midi_path=args.midi,
+        midi_offset=args.midi_offset, scene_path=args.scene,
     )
