@@ -19,6 +19,7 @@ try:
     from core.pipeline import ARCPipeline, FrameSlice
     from core.rhythm.analyzer import analyze
     from core.rhythm.grid import SUBDIVISIONS
+    from core.rhythm.midi_automation import MidiAutomationReader
     from core.rhythm.midi_reader import read_midi
     from core.visual import Frame, VisualObject, render_frame
 except ImportError:
@@ -185,8 +186,10 @@ def generate_animation_mp4(audio_path, output_mp4, start_sec=0.0, duration_sec=1
     extractor.update_num_bands(32)
 
     midi_notes = []
+    midi_automation = None
     if midi_path:
         grid, midi_notes = read_midi(midi_path, time_signature=time_signature, fps=fps)
+        midi_automation = MidiAutomationReader(midi_path, fps=fps)
         if midi_offset != 0.0:
             for n in midi_notes:
                 n.time += midi_offset
@@ -195,8 +198,12 @@ def generate_animation_mp4(audio_path, output_mp4, start_sec=0.0, duration_sec=1
             if grid.downbeats is not None:
                 grid.downbeats = grid.downbeats + midi_offset
             grid.start_offset += midi_offset
+        lanes = midi_automation.available_lanes
         print(f"[Rhythm/MIDI] {Path(midi_path).name}  notes={len(midi_notes)}"
               + (f"  offset={midi_offset:+.3f}s" if midi_offset != 0.0 else ""))
+        if lanes:
+            print(f"[MIDI Automation] {len(lanes)} lanes: {', '.join(lanes[:8])}"
+                  + (" …" if len(lanes) > 8 else ""))
     else:
         grid = analyze(extractor.y, sr=extractor.sample_rate,
                        time_signature=time_signature, fps=fps)
@@ -206,7 +213,8 @@ def generate_animation_mp4(audio_path, output_mp4, start_sec=0.0, duration_sec=1
           f"beats={len(grid.beats) if grid.beats is not None else 0}")
 
     _scene_path = scene_path or (Path(__file__).parent / "scenes" / "default.yaml")
-    pipeline = ARCPipeline.from_yaml(extractor, grid, str(_scene_path))
+    pipeline = ARCPipeline.from_yaml(extractor, grid, str(_scene_path),
+                                     midi_automation=midi_automation)
     print(f"[Pipeline] scene={Path(_scene_path).name}  controls={list(pipeline._mappings)}")
 
     KICK, SNARE, RIDE = 36, 38, 51

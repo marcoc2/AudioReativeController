@@ -36,7 +36,7 @@ class AudioFeatureExtractor:
     Advanced feature extractor with dynamic AI separation modes.
     """
     def __init__(self, file_path, fps=60, temporal_smoothing=0.7, frequency_smoothing=1.5, separation_mode="demucs",
-                 prebuilt_stems=None):
+                 prebuilt_stems=None, skip_separation=False):
         self.file_path = Path(file_path)             # Absolute path to the audio file
         self.fps = fps                               # Frames per second for the output animation
         self.sample_rate = 0                         # Audio sample rate (e.g., 44100Hz)
@@ -64,8 +64,8 @@ class AudioFeatureExtractor:
         self.prev_features = None                    # Cache of previous frame for smoothing logic
         self.n_fft = 2048                            # FFT window size (frequency resolution)
         self.hop_length = 512                        # Samples between analysis windows (time resolution)
-        self.stem_service = StemService() if StemService else None # Interface for AI separation service
-        self.prebuilt_stems = prebuilt_stems or {}  # {name: file_path} — skips AI when provided
+        self.stem_service = StemService() if (StemService and not skip_separation) else None
+        self.prebuilt_stems = prebuilt_stems or {}  # {name: file_path} — loaded additively after AI
 
         self.load_audio()
         self.precompute_features()
