@@ -1,0 +1,8 @@
+# Música 1 — cada compasso ganha um clipe; todo bumbo inverte a direção do playback.
+video:
+  clip_per_bar: true
+  clip_order: sequential   # ou "random" (usa seed)
+  triggers:
+    kick:
+      notes: [36]
+      actions: [reverse]

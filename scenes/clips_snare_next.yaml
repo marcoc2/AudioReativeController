@@ -1,0 +1,7 @@
+# Música 2 — o clipe só troca quando a caixa toca.
+video:
+  clip_per_bar: false
+  triggers:
+    snare:
+      notes: [38, 40]
+      actions: [next_clip]
