@@ -30,12 +30,25 @@ def main() -> None:
     ap.add_argument("--clips",       required=True,  help="Folder of pre-rendered video clips")
     ap.add_argument("--midi",        default=None,   help="MIDI file for rhythm grid + drum triggers")
     ap.add_argument("--scene",       default="scenes/clips_kick_reverse.yaml")
-    ap.add_argument("--bars",        type=int,   default=8)
+    ap.add_argument("--bars",        type=int,   default=8,
+                    help="Bars to render; 0 = whole song (until audio ends)")
+    ap.add_argument("--cache-size",  type=int,   default=4,
+                    help="Decoded clips kept in RAM (raise for long renders that cycle many clips)")
     ap.add_argument("--start-time",  type=float, default=0.0, help="Start time in seconds (default: first downbeat)")
     ap.add_argument("--fps",         type=int,   default=24)
     ap.add_argument("--resolution",  default="854x480", help="WxH pixels")
     ap.add_argument("--output",      default=None,   help="Output MP4 path")
     ap.add_argument("--midi-offset", type=float, default=0.0)
+    ap.add_argument("--gravity-peak",   type=float, default=None,
+                    help="Override gravity peak speed for all triggers in the scene")
+    ap.add_argument("--gravity-floor",  type=float, default=None,
+                    help="Override gravity floor speed")
+    ap.add_argument("--gravity-radius", type=float, default=None,
+                    help="Override gravity influence radius (seconds)")
+    ap.add_argument("--gravity-curve",  type=float, default=None,
+                    help="Override gravity falloff curve exponent")
+    ap.add_argument("--clip-order", choices=["sequential", "random", "shuffle"],
+                    default=None, help="Override the scene's clip selection order")
     args = ap.parse_args()
 
     W, H = (int(x) for x in args.resolution.split("x"))
@@ -61,8 +74,21 @@ def main() -> None:
         scene = yaml.safe_load(f) or {}
     video_cfg = scene.get("video", {})
 
+    if args.clip_order:
+        video_cfg["clip_order"] = args.clip_order
+        print(f"clip order override: {args.clip_order}")
+
+    overrides = {"peak": args.gravity_peak, "floor": args.gravity_floor,
+                 "radius": args.gravity_radius, "curve": args.gravity_curve}
+    overrides = {k: v for k, v in overrides.items() if v is not None}
+    if overrides:
+        for name, spec in video_cfg.get("triggers", {}).items():
+            if "gravity" in spec:
+                spec["gravity"].update(overrides)
+                print(f"gravity override on {name!r}: {spec['gravity']}")
+
     print(f"Loading clips from {args.clips}")
-    library = ClipLibrary(args.clips, W, H, fps)
+    library = ClipLibrary(args.clips, W, H, fps, cache_size=args.cache_size)
     composer = ClipComposer(library, grid, midi_notes, video_cfg)
 
     start_sec = float(grid.start_offset) if grid.start_offset else 0.0
@@ -70,7 +96,16 @@ def main() -> None:
         start_sec = args.start_time
     composer.seek(start_sec)
 
-    total_dur = args.bars * grid.bar_duration
+    if args.bars > 0:
+        total_dur = args.bars * grid.bar_duration
+    else:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(args.file)],
+            capture_output=True, text=True, check=True,
+        )
+        total_dur = float(probe.stdout.strip()) - start_sec
+        print(f"Full-song mode: rendering {total_dur:.1f}s of audio")
     n_frames  = int(total_dur * fps)
     triggers  = list(video_cfg.get("triggers", {}).keys())
 

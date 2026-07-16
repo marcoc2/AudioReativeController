@@ -1,0 +1,20 @@
+# Enxame — bumbo (MIDI) troca o clipe até a caixa entrar; a partir da primeira
+# batida de caixa (detectada por onset no stem de áudio), só ela comanda a troca.
+# Grid de compassos vem do MIDI (--midi enxame_drum_no_snare.mid);
+# o áudio do mp4 vem do mix (--file mix_enxame_ep_15_07_2026.mp3).
+video:
+  clip_per_bar: false
+  clip_order: shuffle
+  triggers:
+    kick:
+      notes: [36]
+      actions: [next_clip]
+      until: snare
+    snare:
+      audio: 'C:\Audio\recordings\projeto2024\ep\stems\enxame\enxame_ep_15_07_2026-005_snare.mp3'
+      threshold: 0.3   # sensibilidade dos onsets (maior = menos hits)
+      min_gap: 0.08    # espaçamento mínimo entre hits, em segundos
+      exclude:         # o mic da caixa tem bleed do bumbo — descarta onsets
+        trigger: kick  # que caem em cima dos kicks do MIDI
+        window: 0.04
+      actions: [next_clip]
