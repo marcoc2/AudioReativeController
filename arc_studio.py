@@ -46,6 +46,7 @@ class _State:
     grid            = None
     pipeline        = None
     midi_automation = None
+    midi_notes: list = []    # MidiNote list from read_midi (clips mode triggers)
     player          = None   # AudioPlayer
 
     # stems panel: list of {"name": str, "path": str}
@@ -73,6 +74,17 @@ class _State:
     height: int = 480
     mode:   str = "particles"
 
+    # clips mode settings
+    clips_dir: Optional[str] = None
+    clip_order: str  = "(scene)"   # "(scene)" = keep the YAML's clip_order
+    full_song:  bool = False       # render --bars 0
+    cache_size: int  = 8
+    grav_enable: bool  = False     # override the scene's gravity blocks
+    grav_peak:   float = 3.0
+    grav_floor:  float = 0.3
+    grav_radius: float = 0.45
+    grav_curve:  float = 2.0
+
     # internal flag: stop scrubber → seek feedback loop
     _syncing: bool = False
 
@@ -92,6 +104,15 @@ def _surface_to_dpg(surf: pygame.Surface) -> np.ndarray:
 
 def _blank_frame() -> np.ndarray:
     return np.full(PREV_W * PREV_H * 4, 0.08, dtype=np.float32)
+
+
+def _np_to_dpg(arr: np.ndarray) -> np.ndarray:
+    """(H, W, 3) uint8 RGB -> flat float32 RGBA for a dpg raw texture."""
+    rgb = arr.astype(np.float32) / 255.0
+    H, W = rgb.shape[:2]
+    rgba = np.ones((H, W, 4), dtype=np.float32)
+    rgba[:, :, :3] = rgb
+    return rgba.flatten()
 
 
 def _set_status(msg: str):
@@ -292,6 +313,19 @@ def _project_dict() -> dict:
             "resolution": f"{S.width}x{S.height}",
             "mode":       S.mode,
         },
+        "clips": {
+            "dir":        S.clips_dir or "",
+            "order":      S.clip_order,
+            "full_song":  S.full_song,
+            "cache_size": S.cache_size,
+            "gravity": {
+                "enabled": S.grav_enable,
+                "peak":    S.grav_peak,
+                "floor":   S.grav_floor,
+                "radius":  S.grav_radius,
+                "curve":   S.grav_curve,
+            },
+        },
     }
 
 
@@ -331,6 +365,18 @@ def _apply_project(data: dict):
     for name, path in (data.get("stems") or {}).items():
         _add_stem_row(name, path)
 
+    clips = data.get("clips", {})
+    S.clips_dir  = clips.get("dir") or None
+    S.clip_order = clips.get("order", S.clip_order)
+    S.full_song  = bool(clips.get("full_song", S.full_song))
+    S.cache_size = int(clips.get("cache_size", S.cache_size))
+    grav = clips.get("gravity", {})
+    S.grav_enable = bool(grav.get("enabled", S.grav_enable))
+    S.grav_peak   = float(grav.get("peak",   S.grav_peak))
+    S.grav_floor  = float(grav.get("floor",  S.grav_floor))
+    S.grav_radius = float(grav.get("radius", S.grav_radius))
+    S.grav_curve  = float(grav.get("curve",  S.grav_curve))
+
     # Update widgets
     dpg.set_value("audio_label",  Path(S.audio_path).name  if S.audio_path  else "(none)")
     dpg.set_value("midi_label",   Path(S.midi_path).name   if S.midi_path   else "(none)")
@@ -338,6 +384,14 @@ def _apply_project(data: dict):
     dpg.configure_item("skip_sep_check", default_value=S.skip_separation)
     dpg.set_value("mode_combo", S.mode)
     dpg.set_value("res_combo",  f"{S.width}x{S.height}")
+    dpg.set_value("clips_label", Path(S.clips_dir).name if S.clips_dir else "(none)")
+    dpg.set_value("clip_order_combo", S.clip_order)
+    dpg.set_value("full_song_check", S.full_song)
+    dpg.set_value("cache_input", S.cache_size)
+    dpg.set_value("grav_check", S.grav_enable)
+    for attr in ("grav_peak", "grav_floor", "grav_radius", "grav_curve"):
+        dpg.set_value(attr, getattr(S, attr))
+    dpg.configure_item("clips_group", show=(S.mode == "clips"))
 
     _set_status(f"Project loaded from file — click Load Project to extract features.")
 
@@ -389,7 +443,7 @@ def _do_load():
 
         if S.midi_path:
             _set_status("Reading MIDI…")
-            S.grid, _ = read_midi(S.midi_path, fps=S.fps)
+            S.grid, S.midi_notes = read_midi(S.midi_path, fps=S.fps)
             S.midi_automation = MidiAutomationReader(S.midi_path, fps=S.fps)
             lanes = S.midi_automation.available_lanes
             if lanes:
@@ -398,6 +452,7 @@ def _do_load():
             _set_status("Analysing rhythm…")
             S.grid = analyze(S.extractor.y, sr=S.extractor.sample_rate, fps=S.fps)
             S.midi_automation = None
+            S.midi_notes = []
 
         _set_status("Building pipeline…")
         S.pipeline = ARCPipeline.from_yaml(
@@ -501,6 +556,41 @@ def on_timeline_click(sender, app_data):
 # Preview render
 # ---------------------------------------------------------------------------
 
+def _clip_preview_frames(start_t: float, n_frames: int) -> list:
+    """Render preview frames with the real ClipComposer (clips mode)."""
+    import yaml
+    from core.video.clip_library import ClipLibrary
+    from core.video.composer import ClipComposer
+
+    if not S.clips_dir:
+        raise RuntimeError("Clips mode: select a clips folder first.")
+
+    with open(S.scene_path, encoding="utf-8") as f:
+        scene = yaml.safe_load(f) or {}
+    video_cfg = dict(scene.get("video", {}))
+    if S.clip_order != "(scene)":
+        video_cfg["clip_order"] = S.clip_order
+    if S.grav_enable:
+        for spec in video_cfg.get("triggers", {}).values():
+            if "gravity" in spec:
+                spec["gravity"].update({
+                    "peak": S.grav_peak, "floor": S.grav_floor,
+                    "radius": S.grav_radius, "curve": S.grav_curve,
+                })
+
+    _log(f"Clips preview: loading library from {S.clips_dir}")
+    lib  = ClipLibrary(S.clips_dir, PREV_W, PREV_H, S.fps, cache_size=4)
+    comp = ClipComposer(lib, S.grid, S.midi_notes, video_cfg)
+    comp.seek(start_t)
+
+    frames = []
+    for fi in range(n_frames):
+        arr = comp.frame_at(start_t + fi / S.fps)
+        frames.append(_np_to_dpg(arr))
+        _set_status(f"Rendering preview… {int((fi+1)/n_frames*100)}%")
+    return frames
+
+
 def _do_preview():
     import traceback
     from core.particles import ParticleSystem
@@ -532,23 +622,26 @@ def _do_preview():
         _log(f"Preview: {n_frames} frames @ {S.fps}fps  start={start_t:.2f}s "
              f"(scrubber={scrub_t:.2f}s)")
 
-        for fi in range(n_frames):
-            t  = start_t + fi * dt
-            sl = S.pipeline.query(t, frame_idx=fi)
-            if sl is None:
-                _log(f"  pipeline returned None at fi={fi}")
-                break
-            c = sl.controls
-            parts.step(dt=dt,
-                       bass=float(c.get("bass_energy", 0)),
-                       flux=float(c.get("flux", 0)),
-                       beat_phase=sl.beat_phase,
-                       kick=float(c.get("kick_intensity", 0)),
-                       solo=float(c.get("solo_intensity", 0)))
-            bass_bg = float(c.get("sub_bass", 0)) * 0.65 + float(c.get("bass_energy", 0)) * 0.35
-            parts.render(surf, float(c.get("centroid", 0.5)), sl.bar_phase, bass_bg)
-            frames.append(_surface_to_dpg(surf))
-            _set_status(f"Rendering preview… {int((fi+1)/n_frames*100)}%")
+        if S.mode == "clips":
+            frames = _clip_preview_frames(start_t, n_frames)
+        else:
+            for fi in range(n_frames):
+                t  = start_t + fi * dt
+                sl = S.pipeline.query(t, frame_idx=fi)
+                if sl is None:
+                    _log(f"  pipeline returned None at fi={fi}")
+                    break
+                c = sl.controls
+                parts.step(dt=dt,
+                           bass=float(c.get("bass_energy", 0)),
+                           flux=float(c.get("flux", 0)),
+                           beat_phase=sl.beat_phase,
+                           kick=float(c.get("kick_intensity", 0)),
+                           solo=float(c.get("solo_intensity", 0)))
+                bass_bg = float(c.get("sub_bass", 0)) * 0.65 + float(c.get("bass_energy", 0)) * 0.35
+                parts.render(surf, float(c.get("centroid", 0.5)), sl.bar_phase, bass_bg)
+                frames.append(_surface_to_dpg(surf))
+                _set_status(f"Rendering preview… {int((fi+1)/n_frames*100)}%")
 
         if not frames:
             _set_status("Preview FAILED — no frames generated.")
@@ -588,18 +681,48 @@ def btn_stop_preview():
 # Full render
 # ---------------------------------------------------------------------------
 
-def btn_render_full():
-    if not S.loaded or S.rendering:
-        return
-    script = "particle_generator.py" if S.mode == "particles" else "animation_generator.py"
-    cmd = [sys.executable, script,
-           "--file",  S.audio_path,
-           "--bars",  str(S.bars),
-           "--fps",   str(S.fps),
-           "--resolution", f"{S.width}x{S.height}",
-           "--scene", S.scene_path]
+def _build_render_cmd() -> list:
+    """Full-render command line for the currently selected mode."""
+    if S.mode == "clips":
+        cmd = [sys.executable, "clip_generator.py",
+               "--file",  S.audio_path,
+               "--clips", S.clips_dir,
+               "--bars",  "0" if S.full_song else str(S.bars),
+               "--cache-size", str(S.cache_size),
+               "--fps",   str(S.fps),
+               "--resolution", f"{S.width}x{S.height}",
+               "--scene", S.scene_path]
+        if S.clip_order != "(scene)":
+            cmd += ["--clip-order", S.clip_order]
+        if S.grav_enable:
+            cmd += ["--gravity-peak",   str(S.grav_peak),
+                    "--gravity-floor",  str(S.grav_floor),
+                    "--gravity-radius", str(S.grav_radius),
+                    "--gravity-curve",  str(S.grav_curve)]
+    else:
+        script = "particle_generator.py" if S.mode == "particles" else "animation_generator.py"
+        cmd = [sys.executable, script,
+               "--file",  S.audio_path,
+               "--bars",  str(S.bars),
+               "--fps",   str(S.fps),
+               "--resolution", f"{S.width}x{S.height}",
+               "--scene", S.scene_path]
     if S.midi_path:
         cmd += ["--midi", S.midi_path]
+    return cmd
+
+
+def btn_render_full():
+    if S.rendering:
+        return
+    if S.mode == "clips":
+        # clips mode reads MIDI + clips itself; no feature extraction needed
+        if not (S.audio_path and S.clips_dir):
+            _set_status("Clips mode: select an audio file and a clips folder first.")
+            return
+    elif not S.loaded:
+        return
+    cmd = _build_render_cmd()
     _log("$ " + " ".join(Path(c).name if c.endswith(".py") else c for c in cmd))
     _set_status("Rendering (see log)…")
 
@@ -648,6 +771,17 @@ def _pick_scene(s, a):
         S.scene_path = p
         dpg.set_value("scene_label", Path(p).name)
 
+def _pick_clips_dir(s, a):
+    p = a.get("file_path_name", "")
+    if p:
+        S.clips_dir = p
+        dpg.set_value("clips_label", Path(p).name or p)
+
+def _on_mode_change(s, v):
+    S.mode = v
+    if dpg.does_item_exist("clips_group"):
+        dpg.configure_item("clips_group", show=(v == "clips"))
+
 # ---------------------------------------------------------------------------
 # Build UI
 # ---------------------------------------------------------------------------
@@ -684,6 +818,10 @@ def _build_ui():
                          width=620, height=420):
         dpg.add_file_extension(".wav"); dpg.add_file_extension(".mp3")
         dpg.add_file_extension(".flac"); dpg.add_file_extension(".*")
+
+    dpg.add_file_dialog(show=False, directory_selector=True,
+                        callback=_pick_clips_dir, tag="dlg_clips",
+                        width=620, height=420)
 
     with dpg.item_handler_registry(tag="timeline_handler"):
         dpg.add_item_clicked_handler(callback=on_timeline_click)
@@ -783,10 +921,10 @@ def _build_ui():
                 dpg.add_text("RENDER", color=(160, 160, 160))
                 with dpg.group(horizontal=True):
                     dpg.add_text("Mode:")
-                    dpg.add_combo(["particles", "geometry"],
+                    dpg.add_combo(["particles", "geometry", "clips"],
                                   default_value=S.mode, tag="mode_combo",
                                   width=110,
-                                  callback=lambda s, v: setattr(S, "mode", v))
+                                  callback=_on_mode_change)
                     dpg.add_text("Bars:")
                     dpg.add_input_int(default_value=S.bars, width=60,
                                       callback=lambda s, v: setattr(S, "bars", v))
@@ -795,13 +933,43 @@ def _build_ui():
                                       callback=lambda s, v: setattr(S, "fps", v))
                 with dpg.group(horizontal=True):
                     dpg.add_text("Resolution:")
-                    dpg.add_combo(["854x480", "1280x720", "1920x1080"],
+                    dpg.add_combo(["854x480", "1280x720", "1920x1080",
+                                   "480x480", "720x720", "1080x1080"],
                                   default_value=f"{S.width}x{S.height}",
                                   tag="res_combo", width=120,
                                   callback=lambda s, v: (
                                       setattr(S, "width",  int(v.split("x")[0])),
                                       setattr(S, "height", int(v.split("x")[1])),
                                   ))
+                with dpg.group(tag="clips_group", show=(S.mode == "clips")):
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label="Clips Folder", width=95,
+                                       callback=lambda: dpg.show_item("dlg_clips"))
+                        dpg.add_text("(none)", tag="clips_label")
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("Order:")
+                        dpg.add_combo(["(scene)", "sequential", "random", "shuffle"],
+                                      default_value=S.clip_order,
+                                      tag="clip_order_combo", width=100,
+                                      callback=lambda s, v: setattr(S, "clip_order", v))
+                        dpg.add_checkbox(label="Full song", tag="full_song_check",
+                                         default_value=S.full_song,
+                                         callback=lambda s, v: setattr(S, "full_song", v))
+                        dpg.add_text("Cache:")
+                        dpg.add_input_int(default_value=S.cache_size, width=70,
+                                          tag="cache_input",
+                                          callback=lambda s, v: setattr(S, "cache_size", v))
+                    with dpg.group(horizontal=True):
+                        dpg.add_checkbox(label="Gravity", tag="grav_check",
+                                         default_value=S.grav_enable,
+                                         callback=lambda s, v: setattr(S, "grav_enable", v))
+                        for attr, label in (("grav_peak", "peak"), ("grav_floor", "floor"),
+                                            ("grav_radius", "radius"), ("grav_curve", "curve")):
+                            dpg.add_text(label)
+                            dpg.add_input_float(default_value=getattr(S, attr), width=52,
+                                                tag=attr, step=0, format="%.2f",
+                                                callback=lambda s, v, u: setattr(S, u, v),
+                                                user_data=attr)
                 dpg.add_button(label="Render Full",
                                callback=btn_render_full, width=120)
 
