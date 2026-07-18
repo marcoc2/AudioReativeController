@@ -49,6 +49,8 @@ def main() -> None:
                     help="Override gravity falloff curve exponent")
     ap.add_argument("--clip-order", choices=["sequential", "random", "shuffle"],
                     default=None, help="Override the scene's clip selection order")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Override the scene's shuffle/random seed (reproducible order)")
     args = ap.parse_args()
 
     W, H = (int(x) for x in args.resolution.split("x"))
@@ -77,6 +79,9 @@ def main() -> None:
     if args.clip_order:
         video_cfg["clip_order"] = args.clip_order
         print(f"clip order override: {args.clip_order}")
+    if args.seed is not None:
+        video_cfg["seed"] = args.seed
+        print(f"seed override: {args.seed}")
 
     overrides = {"peak": args.gravity_peak, "floor": args.gravity_floor,
                  "radius": args.gravity_radius, "curve": args.gravity_curve}

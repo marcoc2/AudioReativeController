@@ -230,6 +230,33 @@ def test_composer_speed_is_one_without_gravity():
 
 
 # ---------------------------------------------------------------------------
+# dry-run resolver
+
+def test_resolver_segments_and_speed():
+    from core.video.resolver import resolve_song
+    grid = RhythmGrid(bpm=60.0, time_signature=(4, 4), fps=4)   # bar = 4s
+    lib = StubLibrary([StubClip(8), StubClip(8)])
+    cfg = {"clip_per_bar": True, "clip_order": "sequential",
+           "triggers": {"kick": {"notes": [36], "actions": ["reverse"],
+                                 "gravity": {"peak": 4.0, "floor": 1.0,
+                                             "radius": 0.5, "curve": 1.0}}}}
+    segs, times, speeds = resolve_song(lib, grid, [kick(1.25)], cfg,
+                                       fps=4, start=0.0, end=8.0)
+    assert segs[0].clip_idx == 0 and segs[0].direction == 1
+    rev = [s for s in segs if s.direction == -1]
+    assert rev and abs(rev[0].t0 - 1.25) < 1e-6          # reverse at the kick
+    assert any(s.clip_idx == 1 for s in segs)            # bar switch to clip 1
+    assert len(times) == 32
+    # gravity: peak speed at the kick, floor far away
+    import numpy as np
+    assert speeds[np.argmin(np.abs(times - 1.25))] == pytest.approx(4.0)
+    assert speeds[-1] == pytest.approx(1.0)
+    # segments tile the range without gaps
+    for a, b in zip(segs, segs[1:]):
+        assert a.t1 == pytest.approx(b.t0)
+
+
+# ---------------------------------------------------------------------------
 # shuffle bag clip order
 
 def shuffle_selections(comp, n_bars, bar_dur=4.0):

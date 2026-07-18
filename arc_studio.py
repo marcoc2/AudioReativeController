@@ -33,6 +33,14 @@ EVENT_COLORS = [
     (100, 210, 255),   # 4th — blue
 ]
 
+# render mode -> generator script (clips mode is handled separately)
+_MODE_SCRIPTS = {
+    "particles":    "particle_generator.py",
+    "particles_v2": "particle_generator_new.py",
+    "particles_v3": "particle_generator_v3.py",
+    "geometry":     "animation_generator.py",
+}
+
 TRACK_COLORS = [
     (100, 210, 255),   # mix — blue
     (100, 255, 150),   # bass / custom stem 1 — green
@@ -78,6 +86,13 @@ class _State:
     trigger_events:  list = []   # ClipComposer TriggerEvent list
     handover_points: list = []   # (trigger, until_trigger, time) from `until:`
 
+    # scene trigger editor (authors the scene YAML's video: section)
+    trig_rows: list = []
+    _trig_counter: int = 0
+    scene_clip_per_bar: bool = True
+    scene_clip_order: str = "shuffle"
+    _scene_extra_video: dict = {}   # video-level keys the editor doesn't manage
+
     # preview playback
     preview_frames:   list  = []
     preview_idx:      int   = 0
@@ -104,6 +119,12 @@ class _State:
     grav_floor:  float = 0.3
     grav_radius: float = 0.45
     grav_curve:  float = 2.0
+    clips_seed: Optional[int] = None   # persisted; makes lane == preview == render
+
+    # resolved output arrangement (dry-run of the composer; no decoding)
+    resolved_segments: list = []
+    resolved_times = None    # np arrays: speed curve samples
+    resolved_speeds = None
 
     # UI/audio sync calibration: added to the displayed time while playing.
     # Positive values push the UI forward (use when the audio sounds ahead).
@@ -193,11 +214,26 @@ def _fill_table(tag: str, rows: list):
 # Timeline drawing
 # ---------------------------------------------------------------------------
 
+OUT_H, SPEED_H = 30, 26   # output-arrangement and speed-curve lane heights
+
+
 def _timeline_height() -> int:
     h = BAR_H + max(1, len(S._wave_sources)) * TRACK_H
     if S.trigger_events:
         h += EVENT_H
+    if S.resolved_segments:
+        h += OUT_H + SPEED_H
     return h
+
+
+def _clip_color(idx: int) -> tuple:
+    """Stable, distinct color per clip index (golden-ratio hue walk)."""
+    h = (idx * 0.61803) % 1.0
+    i = int(h * 6); f = h * 6 - i
+    v, s = 0.82, 0.55
+    p, q, t = v * (1 - s), v * (1 - s * f), v * (1 - s * (1 - f))
+    r, g, b = [(v, t, p), (q, v, p), (p, v, t), (p, q, v), (t, p, v), (v, p, q)][i % 6]
+    return int(r * 255), int(g * 255), int(b * 255)
 
 
 def _full_duration() -> float:
@@ -328,6 +364,52 @@ def _draw_timeline_static():
             dpg.draw_text([x + 5, BAR_H + 2], f"{until} assume", size=12,
                           color=(255, 230, 80, 255), parent="timeline_canvas")
 
+    # Output lane: resolved clip blocks + direction, then the speed curve
+    if S.resolved_segments:
+        y0 = BAR_H + len(S._wave_sources) * TRACK_H + (EVENT_H if S.trigger_events else 0)
+        for seg in S.resolved_segments:
+            if seg.t1 < v0 or seg.t0 > v1:
+                continue
+            xa, xb = max(0, _t_to_x(seg.t0, v0, vd)), min(TIMELINE_W, _t_to_x(seg.t1, v0, vd))
+            if xb - xa < 1:
+                continue
+            r, g, b = _clip_color(seg.clip_idx)
+            if seg.direction < 0:
+                r, g, b = int(r * 0.55), int(g * 0.55), int(b * 0.55)
+            dpg.draw_rectangle([xa, y0 + 1], [xb, y0 + OUT_H - 1],
+                               fill=(r, g, b, 235), color=(13, 15, 20, 255),
+                               parent="timeline_canvas")
+            arrow = "◀" if seg.direction < 0 else "▶"
+            if xb - xa > 14:
+                dpg.draw_text([xa + 2, y0 + OUT_H - 14], arrow, size=10,
+                              color=(13, 15, 20, 230), parent="timeline_canvas")
+            max_chars = int((xb - xa - 16) / 6)
+            if max_chars >= 4:
+                dpg.draw_text([xa + 13, y0 + 3], seg.clip_name[:max_chars], size=10,
+                              color=(13, 15, 20, 255), parent="timeline_canvas")
+        dpg.draw_text([4, y0 + OUT_H - 12], "SAIDA", size=10,
+                      color=(255, 255, 255, 130), parent="timeline_canvas")
+
+        # speed curve (gravity made visible)
+        ys = y0 + OUT_H
+        if S.resolved_times is not None and len(S.resolved_times):
+            mask = (S.resolved_times >= v0) & (S.resolved_times <= v1)
+            ts, vs = S.resolved_times[mask], S.resolved_speeds[mask]
+            if len(ts) > 1:
+                vmax = max(2.0, float(vs.max()))
+                step = max(1, len(ts) // TIMELINE_W)
+                pts = [[_t_to_x(float(ts[i]), v0, vd),
+                        ys + SPEED_H - 3 - (float(vs[i]) / vmax) * (SPEED_H - 6)]
+                       for i in range(0, len(ts), step)]
+                y1x = ys + SPEED_H - 3 - (1.0 / vmax) * (SPEED_H - 6)
+                dpg.draw_line([0, y1x], [TIMELINE_W, y1x],
+                              color=(70, 76, 95, 160), thickness=1,
+                              parent="timeline_canvas")
+                dpg.draw_polyline(pts, color=(255, 180, 84, 235), thickness=1,
+                                  parent="timeline_canvas")
+                dpg.draw_text([4, ys + 1], f"speed (max {vmax:.1f}x)", size=10,
+                              color=(255, 180, 84, 160), parent="timeline_canvas")
+
     # Playhead (created last so it renders on top; tag allows configure later)
     dpg.draw_line([0, 0], [0, H],
                   color=(255, 80, 80, 255), thickness=2,
@@ -405,6 +487,231 @@ def _clear_stem_rows():
 
 
 # ---------------------------------------------------------------------------
+# Scene trigger editor (UI <-> scene YAML "video:" section)
+# ---------------------------------------------------------------------------
+
+_TRIG_KNOWN_KEYS = {"notes", "audio", "actions", "until", "min_velocity",
+                    "gravity", "threshold", "min_gap"}
+
+
+def _video_cfg_to_rows(video_cfg: dict) -> list:
+    """Scene video config -> editor row dicts (unknown keys preserved)."""
+    rows = []
+    for name, spec in (video_cfg.get("triggers") or {}).items():
+        g = spec.get("gravity") or {}
+        rows.append({
+            "name": name,
+            "source": "audio" if "audio" in spec else "notes",
+            "notes": ",".join(str(n) for n in spec.get("notes", [])),
+            "audio": spec.get("audio", ""),
+            "threshold": float(spec.get("threshold", 0.3)),
+            "min_gap": float(spec.get("min_gap", 0.05)),
+            "actions": ",".join(spec.get("actions", [])),
+            "until": spec.get("until", "") or "",
+            "min_vel": int(spec.get("min_velocity", 0)),
+            "grav_on": bool(g),
+            "peak": float(g.get("peak", 3.0)),
+            "floor": float(g.get("floor", 0.3)),
+            "radius": float(g.get("radius", 0.45)),
+            "curve": float(g.get("curve", 2.0)),
+            "_extra": {k: v for k, v in spec.items() if k not in _TRIG_KNOWN_KEYS},
+        })
+    return rows
+
+
+def _rows_to_video_cfg(rows: list, clip_per_bar: bool, clip_order: str,
+                       extra: Optional[dict] = None) -> dict:
+    """Editor row dicts -> scene video config (round-trip safe)."""
+    video = dict(extra or {})
+    video["clip_per_bar"] = bool(clip_per_bar)
+    video["clip_order"]   = clip_order
+    triggers = {}
+    for r in rows:
+        name = (r.get("name") or "").strip()
+        if not name:
+            continue
+        spec = dict(r.get("_extra") or {})
+        if r.get("source") == "audio" and r.get("audio"):
+            spec["audio"]     = r["audio"]
+            spec["threshold"] = float(r.get("threshold", 0.3))
+            spec["min_gap"]   = float(r.get("min_gap", 0.05))
+        else:
+            spec["notes"] = [
+                int(x) for x in str(r.get("notes", "")).replace(";", ",").split(",")
+                if x.strip().lstrip("-").isdigit()
+            ]
+        spec["actions"] = [a.strip() for a in str(r.get("actions", "")).split(",")
+                           if a.strip()]
+        if str(r.get("until", "")).strip():
+            spec["until"] = str(r["until"]).strip()
+        if int(r.get("min_vel", 0)) > 0:
+            spec["min_velocity"] = int(r["min_vel"])
+        if r.get("grav_on"):
+            spec["gravity"] = {"peak": float(r["peak"]), "floor": float(r["floor"]),
+                               "radius": float(r["radius"]), "curve": float(r["curve"])}
+        triggers[name] = spec
+    video["triggers"] = triggers
+    return video
+
+
+# canonical display/apply order; engine actions not listed here are appended
+_ACTION_ORDER = ["next_clip", "random_clip", "restart", "reverse"]
+
+
+def _action_options() -> list:
+    from core.video.composer import ACTIONS
+    return _ACTION_ORDER + sorted(a for a in ACTIONS if a not in _ACTION_ORDER)
+
+
+def _toggle_action(row: dict, action: str, on: bool) -> None:
+    """Checkbox callback: rebuild the row's actions string in canonical order."""
+    acts = {a.strip() for a in str(row.get("actions", "")).split(",") if a.strip()}
+    if on:
+        acts.add(action)
+    else:
+        acts.discard(action)
+    row["actions"] = ",".join(a for a in _action_options() if a in acts)
+
+
+_trig_audio_target: dict = {}
+
+
+def _pick_trig_audio(s, a):
+    p = _first_selection(a)
+    row = _trig_audio_target.get("row")
+    if p and row is not None:
+        row["audio"] = p
+        rid = row.get("_rid")
+        if rid is not None and dpg.does_item_exist(f"trig_audio_label_{rid}"):
+            dpg.set_value(f"trig_audio_label_{rid}", Path(p).name)
+
+
+def _add_trigger_row(cfg: Optional[dict] = None) -> None:
+    rid = S._trig_counter
+    S._trig_counter += 1
+    tag = f"trig_row_{rid}"
+    row = {"name": f"trig{rid}", "source": "notes", "notes": "36", "audio": "",
+           "threshold": 0.3, "min_gap": 0.05, "actions": "next_clip", "until": "",
+           "min_vel": 0, "grav_on": False, "peak": 3.0, "floor": 0.3,
+           "radius": 0.45, "curve": 2.0, "_extra": {}}
+    if cfg:
+        row.update(cfg)
+    row["_rid"] = rid
+    row["_tag"] = tag
+    S.trig_rows.append(row)
+
+    def _set(key):
+        return lambda s, v, u=row: u.update({key: v})
+
+    with dpg.group(tag=tag, parent="triggers_panel"):
+        with dpg.group(horizontal=True):
+            dpg.add_input_text(default_value=row["name"], width=70,
+                               callback=_set("name"))
+            dpg.add_combo(["notes", "audio"], default_value=row["source"], width=70,
+                          callback=_set("source"))
+            dpg.add_text("notes:")
+            dpg.add_input_text(default_value=row["notes"], width=70,
+                               callback=_set("notes"))
+            dpg.add_button(label="Audio…", width=60,
+                           callback=lambda s, a, u=row: (
+                               _trig_audio_target.update({"row": u}),
+                               dpg.show_item("dlg_trig_audio")))
+            dpg.add_text(Path(row["audio"]).name if row["audio"] else "(none)",
+                         tag=f"trig_audio_label_{rid}")
+            dpg.add_button(label="x", width=24,
+                           callback=lambda s, a, u=(tag, row): _remove_trigger_row(*u))
+        active = {a.strip() for a in str(row["actions"]).split(",") if a.strip()}
+        with dpg.group(horizontal=True):
+            dpg.add_text("   actions:")
+            for act in _action_options():
+                dpg.add_checkbox(label=act, default_value=act in active,
+                                 callback=lambda s, v, u=(row, act):
+                                     _toggle_action(u[0], u[1], v))
+            dpg.add_text("until:")
+            dpg.add_input_text(default_value=row["until"], width=60,
+                               callback=_set("until"))
+            dpg.add_text("min_vel:")
+            dpg.add_input_int(default_value=row["min_vel"], width=70,
+                              callback=_set("min_vel"))
+        with dpg.group(horizontal=True):
+            dpg.add_text("   ")
+            dpg.add_checkbox(label="gravity", default_value=row["grav_on"],
+                             callback=_set("grav_on"))
+            for key, lbl in (("peak", "peak"), ("floor", "floor"),
+                             ("radius", "radius"), ("curve", "curve")):
+                dpg.add_text(lbl)
+                dpg.add_input_float(default_value=row[key], width=52, step=0,
+                                    format="%.2f", callback=_set(key))
+        dpg.add_spacer(height=3)
+
+
+def _remove_trigger_row(tag, row):
+    if row in S.trig_rows:
+        S.trig_rows.remove(row)
+    if dpg.does_item_exist(tag):
+        dpg.delete_item(tag)
+
+
+def _clear_trigger_rows():
+    for row in list(S.trig_rows):
+        t = row.get("_tag", "")
+        if t and dpg.does_item_exist(t):
+            dpg.delete_item(t)
+    S.trig_rows.clear()
+
+
+def btn_scene_to_editor():
+    import yaml
+    try:
+        with open(S.scene_path, encoding="utf-8") as f:
+            scene = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        scene = {}
+    video = scene.get("video", {}) or {}
+    S.scene_clip_per_bar = bool(video.get("clip_per_bar", True))
+    S.scene_clip_order   = video.get("clip_order", "shuffle")
+    S._scene_extra_video = {k: v for k, v in video.items()
+                            if k not in ("clip_per_bar", "clip_order", "triggers")}
+    dpg.set_value("scene_cpb_check", S.scene_clip_per_bar)
+    dpg.set_value("scene_order_combo", S.scene_clip_order)
+    _clear_trigger_rows()
+    for cfg in _video_cfg_to_rows(video):
+        _add_trigger_row(cfg)
+    if dpg.does_item_exist("scene_editor_label"):
+        n = len(S.trig_rows)
+        dpg.set_value("scene_editor_label",
+                      f"editando: {Path(S.scene_path).name} — "
+                      f"{n} trigger(s) ativos" if n else
+                      f"editando: {Path(S.scene_path).name} — sem triggers (adicione)")
+    _log(f"Editor <- {Path(S.scene_path).name}: {len(S.trig_rows)} trigger(s)")
+
+
+def btn_editor_to_scene():
+    import yaml
+    video = _rows_to_video_cfg(S.trig_rows, S.scene_clip_per_bar,
+                               S.scene_clip_order, S._scene_extra_video)
+    try:
+        with open(S.scene_path, encoding="utf-8") as f:
+            scene = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        scene = {}
+    scene["video"] = video
+    with open(S.scene_path, "w", encoding="utf-8") as f:
+        yaml.dump(scene, f, allow_unicode=True, sort_keys=False)
+    _log(f"Scene salva -> {S.scene_path} ({len(video['triggers'])} triggers)")
+    _set_status(f"Scene salva: {Path(S.scene_path).name}")
+    if dpg.does_item_exist("scene_editor_label"):
+        dpg.set_value("scene_editor_label",
+                      f"editando: {Path(S.scene_path).name} — "
+                      f"{len(video['triggers'])} trigger(s) salvos ✓")
+    if S.loaded:
+        # refresh the timeline TRIGGERS + output lanes with the new scene
+        _load_trigger_events()
+        _resolve_output_lane()
+        _draw_timeline_static()
+
+
+# ---------------------------------------------------------------------------
 # Project save / load
 # ---------------------------------------------------------------------------
 
@@ -426,6 +733,7 @@ def _project_dict() -> dict:
         "clips": {
             "dir":        S.clips_dir or "",
             "order":      S.clip_order,
+            "seed":       S.clips_seed,
             "full_song":  S.full_song,
             "cache_size": S.cache_size,
             "gravity": {
@@ -479,6 +787,10 @@ def _apply_project(data: dict):
     clips = data.get("clips", {})
     S.clips_dir  = clips.get("dir") or None
     S.clip_order = clips.get("order", S.clip_order)
+    S.clips_seed = clips.get("seed")
+    if S.clips_seed is None:
+        import random as _random
+        S.clips_seed = _random.randint(1, 2**31 - 1)   # saved on Save Project
     S.full_song  = bool(clips.get("full_song", S.full_song))
     S.cache_size = int(clips.get("cache_size", S.cache_size))
     grav = clips.get("gravity", {})
@@ -504,6 +816,9 @@ def _apply_project(data: dict):
         dpg.set_value(attr, getattr(S, attr))
     dpg.set_value("sync_input", S.sync_offset_ms)
     dpg.configure_item("clips_group", show=(S.mode == "clips"))
+    if dpg.does_item_exist("mode_script_label"):
+        dpg.set_value("mode_script_label", f"→ {_mode_script(S.mode)}")
+    btn_scene_to_editor()   # editor always mirrors the project's scene
 
     _set_status(f"Project loaded from file — click Load Project to extract features.")
 
@@ -619,6 +934,7 @@ def _do_load():
         )
 
         _load_trigger_events()
+        _resolve_output_lane()
 
         # Waveform sources (envelopes are computed per zoom window at draw time)
         _set_status("Computing waveforms…")
@@ -695,6 +1011,58 @@ def btn_stop():
     _set_status("Stopped.")
 
 
+_pan_state = {"last": 0.0, "draw": 0.0}
+
+
+def on_timeline_wheel(sender, delta):
+    """Mouse wheel over the timeline: zoom keeping the time under the cursor."""
+    if not S.loaded or not dpg.is_item_hovered("timeline_canvas"):
+        return
+    v0, vd = _view_window()
+    dur = _full_duration()
+    mx, _ = dpg.get_mouse_pos(local=False)
+    rx, _ = dpg.get_item_rect_min("timeline_canvas")
+    frac = min(1.0, max(0.0, (mx - rx) / TIMELINE_W))
+    t_mouse = v0 + frac * vd
+    nvd = vd * (0.8 if delta > 0 else 1.25)
+    if nvd >= dur:
+        btn_zoom_full()
+        return
+    nvd = max(1.0, nvd)
+    S.view_dur   = nvd
+    S.view_start = max(0.0, min(t_mouse - frac * nvd, dur - nvd))
+    _draw_timeline_static()
+    _update_playhead(dpg.get_value("scrubber") or 0.0)
+
+
+def on_timeline_pan(sender, app_data):
+    """Middle-button drag over the timeline: pan the zoom window."""
+    if not S.loaded or S.view_dur is None:
+        return
+    if not dpg.is_item_hovered("timeline_canvas"):
+        return
+    dx = float(app_data[1])          # cumulative drag delta
+    inc = dx - _pan_state["last"]
+    _pan_state["last"] = dx
+    if inc == 0.0:
+        return
+    v0, vd = _view_window()
+    dur = _full_duration()
+    S.view_start = max(0.0, min(v0 - inc / TIMELINE_W * vd, dur - vd))
+    now = time.time()
+    if now - _pan_state["draw"] >= 0.03:   # ~30 Hz redraw cap while dragging
+        _draw_timeline_static()
+        _update_playhead(dpg.get_value("scrubber") or 0.0)
+        _pan_state["draw"] = now
+
+
+def on_timeline_pan_end(sender, app_data):
+    _pan_state["last"] = 0.0
+    if S.loaded and S.view_dur is not None:
+        _draw_timeline_static()
+        _update_playhead(dpg.get_value("scrubber") or 0.0)
+
+
 def _center_view(center: float, vd: float):
     dur = _full_duration()
     if dur <= 0:
@@ -759,15 +1127,13 @@ def on_timeline_click(sender, app_data):
 # Preview render
 # ---------------------------------------------------------------------------
 
-def _clip_preview_frames(start_t: float, n_frames: int) -> list:
-    """Render preview frames with the real ClipComposer (clips mode)."""
+def _effective_video_cfg() -> dict:
+    """Scene video config + GUI overrides (order, gravity, seed).
+
+    Single source of truth so the output lane, the preview and the full
+    render all resolve the exact same arrangement.
+    """
     import yaml
-    from core.video.clip_library import ClipLibrary
-    from core.video.composer import ClipComposer
-
-    if not S.clips_dir:
-        raise RuntimeError("Clips mode: select a clips folder first.")
-
     with open(S.scene_path, encoding="utf-8") as f:
         scene = yaml.safe_load(f) or {}
     video_cfg = dict(scene.get("video", {}))
@@ -776,11 +1142,47 @@ def _clip_preview_frames(start_t: float, n_frames: int) -> list:
     if S.grav_enable:
         for spec in video_cfg.get("triggers", {}).values():
             if "gravity" in spec:
+                spec["gravity"] = dict(spec["gravity"])
                 spec["gravity"].update({
                     "peak": S.grav_peak, "floor": S.grav_floor,
                     "radius": S.grav_radius, "curve": S.grav_curve,
                 })
+    if "seed" not in video_cfg and S.clips_seed is not None:
+        video_cfg["seed"] = S.clips_seed
+    return video_cfg
 
+
+def _resolve_output_lane():
+    """Dry-run the composer over the whole song -> output lane data."""
+    from core.video.resolver import MetaLibrary, resolve_song
+
+    S.resolved_segments = []
+    S.resolved_times = S.resolved_speeds = None
+    if S.mode != "clips" or not S.clips_dir or S.grid is None:
+        return
+    try:
+        _set_status("Resolving output arrangement (dry-run)…")
+        lib = MetaLibrary(S.clips_dir, S.fps)
+        start = float(S.grid.start_offset or 0.0)
+        end = _full_duration() or (start + 60.0)
+        segs, times, speeds = resolve_song(
+            lib, S.grid, S.midi_notes, _effective_video_cfg(), S.fps, start, end)
+        S.resolved_segments = segs
+        S.resolved_times, S.resolved_speeds = times, speeds
+        _log(f"Output lane: {len(segs)} segmentos, seed={S.clips_seed}")
+    except Exception as exc:
+        _log(f"Output lane indisponivel: {exc}")
+
+
+def _clip_preview_frames(start_t: float, n_frames: int) -> list:
+    """Render preview frames with the real ClipComposer (clips mode)."""
+    from core.video.clip_library import ClipLibrary
+    from core.video.composer import ClipComposer
+
+    if not S.clips_dir:
+        raise RuntimeError("Clips mode: select a clips folder first.")
+
+    video_cfg = _effective_video_cfg()
     _log(f"Clips preview: loading library from {S.clips_dir}")
     lib  = ClipLibrary(S.clips_dir, PREV_W, PREV_H, S.fps, cache_size=4)
     comp = ClipComposer(lib, S.grid, S.midi_notes, video_cfg)
@@ -908,13 +1310,15 @@ def _build_render_cmd() -> list:
                "--scene", S.scene_path]
         if S.clip_order != "(scene)":
             cmd += ["--clip-order", S.clip_order]
+        if S.clips_seed is not None:
+            cmd += ["--seed", str(S.clips_seed)]
         if S.grav_enable:
             cmd += ["--gravity-peak",   str(S.grav_peak),
                     "--gravity-floor",  str(S.grav_floor),
                     "--gravity-radius", str(S.grav_radius),
                     "--gravity-curve",  str(S.grav_curve)]
     else:
-        script = "particle_generator.py" if S.mode == "particles" else "animation_generator.py"
+        script = _MODE_SCRIPTS.get(S.mode, "particle_generator.py")
         cmd = [sys.executable, script,
                "--file",  S.audio_path,
                "--bars",  str(S.bars),
@@ -984,6 +1388,7 @@ def _pick_scene(s, a):
     if p:
         S.scene_path = p
         dpg.set_value("scene_label", Path(p).name)
+        btn_scene_to_editor()   # editor always mirrors the active scene
 
 def _pick_clips_dir(s, a):
     p = a.get("file_path_name", "")
@@ -991,10 +1396,16 @@ def _pick_clips_dir(s, a):
         S.clips_dir = p
         dpg.set_value("clips_label", Path(p).name or p)
 
+def _mode_script(mode: str) -> str:
+    return "clip_generator.py" if mode == "clips" else _MODE_SCRIPTS.get(mode, "?")
+
+
 def _on_mode_change(s, v):
     S.mode = v
     if dpg.does_item_exist("clips_group"):
         dpg.configure_item("clips_group", show=(v == "clips"))
+    if dpg.does_item_exist("mode_script_label"):
+        dpg.set_value("mode_script_label", f"→ {_mode_script(v)}")
 
 # ---------------------------------------------------------------------------
 # Build UI
@@ -1037,8 +1448,20 @@ def _build_ui():
                         callback=_pick_clips_dir, tag="dlg_clips",
                         width=620, height=420)
 
+    with dpg.file_dialog(show=False, callback=_pick_trig_audio, tag="dlg_trig_audio",
+                         width=620, height=420):
+        dpg.add_file_extension(".wav"); dpg.add_file_extension(".mp3")
+        dpg.add_file_extension(".flac"); dpg.add_file_extension(".*")
+
     with dpg.item_handler_registry(tag="timeline_handler"):
         dpg.add_item_clicked_handler(callback=on_timeline_click)
+
+    with dpg.handler_registry():
+        dpg.add_mouse_wheel_handler(callback=on_timeline_wheel)
+        dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Middle,
+                                   threshold=1, callback=on_timeline_pan)
+        dpg.add_mouse_release_handler(button=dpg.mvMouseButton_Middle,
+                                      callback=on_timeline_pan_end)
 
     # -------------------------------------------------------------------
     with dpg.window(label="ARC Studio", tag="main_win",
@@ -1138,13 +1561,16 @@ def _build_ui():
                     dpg.add_button(label="Stop",
                                    callback=btn_stop_preview, width=50)
                 dpg.add_separator()
-                dpg.add_text("RENDER", color=(160, 160, 160))
+                dpg.add_text("RENDER / SYNTH", color=(160, 160, 160))
                 with dpg.group(horizontal=True):
                     dpg.add_text("Mode:")
-                    dpg.add_combo(["particles", "geometry", "clips"],
+                    dpg.add_combo(["particles", "particles_v2", "particles_v3",
+                                   "geometry", "clips"],
                                   default_value=S.mode, tag="mode_combo",
-                                  width=110,
+                                  width=130,
                                   callback=_on_mode_change)
+                    dpg.add_text(f"→ {_mode_script(S.mode)}",
+                                 tag="mode_script_label", color=(140, 170, 140))
                     dpg.add_text("Bars:")
                     dpg.add_input_int(default_value=S.bars, width=60,
                                       callback=lambda s, v: setattr(S, "bars", v))
@@ -1192,6 +1618,31 @@ def _build_ui():
                                                 user_data=attr)
                 dpg.add_button(label="Render Full",
                                callback=btn_render_full, width=120)
+
+        dpg.add_separator()
+
+        # ── Scene trigger editor ────────────────────────────────────────
+        with dpg.collapsing_header(label="SCENE — CLIP TRIGGERS (editor)",
+                                   default_open=True):
+            dpg.add_text("(nenhuma cena carregada)", tag="scene_editor_label",
+                         color=(160, 200, 160))
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Reload Scene", width=110,
+                               callback=btn_scene_to_editor)
+                dpg.add_button(label="Save Scene", width=100,
+                               callback=btn_editor_to_scene)
+                dpg.add_button(label="+ Add Trigger", width=100,
+                               callback=lambda: _add_trigger_row())
+                dpg.add_checkbox(label="clip per bar", tag="scene_cpb_check",
+                                 default_value=S.scene_clip_per_bar,
+                                 callback=lambda s, v: setattr(S, "scene_clip_per_bar", v))
+                dpg.add_text("order:")
+                dpg.add_combo(["sequential", "random", "shuffle"], width=100,
+                              tag="scene_order_combo",
+                              default_value=S.scene_clip_order,
+                              callback=lambda s, v: setattr(S, "scene_clip_order", v))
+            with dpg.group(tag="triggers_panel"):
+                pass
 
         dpg.add_separator()
 
@@ -1255,6 +1706,14 @@ def main():
 
     # Build an initial project dict from CLI args (if any provided)
     initial_project = None
+    if not args.project and not any([args.audio, args.midi, args.scene,
+                                     args.stems, args.skip_separation]):
+        # DEV default (temporário): sem argumentos, abre o projeto enxame.
+        # Remover quando o fluxo de desenvolvimento estabilizar.
+        dev_default = Path(__file__).parent / "projects" / "enxame.yaml"
+        if dev_default.exists():
+            args.project = str(dev_default)
+            print(f"[dev] projeto padrao: {dev_default}")
     if args.project:
         import yaml
         with open(args.project, encoding="utf-8") as f:
