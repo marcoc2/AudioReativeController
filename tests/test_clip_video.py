@@ -229,6 +229,24 @@ def test_composer_speed_is_one_without_gravity():
     assert comp.speed_at(1.0) == 1.0
 
 
+def test_override_pins_clip_for_bar():
+    cfg = {"clip_per_bar": True, "clip_order": "sequential",
+           "overrides": {1: 2},   # bar 1 pinned to clip index 2
+           "triggers": {"snare": {"notes": [38], "actions": ["next_clip"]}}}
+    comp = make_composer([snare(5.0)], cfg, n_clips=4)
+    comp.frame_at(0.0)
+    assert comp.transport.clip_idx == 0        # bar 0: rule
+    comp.frame_at(4.0)
+    assert comp.transport.clip_idx == 2        # bar 1: pin wins
+    p = comp.transport.pos
+    comp.frame_at(4.25)                        # pin must not restart the clip
+    assert comp.transport.clip_idx == 2 and comp.transport.pos > p
+    comp.frame_at(5.0)                         # snare next_clip inside pinned bar
+    assert comp.transport.clip_idx == 2        # ...pin still wins
+    comp.frame_at(8.0)
+    assert comp.transport.clip_idx != 2 or comp.transport.pos == 0.0  # bar 2: rule again
+
+
 # ---------------------------------------------------------------------------
 # dry-run resolver
 

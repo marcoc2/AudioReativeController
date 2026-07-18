@@ -132,6 +132,10 @@ class ClipComposer:
         self.frame_ops: List[Callable] = []
         self._onset_loader = onset_loader or _default_onset_loader
 
+        # manual pins: {bar_index: clip name (path stem) or clip index}
+        self.overrides = {int(k): v for k, v in (cfg.get("overrides") or {}).items()}
+        self._name_to_idx = None
+
         triggers = cfg.get("triggers", {})
         hits = self._collect_hits(notes, triggers)
         self.events = self._build_events(hits, triggers)
@@ -278,6 +282,25 @@ class ClipComposer:
             self.transport.next_clip()
         self._first_selection = False
 
+    def _resolve_clip_ref(self, ref) -> Optional[int]:
+        if isinstance(ref, int):
+            return ref % len(self.library)
+        if self._name_to_idx is None:
+            paths = getattr(self.library, "paths", None)
+            self._name_to_idx = (
+                {p.stem: i for i, p in enumerate(paths)} if paths else {})
+        return self._name_to_idx.get(str(ref))
+
+    def _apply_override(self) -> None:
+        """A pinned bar wins over any rule/action, without restarting the
+        clip on every frame (only switches when needed)."""
+        ref = self.overrides.get(self._last_bar)
+        if ref is None:
+            return
+        idx = self._resolve_clip_ref(ref)
+        if idx is not None and idx != self.transport.clip_idx:
+            self.transport.set_clip(idx)
+
     def _apply_action(self, action: str) -> None:
         if action == "random_clip":
             n = len(self.library)
@@ -305,6 +328,8 @@ class ClipComposer:
             for action in self.events[self._ev_ptr].actions:
                 self._apply_action(action)
             self._ev_ptr += 1
+
+        self._apply_override()
 
         clip = self.library.get(self.transport.clip_idx)
         frame = clip.frame(self.transport.frame_index)

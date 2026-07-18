@@ -120,6 +120,9 @@ class _State:
     grav_radius: float = 0.45
     grav_curve:  float = 2.0
     clips_seed: Optional[int] = None   # persisted; makes lane == preview == render
+    clip_overrides: dict = {}          # {bar_index: clip name} — manual pins
+    _deck_thumbs: list = []
+    _deck_ready: bool = False
 
     # resolved output arrangement (dry-run of the composer; no decoding)
     resolved_segments: list = []
@@ -387,6 +390,16 @@ def _draw_timeline_static():
             if max_chars >= 4:
                 dpg.draw_text([xa + 13, y0 + 3], seg.clip_name[:max_chars], size=10,
                               color=(13, 15, 20, 255), parent="timeline_canvas")
+        # pinned bars: amber outline
+        for seg in S.resolved_segments:
+            if seg.t1 < v0 or seg.t0 > v1:
+                continue
+            if _bar_at(seg.t0 + 1e-3) in S.clip_overrides:
+                xa = max(0, _t_to_x(seg.t0, v0, vd))
+                xb = min(TIMELINE_W, _t_to_x(seg.t1, v0, vd))
+                dpg.draw_rectangle([xa, y0 + 1], [xb, y0 + OUT_H - 1],
+                                   color=(255, 180, 84, 255), thickness=2,
+                                   parent="timeline_canvas")
         dpg.draw_text([4, y0 + OUT_H - 12], "SAIDA", size=10,
                       color=(255, 255, 255, 130), parent="timeline_canvas")
 
@@ -734,6 +747,7 @@ def _project_dict() -> dict:
             "dir":        S.clips_dir or "",
             "order":      S.clip_order,
             "seed":       S.clips_seed,
+            "overrides":  {int(k): v for k, v in S.clip_overrides.items()},
             "full_song":  S.full_song,
             "cache_size": S.cache_size,
             "gravity": {
@@ -787,6 +801,7 @@ def _apply_project(data: dict):
     clips = data.get("clips", {})
     S.clips_dir  = clips.get("dir") or None
     S.clip_order = clips.get("order", S.clip_order)
+    S.clip_overrides = {int(k): v for k, v in (clips.get("overrides") or {}).items()}
     S.clips_seed = clips.get("seed")
     if S.clips_seed is None:
         import random as _random
@@ -1149,7 +1164,98 @@ def _effective_video_cfg() -> dict:
                 })
     if "seed" not in video_cfg and S.clips_seed is not None:
         video_cfg["seed"] = S.clips_seed
+    if S.clip_overrides:
+        merged = dict(video_cfg.get("overrides") or {})
+        merged.update(S.clip_overrides)
+        video_cfg["overrides"] = merged
     return video_cfg
+
+
+def _bar_at(t: float) -> int:
+    db = S.grid.downbeats if S.grid is not None else None
+    if db is None or not len(db):
+        return 0
+    return max(0, int(np.searchsorted(db, t, side="right")) - 1)
+
+
+# ---------------------------------------------------------------------------
+# Clip deck (thumbnails + drag-to-pin)
+# ---------------------------------------------------------------------------
+
+def _build_deck():
+    """Extract cached thumbnails and populate the deck grid (worker thread)."""
+    import subprocess as sp
+    if not S.clips_dir:
+        _set_status("Clips mode: selecione a pasta de clipes antes.")
+        return
+    folder = Path(S.clips_dir)
+    tdir = folder / ".arc_thumbs"
+    tdir.mkdir(exist_ok=True)
+    from core.video.clip_library import VIDEO_EXTS
+    paths = sorted(p for p in folder.iterdir() if p.suffix.lower() in VIDEO_EXTS)
+    _set_status(f"Deck: gerando thumbnails ({len(paths)} clipes)…")
+    thumbs = []
+    for p in paths:
+        out = tdir / (p.stem + ".png")
+        if not out.exists():
+            sp.run(["ffmpeg", "-y", "-v", "error", "-ss", "1", "-i", str(p),
+                    "-frames:v", "1", "-vf", "scale=72:72", str(out)],
+                   capture_output=True)
+        if out.exists():
+            thumbs.append((p.stem, out))
+    S._deck_thumbs = thumbs
+    _set_status(f"Deck pronto: {len(thumbs)} clipes. (arraste um thumb até a timeline)")
+
+
+def _populate_deck_ui():
+    if not getattr(S, "_deck_thumbs", None):
+        return
+    dpg.delete_item("deck_panel", children_only=True)
+    row = None
+    for i, (name, png) in enumerate(S._deck_thumbs):
+        if i % 12 == 0:
+            row = dpg.add_group(horizontal=True, parent="deck_panel")
+        try:
+            w, h, _, data = dpg.load_image(str(png))
+            tex = dpg.add_static_texture(w, h, data, parent="deck_textures")
+            btn = dpg.add_image_button(tex, width=64, height=64, parent=row,
+                                       user_data=name)
+            with dpg.drag_payload(parent=btn, drag_data=name, payload_type="CLIP"):
+                dpg.add_text(f"pin: {name}")
+            with dpg.tooltip(btn):
+                dpg.add_text(name)
+        except Exception:
+            pass
+
+
+def btn_build_deck():
+    def _run():
+        _build_deck()
+        S._deck_ready = True   # main loop populates UI (textures need main thread)
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def on_timeline_drop(sender, app_data):
+    """Drop a deck thumbnail on the timeline: pin that bar to the clip."""
+    if not S.loaded:
+        return
+    v0, vd = _view_window()
+    mx, _ = dpg.get_mouse_pos(local=False)
+    rx, _ = dpg.get_item_rect_min("pin_strip")
+    t = v0 + min(1.0, max(0.0, (mx - rx) / TIMELINE_W)) * vd
+    bar = _bar_at(t)
+    S.clip_overrides[bar] = str(app_data)
+    _log(f"Pin: compasso {bar + 1} -> {app_data}")
+    _resolve_output_lane()
+    _draw_timeline_static()
+
+
+def btn_clear_pins():
+    S.clip_overrides = {}
+    _log("Pins removidos.")
+    if S.loaded:
+        _resolve_output_lane()
+        _draw_timeline_static()
 
 
 def _resolve_output_lane():
@@ -1418,6 +1524,7 @@ def _build_ui():
         dpg.add_raw_texture(PREV_W, PREV_H, _blank_frame(),
                             tag="preview_tex",
                             format=dpg.mvFormat_Float_rgba)
+    dpg.add_texture_registry(tag="deck_textures")
 
     with dpg.file_dialog(show=False, callback=_pick_audio, tag="dlg_audio",
                          width=620, height=420):
@@ -1644,6 +1751,16 @@ def _build_ui():
             with dpg.group(tag="triggers_panel"):
                 pass
 
+        # ── Clip deck ───────────────────────────────────────────────────
+        with dpg.collapsing_header(label="CLIP DECK — thumbnails + pin (arraste até a timeline)"):
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Build Deck", width=100, callback=btn_build_deck)
+                dpg.add_button(label="Clear Pins", width=100, callback=btn_clear_pins)
+                dpg.add_text("arraste um thumbnail até um compasso da timeline para pinar",
+                             color=(120, 120, 140))
+            with dpg.child_window(tag="deck_panel", height=160, border=True):
+                pass
+
         dpg.add_separator()
 
         # ── Timeline / DAW view ─────────────────────────────────────────
@@ -1662,6 +1779,11 @@ def _build_ui():
             dpg.add_button(label="Zoom -", callback=btn_zoom_out,  width=60)
             dpg.add_button(label="Full",   callback=btn_zoom_full, width=45)
 
+        dpg.add_button(
+            label="▼ solte aqui o thumbnail para pinar o compasso sob o cursor ▼",
+            tag="pin_strip", width=TIMELINE_W, height=18,
+            drop_callback=on_timeline_drop, payload_type="CLIP",
+        )
         dpg.add_drawlist(
             tag="timeline_canvas",
             width=TIMELINE_W,
@@ -1744,6 +1866,11 @@ def main():
     dpg.set_primary_window("main_win", True)
 
     while dpg.is_dearpygui_running():
+        # Deck thumbnails ready -> load textures (must run on main thread)
+        if S._deck_ready:
+            S._deck_ready = False
+            _populate_deck_ui()
+
         # Preview playback — runs entirely on main thread (OpenGL texture update)
         if S.preview_playing and S.preview_frames:
             if S._preview_audio and S.player and S.player.playing:
