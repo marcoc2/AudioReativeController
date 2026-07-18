@@ -22,6 +22,7 @@ from core.rhythm.grid import RhythmGrid
 from core.rhythm.midi_reader import read_midi
 from core.video.clip_library import ClipLibrary
 from core.video.composer import ClipComposer
+from core.video.layers import build_compositor
 
 
 def main() -> None:
@@ -95,6 +96,9 @@ def main() -> None:
     print(f"Loading clips from {args.clips}")
     library = ClipLibrary(args.clips, W, H, fps, cache_size=args.cache_size)
     composer = ClipComposer(library, grid, midi_notes, video_cfg)
+    stack = build_compositor(composer, video_cfg, midi_notes, W, H)
+    if len(stack) > 1:
+        print(f"layers: {len(stack)} (compositing enabled)")
 
     start_sec = float(grid.start_offset) if grid.start_offset else 0.0
     if args.start_time > 0.0:
@@ -143,7 +147,7 @@ def main() -> None:
     try:
         for fi in range(n_frames):
             t = start_sec + fi / fps
-            frame = composer.frame_at(t)
+            frame = stack.frame_at(t)
             enc.stdin.write(frame.tobytes())
             if fi % fps == 0:
                 tp = composer.transport

@@ -1,0 +1,131 @@
+"""Layer compositor — stack visual sources with blend modes.
+
+A composition is a bottom-up list of layers. The base layer supplies the
+canvas (normally the clip compositor); each further layer renders its own
+RGB frame and is blended in with an opacity that may vary per frame
+(trigger envelopes now; audio-driven modulation next).
+
+Scene YAML:
+
+    video:
+      layers:
+        - source: clips            # base — uses the video: section itself
+        - source: solid
+          color: [255, 255, 255]
+          blend: add               # normal | add | screen | multiply
+          triggers:
+            snare: {notes: [38, 40], envelope: 0.1}   # flash decay (s)
+"""
+from __future__ import annotations
+
+from typing import Callable, List, Optional, Sequence
+
+import numpy as np
+
+BLENDS = {"normal", "add", "screen", "multiply"}
+
+
+def blend_frames(base: np.ndarray, top: np.ndarray, mode: str, opacity: float) -> np.ndarray:
+    """Blend ``top`` over ``base`` (both HxWx3 uint8) with 0..1 opacity."""
+    if opacity <= 0.0:
+        return base
+    a = base.astype(np.float32)
+    b = top.astype(np.float32) * float(min(1.0, opacity))
+    if mode == "add":
+        out = a + b
+    elif mode == "screen":
+        out = 255.0 - (255.0 - a) * (255.0 - b) / 255.0
+    elif mode == "multiply":
+        k = float(min(1.0, opacity))
+        out = a * ((1.0 - k) + k * top.astype(np.float32) / 255.0)
+    else:  # normal
+        k = float(min(1.0, opacity))
+        out = a * (1.0 - k) + top.astype(np.float32) * k
+    return np.clip(out, 0.0, 255.0).astype(np.uint8)
+
+
+class EnvelopeOpacity:
+    """Opacity from trigger hits: 1.0 at each hit, linear decay over ``dur``."""
+
+    def __init__(self, times: Sequence[float], dur: float = 0.1):
+        self.times = np.asarray(sorted(times), dtype=float)
+        self.dur = max(1e-3, float(dur))
+
+    def __call__(self, t: float) -> float:
+        idx = int(np.searchsorted(self.times, t, side="right")) - 1
+        if idx < 0:
+            return 0.0
+        dt = t - float(self.times[idx])
+        return max(0.0, 1.0 - dt / self.dur)
+
+
+class SolidLayer:
+    """Constant-color frame; pair with EnvelopeOpacity for drum flashes."""
+
+    def __init__(self, width: int, height: int, color=(255, 255, 255)):
+        self._frame = np.empty((height, width, 3), dtype=np.uint8)
+        self._frame[:] = np.asarray(color, dtype=np.uint8)
+
+    def frame_at(self, t: float) -> np.ndarray:
+        return self._frame
+
+
+class Compositor:
+    """Bottom-up layer stack. First layer is the base canvas."""
+
+    def __init__(self):
+        self._layers: List[tuple] = []
+
+    def add(self, source, blend: str = "normal",
+            opacity: Optional[Callable[[float], float]] = None) -> None:
+        if blend not in BLENDS:
+            raise ValueError(f"unknown blend {blend!r}; expected {sorted(BLENDS)}")
+        self._layers.append((source, blend, opacity))
+
+    def __len__(self) -> int:
+        return len(self._layers)
+
+    def frame_at(self, t: float) -> np.ndarray:
+        if not self._layers:
+            raise RuntimeError("compositor has no layers")
+        src0, _, _ = self._layers[0]
+        out = src0.frame_at(t)
+        for src, blend, opacity in self._layers[1:]:
+            op = 1.0 if opacity is None else float(opacity(t))
+            if op <= 0.0:
+                continue
+            top = src.frame_at(t)
+            if top is not None:
+                out = blend_frames(out, top, blend, op)
+        return out
+
+
+def build_compositor(base, video_cfg: dict, notes: Sequence,
+                     width: int, height: int) -> "Compositor":
+    """Compose ``base`` (ClipComposer) with the scene's extra layers.
+
+    Layers with ``source: clips`` map to the base; unknown sources raise.
+    Without a ``layers:`` section, the result is just the base (legacy).
+    """
+    comp = Compositor()
+    layers_cfg = video_cfg.get("layers") or [{"source": "clips"}]
+    if not any(l.get("source") == "clips" for l in layers_cfg):
+        layers_cfg = [{"source": "clips"}] + list(layers_cfg)
+    for spec in layers_cfg:
+        src_name = spec.get("source", "clips")
+        blend = spec.get("blend", "normal")
+        if src_name == "clips":
+            comp.add(base, "normal", None)
+            continue
+        if src_name == "solid":
+            src = SolidLayer(width, height, spec.get("color", [255, 255, 255]))
+            opacity = None
+            trig = spec.get("triggers") or {}
+            for name, tspec in trig.items():
+                pitches = set(tspec.get("notes", []))
+                hits = [n.time for n in notes if n.pitch in pitches]
+                opacity = EnvelopeOpacity(hits, tspec.get("envelope", 0.1))
+            comp.add(src, blend, opacity)
+            continue
+        raise ValueError(f"unknown layer source {src_name!r}")
+    return comp

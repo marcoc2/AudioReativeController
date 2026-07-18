@@ -229,6 +229,36 @@ def test_composer_speed_is_one_without_gravity():
     assert comp.speed_at(1.0) == 1.0
 
 
+def test_layers_flash_blend_and_envelope():
+    from core.video.layers import build_compositor, EnvelopeOpacity
+    cfg = {"clip_per_bar": True, "triggers": {},
+           "layers": [
+               {"source": "clips"},
+               {"source": "solid", "color": [255, 255, 255], "blend": "add",
+                "triggers": {"snare": {"notes": [38], "envelope": 0.5}}},
+           ]}
+    comp = make_composer([snare(1.0)], cfg, clip_len=8)
+    stack = build_compositor(comp, cfg, [snare(1.0)], width=1, height=1)
+    assert len(stack) == 2
+    f0 = stack.frame_at(0.5)          # before the hit: base only (value 2)
+    assert int(f0[0, 0, 0]) <= 3
+    f1 = stack.frame_at(1.0)          # at the hit: white flash added
+    assert int(f1[0, 0, 0]) == 255
+    f2 = stack.frame_at(1.25)         # half-decayed
+    assert 100 < int(f2[0, 0, 0]) < 255
+    env = EnvelopeOpacity([2.0], dur=0.1)
+    assert env(1.9) == 0.0 and env(2.0) == 1.0 and env(2.2) == 0.0
+
+
+def test_layers_legacy_scene_is_base_only():
+    from core.video.layers import build_compositor
+    cfg = {"clip_per_bar": True, "triggers": {}}
+    comp = make_composer([], cfg)
+    stack = build_compositor(comp, cfg, [], width=1, height=1)
+    assert len(stack) == 1
+    assert stack.frame_at(0.0) is not None
+
+
 def test_override_pins_clip_for_bar():
     cfg = {"clip_per_bar": True, "clip_order": "sequential",
            "overrides": {1: 2},   # bar 1 pinned to clip index 2
