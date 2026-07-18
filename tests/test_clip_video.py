@@ -250,6 +250,21 @@ def test_layers_flash_blend_and_envelope():
     assert env(1.9) == 0.0 and env(2.0) == 1.0 and env(2.2) == 0.0
 
 
+def test_layers_flash_from_audio_onsets():
+    from core.video.layers import build_compositor
+    def fake_loader(spec):
+        assert spec["audio"] == "s.mp3"
+        return [MidiNote(time=2.0, pitch=-1, velocity=110, channel=0, duration=0.0)]
+    cfg = {"clip_per_bar": True, "triggers": {},
+           "layers": [{"source": "clips"},
+                      {"source": "solid", "blend": "add",
+                       "triggers": {"snare": {"audio": "s.mp3", "envelope": 0.2}}}]}
+    comp = make_composer([], cfg)
+    stack = build_compositor(comp, cfg, [], 1, 1, onset_loader=fake_loader)
+    assert int(stack.frame_at(2.0)[0, 0, 0]) == 255   # flash on the audio onset
+    assert int(stack.frame_at(1.0)[0, 0, 0]) <= 3
+
+
 def test_layers_legacy_scene_is_base_only():
     from core.video.layers import build_compositor
     cfg = {"clip_per_bar": True, "triggers": {}}

@@ -100,12 +100,28 @@ class Compositor:
         return out
 
 
+def _layer_hits(spec: dict, notes: Sequence, onset_loader=None) -> list:
+    """Hit times for a layer trigger: MIDI ``notes`` or audio ``audio``
+    (same spec shape as composer triggers)."""
+    if "audio" in spec:
+        if onset_loader is None:
+            from core.video.composer import _default_onset_loader
+            onset_loader = _default_onset_loader
+        src = onset_loader(spec)
+    else:
+        pitches = set(spec.get("notes", []))
+        src = [n for n in notes if n.pitch in pitches]
+    min_vel = int(spec.get("min_velocity", 0))
+    return [n.time for n in src if n.velocity >= min_vel]
+
+
 def build_compositor(base, video_cfg: dict, notes: Sequence,
-                     width: int, height: int) -> "Compositor":
+                     width: int, height: int, onset_loader=None) -> "Compositor":
     """Compose ``base`` (ClipComposer) with the scene's extra layers.
 
     Layers with ``source: clips`` map to the base; unknown sources raise.
     Without a ``layers:`` section, the result is just the base (legacy).
+    Layer triggers accept MIDI ``notes`` or ``audio`` onset sources.
     """
     comp = Compositor()
     layers_cfg = video_cfg.get("layers") or [{"source": "clips"}]
@@ -122,8 +138,7 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             opacity = None
             trig = spec.get("triggers") or {}
             for name, tspec in trig.items():
-                pitches = set(tspec.get("notes", []))
-                hits = [n.time for n in notes if n.pitch in pitches]
+                hits = _layer_hits(tspec, notes, onset_loader)
                 opacity = EnvelopeOpacity(hits, tspec.get("envelope", 0.1))
             comp.add(src, blend, opacity)
             continue
