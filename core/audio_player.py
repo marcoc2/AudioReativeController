@@ -114,6 +114,21 @@ class AudioPlayer:
         return self._pos / self.sr
 
     @property
+    def output_latency(self) -> float:
+        """Output latency of the active stream in seconds (0.0 if idle).
+
+        ``current_time`` counts samples handed to the driver, which are
+        heard roughly this much later — useful as a reference when
+        calibrating UI/audio sync.
+        """
+        if self._stream is None:
+            return 0.0
+        try:
+            return float(self._stream.latency)
+        except Exception:
+            return 0.0
+
+    @property
     def playing(self) -> bool:
         return self._playing
 

@@ -2,11 +2,14 @@
 
 Conventions
 -----------
-- Kick drum hits (MIDI pitch ``KICK_NOTE`` = 36, "C2", General MIDI Bass Drum 1)
-  produce downbeat markers.
-- ``set_tempo`` events drive BPM. The last value seen wins; this assumes a
-  static tempo per file (typical for sequenced MIDI). Variable tempo is left
-  for a future iteration.
+- ``set_tempo`` events drive BPM (last value wins) and ``time_signature``
+  meta events drive the bar formula (first value wins). Both assume a
+  static value per file, typical for sequenced MIDI.
+- With tempo meta present, the grid is metronomic: beats/downbeats laid
+  from t=0 (DAW bar 1) at the declared BPM and time signature, so bars
+  match the session's bar lines exactly.
+- Without tempo meta, kick hits (``KICK_NOTE`` = 36) anchor the grid as a
+  fallback; without kicks, the first note does.
 """
 from __future__ import annotations
 
@@ -33,13 +36,17 @@ class MidiNote:
 
 def read_midi(
     path: str | Path,
-    time_signature: Tuple[int, int] = (4, 4),
+    time_signature: Optional[Tuple[int, int]] = None,
     fps: int = 24,
 ) -> Tuple[RhythmGrid, List[MidiNote]]:
     """Parse ``path`` and return (grid, notes).
 
-    The grid is anchored on kick hits when present (>=2 kicks); otherwise it
-    falls back to a fixed-BPM grid anchored on the first note.
+    ``time_signature=None`` (default) uses the file's ``time_signature``
+    meta event, falling back to 4/4; pass a tuple to override.
+
+    With ``set_tempo`` present the grid is metronomic from t=0 (see module
+    docstring); otherwise it is anchored on kick hits when present
+    (>=2 kicks), or on the first note.
     """
     p = Path(path)
     if not p.exists():
@@ -50,12 +57,15 @@ def read_midi(
     notes: List[MidiNote] = []
     starts: Dict[Tuple[int, int], Tuple[float, int]] = {}
     bpm: Optional[float] = None
+    ts_meta: Optional[Tuple[int, int]] = None
 
     t = 0.0
     for msg in mid:
         t += msg.time  # mido cumulative iteration yields seconds
         if msg.type == "set_tempo":
             bpm = float(mido.tempo2bpm(msg.tempo))
+        elif msg.type == "time_signature" and ts_meta is None:
+            ts_meta = (int(msg.numerator), int(msg.denominator))
         elif msg.type == "note_on" and msg.velocity > 0:
             starts[(msg.channel, msg.note)] = (t, msg.velocity)
         elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
@@ -71,9 +81,13 @@ def read_midi(
                               channel=ch, duration=0.0))
     notes.sort(key=lambda n: n.time)
 
+    if time_signature is None:
+        time_signature = ts_meta if ts_meta else (4, 4)
+
     kicks = np.array([n.time for n in notes if n.pitch == KICK_NOTE], dtype=float)
 
     # Choose BPM: prefer set_tempo; fall back to kick spacing only if missing.
+    tempo_meta = bpm is not None
     if bpm is None:
         if len(kicks) >= 2:
             kick_gap = float(np.median(np.diff(kicks)))
@@ -84,6 +98,23 @@ def read_midi(
 
     beat_dur = 60.0 / bpm
     beats_per_bar = time_signature[0]
+
+    if tempo_meta:
+        # Metronomic grid anchored at t=0 (DAW bar 1): bars follow the
+        # session's bar lines, independent of where the drums actually hit.
+        bar_dur = beat_dur * beats_per_bar
+        last_t  = (notes[-1].time if notes else 0.0) + bar_dur
+        return (
+            RhythmGrid(
+                bpm=bpm,
+                time_signature=time_signature,
+                fps=fps,
+                beats=np.arange(0.0, last_t, beat_dur),
+                downbeats=np.arange(0.0, last_t, bar_dur),
+                start_offset=0.0,
+            ),
+            notes,
+        )
 
     if len(kicks) >= 2:
         # Auto-classify kick role from its spacing relative to the beat duration.

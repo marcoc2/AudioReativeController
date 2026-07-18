@@ -23,7 +23,15 @@ PREV_W, PREV_H   = 596, 336     # preview pane (16:9)
 TIMELINE_W       = 1060         # drawlist pixel width
 TRACK_H          = 52           # pixels per waveform track
 BAR_H            = 22           # bar-number header height
+EVENT_H          = 16           # trigger-events lane height
 WIN_W, WIN_H     = 1110, 1020
+
+EVENT_COLORS = [
+    (255, 160, 80),    # 1st trigger (alphabetical) — orange
+    (210, 100, 255),   # 2nd — purple
+    (255, 230, 80),    # 3rd — yellow
+    (100, 210, 255),   # 4th — blue
+]
 
 TRACK_COLORS = [
     (100, 210, 255),   # mix — blue
@@ -58,13 +66,24 @@ class _State:
     loading:   bool = False
     rendering: bool = False
 
-    # waveforms: ordered dict name → np.ndarray (TIMELINE_W,) rms envelope
-    waveforms: dict = {}
+    # waveform sources: name → ("audio", raw samples) | ("energy", env array);
+    # per-view envelopes are computed at draw time (zoom-aware)
+    _wave_sources: dict = {}
+
+    # timeline zoom window
+    view_start: float = 0.0
+    view_dur: Optional[float] = None   # None = whole song
+
+    # trigger events from the scene (clips mode), for timeline display
+    trigger_events:  list = []   # ClipComposer TriggerEvent list
+    handover_points: list = []   # (trigger, until_trigger, time) from `until:`
 
     # preview playback
     preview_frames:   list  = []
     preview_idx:      int   = 0
     preview_playing:  bool  = False
+    preview_start_t:  float = 0.0   # song time of the preview's first frame
+    _preview_audio:   bool  = False # preview started the audio player
     _preview_last_t:  float = 0.0   # wall-clock time of last frame advance
 
     # render settings
@@ -73,6 +92,7 @@ class _State:
     width:  int = 854
     height: int = 480
     mode:   str = "particles"
+    preview_bars: int = 1   # bars rendered by the Preview button (RAM-bound)
 
     # clips mode settings
     clips_dir: Optional[str] = None
@@ -84,6 +104,11 @@ class _State:
     grav_floor:  float = 0.3
     grav_radius: float = 0.45
     grav_curve:  float = 2.0
+
+    # UI/audio sync calibration: added to the displayed time while playing.
+    # Positive values push the UI forward (use when the audio sounds ahead).
+    sync_offset_ms: int = 0
+    _last_controls_t: float = 0.0   # throttle for the controls tables
 
     # internal flag: stop scrubber → seek feedback loop
     _syncing: bool = False
@@ -169,28 +194,72 @@ def _fill_table(tag: str, rows: list):
 # ---------------------------------------------------------------------------
 
 def _timeline_height() -> int:
-    return BAR_H + max(1, len(S.waveforms)) * TRACK_H
+    h = BAR_H + max(1, len(S._wave_sources)) * TRACK_H
+    if S.trigger_events:
+        h += EVENT_H
+    return h
+
+
+def _full_duration() -> float:
+    return float(S.extractor.duration) if S.extractor else 0.0
+
+
+def _view_window() -> tuple:
+    """Current zoom window as (start, length) in seconds, clamped."""
+    dur = _full_duration()
+    if dur <= 0:
+        return 0.0, 1.0
+    vd = min(S.view_dur, dur) if S.view_dur else dur
+    v0 = max(0.0, min(S.view_start, dur - vd))
+    return v0, vd
+
+
+def _t_to_x(t: float, v0: float, vd: float) -> int:
+    return int((t - v0) / vd * TIMELINE_W)
+
+
+def _window_envelope(kind: str, data, v0: float, vd: float) -> np.ndarray:
+    """TIMELINE_W-point envelope of the zoom window, from the raw source."""
+    from core.audio_player import rms_envelope
+    if kind == "audio":
+        sr  = S.extractor.sample_rate
+        seg = data[int(v0 * sr): int((v0 + vd) * sr)]
+        if len(seg) < 2:
+            return np.zeros(TIMELINE_W, dtype=np.float32)
+        return rms_envelope(seg, TIMELINE_W)
+    # "energy": per-feature-frame array spanning the whole song
+    n   = len(data)
+    dur = _full_duration()
+    xs  = np.linspace(v0 / dur * (n - 1), (v0 + vd) / dur * (n - 1), TIMELINE_W)
+    return np.interp(xs, np.arange(n), data).astype(np.float32)
 
 
 def _draw_timeline_static():
-    """Draw waveforms + bar/beat markers. Called once after project loads."""
+    """Draw waveforms + bar/beat markers for the current zoom window."""
     if not dpg.does_item_exist("timeline_canvas"):
         return
     dpg.delete_item("timeline_canvas", children_only=True)
 
-    dur = S.extractor.duration
-    H   = _timeline_height()
+    v0, vd = _view_window()
+    v1 = v0 + vd
+    H  = _timeline_height()
+    dpg.configure_item("timeline_canvas", height=H)
 
-    # Beat markers (subtle)
-    for bt in (S.grid.beats if S.grid.beats is not None else []):
-        x = int(bt / dur * TIMELINE_W)
-        dpg.draw_line([x, BAR_H], [x, H],
-                      color=(55, 55, 75, 160), thickness=1,
-                      parent="timeline_canvas")
+    # Beat markers (subtle; skipped when denser than ~6px)
+    beats = S.grid.beats if S.grid.beats is not None else []
+    if len(beats) and vd / max(1e-6, S.grid.beat_duration) < TIMELINE_W / 6:
+        for bt in beats:
+            if v0 <= bt <= v1:
+                x = _t_to_x(bt, v0, vd)
+                dpg.draw_line([x, BAR_H], [x, H],
+                              color=(55, 55, 75, 160), thickness=1,
+                              parent="timeline_canvas")
 
     # Bar markers + numbers
     for i, dt in enumerate(S.grid.downbeats if S.grid.downbeats is not None else []):
-        x = int(dt / dur * TIMELINE_W)
+        if not (v0 <= dt <= v1):
+            continue
+        x = _t_to_x(dt, v0, vd)
         dpg.draw_line([x, 0], [x, H],
                       color=(90, 120, 200, 200), thickness=1,
                       parent="timeline_canvas")
@@ -198,8 +267,9 @@ def _draw_timeline_static():
                       color=(180, 180, 180, 220),
                       parent="timeline_canvas")
 
-    # Waveform envelopes
-    for track_i, (name, env) in enumerate(S.waveforms.items()):
+    # Waveform envelopes (recomputed for the window — real zoom resolution)
+    for track_i, (name, (kind, data)) in enumerate(S._wave_sources.items()):
+        env   = _window_envelope(kind, data, v0, vd)
         color = TRACK_COLORS[track_i % len(TRACK_COLORS)]
         fill  = (*color, 70)
         line  = (*color, 200)
@@ -219,6 +289,45 @@ def _draw_timeline_static():
                       size=11, color=(220, 220, 220, 180),
                       parent="timeline_canvas")
 
+    # View info (zoom window)
+    if S.view_dur:
+        dpg.draw_text([TIMELINE_W - 190, 3],
+                      f"zoom: {v0:.1f}s – {v1:.1f}s", size=11,
+                      color=(255, 200, 120, 220), parent="timeline_canvas")
+
+    # Trigger events lane + hand-over markers (clips scenes)
+    if S.trigger_events:
+        y0 = BAR_H + len(S._wave_sources) * TRACK_H
+        dpg.draw_rectangle([0, y0], [TIMELINE_W, y0 + EVENT_H],
+                           fill=(30, 30, 42, 140), color=(0, 0, 0, 0),
+                           parent="timeline_canvas")
+        names = sorted({e.name for e in S.trigger_events})
+        for e in S.trigger_events:
+            if not (v0 <= e.time <= v1):
+                continue
+            x = _t_to_x(e.time, v0, vd)
+            color = EVENT_COLORS[names.index(e.name) % len(EVENT_COLORS)]
+            if "next_clip" in e.actions or "random_clip" in e.actions:
+                # clip switch: full-height tick
+                dpg.draw_line([x, y0 + 2], [x, y0 + EVENT_H - 2],
+                              color=(*color, 235), thickness=2,
+                              parent="timeline_canvas")
+            else:
+                # other actions (reverse, restart): half-height tick
+                dpg.draw_line([x, y0 + EVENT_H // 2], [x, y0 + EVENT_H - 2],
+                              color=(*color, 180), thickness=1,
+                              parent="timeline_canvas")
+        dpg.draw_text([4, y0 + 2], "TRIGGERS", size=11,
+                      color=(220, 220, 220, 190), parent="timeline_canvas")
+        for name, until, t in S.handover_points:
+            if not (v0 <= t <= v1):
+                continue
+            x = _t_to_x(t, v0, vd)
+            dpg.draw_line([x, 0], [x, H], color=(255, 230, 80, 235),
+                          thickness=2, parent="timeline_canvas")
+            dpg.draw_text([x + 5, BAR_H + 2], f"{until} assume", size=12,
+                          color=(255, 230, 80, 255), parent="timeline_canvas")
+
     # Playhead (created last so it renders on top; tag allows configure later)
     dpg.draw_line([0, 0], [0, H],
                   color=(255, 80, 80, 255), thickness=2,
@@ -228,9 +337,9 @@ def _draw_timeline_static():
 def _update_playhead(t: float):
     if not dpg.does_item_exist("playhead_line") or not S.extractor:
         return
-    dur = S.extractor.duration
-    x   = int(np.clip(t / dur, 0.0, 1.0) * TIMELINE_W)
-    H   = _timeline_height()
+    v0, vd = _view_window()
+    x = int(np.clip((t - v0) / vd, 0.0, 1.0) * TIMELINE_W)
+    H = _timeline_height()
     dpg.configure_item("playhead_line", p1=[x, 0], p2=[x, H])
 
 # ---------------------------------------------------------------------------
@@ -306,6 +415,7 @@ def _project_dict() -> dict:
         "midi":  S.midi_path  or "",
         "scene": S.scene_path,
         "skip_separation": S.skip_separation,
+        "sync_offset_ms": S.sync_offset_ms,
         "stems": {r["name"]: r["path"] for r in S.stem_rows if r["name"] and r["path"]},
         "render": {
             "bars":       S.bars,
@@ -352,6 +462,7 @@ def _apply_project(data: dict):
     S.midi_path       = data.get("midi")  or None
     S.scene_path      = data.get("scene", S.scene_path)
     S.skip_separation = bool(data.get("skip_separation", False))
+    S.sync_offset_ms  = int(data.get("sync_offset_ms", S.sync_offset_ms))
 
     render = data.get("render", {})
     S.bars   = int(render.get("bars",   S.bars))
@@ -391,6 +502,7 @@ def _apply_project(data: dict):
     dpg.set_value("grav_check", S.grav_enable)
     for attr in ("grav_peak", "grav_floor", "grav_radius", "grav_curve"):
         dpg.set_value(attr, getattr(S, attr))
+    dpg.set_value("sync_input", S.sync_offset_ms)
     dpg.configure_item("clips_group", show=(S.mode == "clips"))
 
     _set_status(f"Project loaded from file — click Load Project to extract features.")
@@ -415,6 +527,52 @@ def _pick_project(s, a):
 # ---------------------------------------------------------------------------
 # Load project
 # ---------------------------------------------------------------------------
+
+def _load_trigger_events():
+    """Build trigger events from the scene YAML for timeline display.
+
+    Uses the real ClipComposer event pipeline (min_velocity, exclude,
+    until), so the timeline shows exactly what a render would fire.
+    Audio triggers run onset detection here — a few seconds per stem.
+    """
+    import yaml
+    from core.video.composer import ClipComposer
+
+    S.trigger_events  = []
+    S.handover_points = []
+    try:
+        with open(S.scene_path, encoding="utf-8") as f:
+            scene = yaml.safe_load(f) or {}
+        video_cfg = scene.get("video", {})
+        triggers  = video_cfg.get("triggers", {})
+        if not triggers:
+            return
+
+        class _StubLib:  # events don't need decoded clips
+            def __len__(self): return 1
+            def get(self, i): raise RuntimeError("display-only composer")
+
+        _set_status("Resolving scene triggers (audio onsets may take a moment)…")
+        comp = ClipComposer(_StubLib(), S.grid, S.midi_notes, video_cfg)
+        S.trigger_events = comp.events
+
+        for name, spec in triggers.items():
+            until = spec.get("until")
+            if until:
+                first = next((e.time for e in comp.events if e.name == until), None)
+                if first is not None:
+                    S.handover_points.append((name, until, float(first)))
+
+        names = sorted({e.name for e in S.trigger_events})
+        legend = ", ".join(
+            f"{n}={EVENT_COLORS[i % len(EVENT_COLORS)]}" for i, n in enumerate(names)
+        )
+        _log(f"Triggers: {len(S.trigger_events)} events ({legend})")
+        for name, until, t in S.handover_points:
+            _log(f"  hand-over: {name} -> {until} em {t:.2f}s")
+    except Exception as exc:
+        _log(f"Trigger events indisponiveis: {exc}")
+
 
 def _do_load():
     from core.audio_player import AudioPlayer, rms_envelope
@@ -460,10 +618,16 @@ def _do_load():
             midi_automation=S.midi_automation,
         )
 
-        # Waveforms
+        _load_trigger_events()
+
+        # Waveform sources (envelopes are computed per zoom window at draw time)
         _set_status("Computing waveforms…")
-        S.waveforms = {}
-        S.waveforms["mix"] = rms_envelope(S.extractor.y, TIMELINE_W)
+        S._wave_sources = {"mix": ("audio", S.extractor.y)}
+        # one track per stem with real energy (prebuilt or AI-separated)
+        for name, energy in S.extractor.stems_energy.items():
+            if energy is not None and len(energy) and float(np.max(energy)) > 0:
+                S._wave_sources[name] = ("energy", np.asarray(energy, dtype=np.float32))
+        S.view_start, S.view_dur = 0.0, None
 
         # Audio player
         if S.player:
@@ -474,9 +638,10 @@ def _do_load():
         dur = S.extractor.duration
         dpg.configure_item("scrubber", max_value=dur)
         dpg.set_value("scrubber", 0.0)
+        sig = S.grid.time_signature
         dpg.set_value("bpm_text",
-                      f"BPM {S.grid.bpm:.1f}   bar {S.grid.bar_duration:.2f}s   "
-                      f"audio {dur:.1f}s")
+                      f"BPM {S.grid.bpm:.1f}   {sig[0]}/{sig[1]}   "
+                      f"bar {S.grid.bar_duration:.2f}s   audio {dur:.1f}s")
 
         S.loaded = True
         _set_status("Project loaded — click timeline to seek, ▶ to play.")
@@ -509,6 +674,9 @@ def btn_play():
         return
     t = dpg.get_value("scrubber") or 0.0
     S.player.play(start_t=t)
+    lat = S.player.output_latency
+    if lat > 0:
+        _log(f"Audio output latency: {lat*1000:.0f}ms (referencia para o Sync)")
     _set_status("Playing…")
 
 
@@ -527,6 +695,40 @@ def btn_stop():
     _set_status("Stopped.")
 
 
+def _center_view(center: float, vd: float):
+    dur = _full_duration()
+    if dur <= 0:
+        return
+    vd = max(1.0, vd)
+    S.view_dur   = None if vd >= dur else vd
+    S.view_start = max(0.0, min(center - vd / 2, max(0.0, dur - vd)))
+    _draw_timeline_static()
+    _update_playhead(dpg.get_value("scrubber") or 0.0)
+
+
+def btn_zoom_in():
+    if not S.loaded:
+        return
+    v0, vd = _view_window()
+    center = float(dpg.get_value("scrubber") or (v0 + vd / 2))
+    _center_view(center, vd / 2)
+
+
+def btn_zoom_out():
+    if not S.loaded:
+        return
+    v0, vd = _view_window()
+    _center_view(v0 + vd / 2, vd * 2)
+
+
+def btn_zoom_full():
+    if not S.loaded:
+        return
+    S.view_dur, S.view_start = None, 0.0
+    _draw_timeline_static()
+    _update_playhead(dpg.get_value("scrubber") or 0.0)
+
+
 def on_scrubber_drag(sender, value):
     if S._syncing:
         return
@@ -543,7 +745,8 @@ def on_timeline_click(sender, app_data):
     rx, _  = dpg.get_item_rect_min("timeline_canvas")
     local_x = mx - rx
     if 0 <= local_x <= TIMELINE_W:
-        t = local_x / TIMELINE_W * S.extractor.duration
+        v0, vd = _view_window()
+        t = v0 + local_x / TIMELINE_W * vd
         S._syncing = True
         dpg.set_value("scrubber", t)
         S._syncing = False
@@ -597,6 +800,9 @@ def _do_preview():
 
     S.rendering = True
     S.preview_playing = False
+    if S._preview_audio and S.player:
+        S.player.pause()
+        S._preview_audio = False
     _set_status("Rendering preview…")
 
     try:
@@ -616,11 +822,12 @@ def _do_preview():
         else:
             start_t = scrub_t
 
-        n_frames = int(S.pipeline.bar_duration * S.fps)
+        n_bars   = max(1, int(S.preview_bars))
+        n_frames = int(S.pipeline.bar_duration * n_bars * S.fps)
         dt       = 1.0 / S.fps
 
-        _log(f"Preview: {n_frames} frames @ {S.fps}fps  start={start_t:.2f}s "
-             f"(scrubber={scrub_t:.2f}s)")
+        _log(f"Preview: {n_bars} bar(s), {n_frames} frames @ {S.fps}fps  "
+             f"start={start_t:.2f}s (scrubber={scrub_t:.2f}s)")
 
         if S.mode == "clips":
             frames = _clip_preview_frames(start_t, n_frames)
@@ -652,7 +859,11 @@ def _do_preview():
         _log(f"Preview: generated {len(frames)} frames, frame size {len(frames[0])} floats")
         S.preview_frames  = frames
         S.preview_idx     = 0
+        S.preview_start_t = start_t
         S._preview_last_t = 0.0
+        if S.player is not None:
+            S.player.play(start_t=start_t)   # audio drives the frame clock
+            S._preview_audio = True
         S.preview_playing = True   # main loop takes over from here
         _set_status(f"Preview ready — {len(frames)} frames. Playing…")
 
@@ -675,6 +886,9 @@ def btn_preview():
 def btn_stop_preview():
     S.preview_playing = False
     S.preview_idx = 0
+    if S._preview_audio and S.player:
+        S.player.pause()
+        S._preview_audio = False
     _set_status("Preview stopped.")
 
 # ---------------------------------------------------------------------------
@@ -913,8 +1127,14 @@ def _build_ui():
                 dpg.add_image("preview_tex", width=PREV_W, height=PREV_H)
                 with dpg.group(horizontal=True):
                     dpg.add_text("Frame 0/0", tag="frame_label")
-                    dpg.add_button(label="Preview 1 Bar",
-                                   callback=btn_preview, width=120)
+                    dpg.add_button(label="Preview",
+                                   callback=btn_preview, width=90)
+                    dpg.add_text("Bars:")
+                    dpg.add_input_int(default_value=S.preview_bars, width=75,
+                                      tag="preview_bars_input",
+                                      min_value=1, max_value=8,
+                                      min_clamped=True, max_clamped=True,
+                                      callback=lambda s, v: setattr(S, "preview_bars", v))
                     dpg.add_button(label="Stop",
                                    callback=btn_stop_preview, width=50)
                 dpg.add_separator()
@@ -981,6 +1201,15 @@ def _build_ui():
             dpg.add_button(label="Play",  callback=btn_play,  width=50)
             dpg.add_button(label="Pause", callback=btn_pause, width=50)
             dpg.add_button(label="Stop",  callback=btn_stop,  width=50)
+            dpg.add_text("Sync (ms):")
+            dpg.add_input_int(default_value=S.sync_offset_ms, width=90,
+                              tag="sync_input", step=10,
+                              min_value=-500, max_value=500,
+                              min_clamped=True, max_clamped=True,
+                              callback=lambda s, v: setattr(S, "sync_offset_ms", v))
+            dpg.add_button(label="Zoom +", callback=btn_zoom_in,   width=60)
+            dpg.add_button(label="Zoom -", callback=btn_zoom_out,  width=60)
+            dpg.add_button(label="Full",   callback=btn_zoom_full, width=45)
 
         dpg.add_drawlist(
             tag="timeline_canvas",
@@ -1058,25 +1287,51 @@ def main():
     while dpg.is_dearpygui_running():
         # Preview playback — runs entirely on main thread (OpenGL texture update)
         if S.preview_playing and S.preview_frames:
-            now = time.time()
-            if now - S._preview_last_t >= 1.0 / max(1, S.fps):
-                dpg.set_value("preview_tex", S.preview_frames[S.preview_idx])
-                dpg.set_value("frame_label",
-                              f"Frame {S.preview_idx + 1} / {len(S.preview_frames)}")
-                S.preview_idx += 1
-                S._preview_last_t = now
-                if S.preview_idx >= len(S.preview_frames):
-                    S.preview_idx = 0   # loop
+            if S._preview_audio and S.player and S.player.playing:
+                # frame index driven by the audio clock (A/V locked)
+                t_a = S.player.current_time + S.sync_offset_ms / 1000.0
+                idx = int((t_a - S.preview_start_t) * S.fps)
+                if idx >= len(S.preview_frames):
+                    S.player.seek(S.preview_start_t)   # loop audio with video
+                    idx = 0
                     _set_status(f"Preview loop — {len(S.preview_frames)} frames. Stop to pause.")
+                idx = max(0, idx)
+                if idx != S.preview_idx:
+                    dpg.set_value("preview_tex", S.preview_frames[idx])
+                    dpg.set_value("frame_label",
+                                  f"Frame {idx + 1} / {len(S.preview_frames)}")
+                    S.preview_idx = idx
+            else:
+                now = time.time()
+                if now - S._preview_last_t >= 1.0 / max(1, S.fps):
+                    dpg.set_value("preview_tex", S.preview_frames[S.preview_idx])
+                    dpg.set_value("frame_label",
+                                  f"Frame {S.preview_idx + 1} / {len(S.preview_frames)}")
+                    S.preview_idx += 1
+                    S._preview_last_t = now
+                    if S.preview_idx >= len(S.preview_frames):
+                        S.preview_idx = 0   # loop
+                        _set_status(f"Preview loop — {len(S.preview_frames)} frames. Stop to pause.")
 
         # Sync playhead + scrubber when audio is playing
         if S.player and S.player.playing:
-            t = S.player.current_time
+            t = S.player.current_time + S.sync_offset_ms / 1000.0
             S._syncing = True
             dpg.set_value("scrubber", t)
             S._syncing = False
+            # auto-scroll the zoom window to keep the playhead visible
+            if S.view_dur:
+                v0, vd = _view_window()
+                if t > v0 + 0.95 * vd or t < v0:
+                    S.view_start = max(0.0, t - 0.05 * vd)
+                    _draw_timeline_static()
             _update_playhead(t)
-            _refresh_controls(t)
+            # tables are expensive to rebuild — throttle to ~10 Hz so the
+            # playhead itself stays smooth
+            now = time.time()
+            if now - S._last_controls_t >= 0.1:
+                _refresh_controls(t)
+                S._last_controls_t = now
 
         dpg.render_dearpygui_frame()
 

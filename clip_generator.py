@@ -109,10 +109,11 @@ def main() -> None:
     n_frames  = int(total_dur * fps)
     triggers  = list(video_cfg.get("triggers", {}).keys())
 
+    sig = grid.time_signature
     print(
-        f"BPM={grid.bpm:.1f}  bar={grid.bar_duration:.2f}s  start={start_sec:.2f}s  "
-        f"frames={n_frames}  clips={len(library)}  triggers={triggers}  "
-        f"events={len(composer.events)}"
+        f"BPM={grid.bpm:.1f}  sig={sig[0]}/{sig[1]}  bar={grid.bar_duration:.2f}s  "
+        f"start={start_sec:.2f}s  frames={n_frames}  clips={len(library)}  "
+        f"triggers={triggers}  events={len(composer.events)}"
     )
 
     stem        = Path(args.file).stem

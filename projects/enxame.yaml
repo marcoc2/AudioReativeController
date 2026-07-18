@@ -1,0 +1,22 @@
+audio: C:\Audio\recordings\projeto2024\ep\stems\enxame\mix_enxame_ep_15_07_2026.mp3
+midi: C:\Audio\recordings\projeto2024\ep\stems\enxame\enxame_drum_no_snare.mid
+scene: F:\workspace\AudioReativeController\scenes\clips_enxame.yaml
+skip_separation: true
+stems:
+  snare: C:\Audio\recordings\projeto2024\ep\stems\enxame\enxame_ep_15_07_2026-005_snare.mp3
+render:
+  bars: 8
+  fps: 24
+  resolution: 480x480
+  mode: clips
+clips:
+  dir: C:\Users\marco\Videos\deserto_square
+  order: shuffle
+  full_song: true
+  cache_size: 101
+  gravity:
+    enabled: false
+    peak: 7.0
+    floor: 0.7
+    radius: 0.45
+    curve: 3.0

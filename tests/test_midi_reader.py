@@ -64,7 +64,8 @@ def test_read_midi_dense_kicks_classified_per_bar(tmp_path):
     assert gap == pytest.approx(grid.bar_duration, rel=0.1)
 
 
-def test_read_midi_no_kicks_falls_back_to_tempo(tmp_path):
+def test_read_midi_no_kicks_still_metronomic_with_tempo(tmp_path):
+    # tempo meta present -> metronomic grid even without kicks
     mid = mido.MidiFile()
     track = mido.MidiTrack()
     mid.tracks.append(track)
@@ -78,9 +79,50 @@ def test_read_midi_no_kicks_falls_back_to_tempo(tmp_path):
 
     grid, notes = read_midi(str(path))
     assert grid.bpm == pytest.approx(140, rel=0.05)
-    assert grid.beats is None
-    assert grid.downbeats is None
+    assert grid.downbeats is not None and float(grid.downbeats[0]) == 0.0
+    assert float(np.median(np.diff(grid.downbeats))) == pytest.approx(grid.bar_duration, rel=0.01)
     assert len(notes) == 4 and all(n.pitch == 38 for n in notes)
+
+
+def test_read_midi_grid_anchored_at_zero_with_tempo(tmp_path):
+    path = _build_midi(tmp_path, bpm=120, kick_count=4, kick_every_beats=4)
+    grid, _ = read_midi(path, time_signature=(4, 4))
+    assert float(grid.downbeats[0]) == 0.0
+    assert grid.start_offset == 0.0
+
+
+def test_read_midi_reads_time_signature_from_file(tmp_path):
+    mid = mido.MidiFile()
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
+    track.append(mido.MetaMessage("time_signature", numerator=5, denominator=4))
+    track.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(130)))
+    for i in range(6):
+        track.append(mido.Message("note_on", note=KICK_NOTE, velocity=100, channel=9,
+                                  time=mid.ticks_per_beat * 5 if i > 0 else 0))
+        track.append(mido.Message("note_off", note=KICK_NOTE, velocity=0, channel=9, time=0))
+    path = tmp_path / "fivefour.mid"
+    mid.save(path)
+
+    grid, _ = read_midi(str(path))              # no explicit signature
+    assert grid.time_signature == (5, 4)
+    assert grid.bar_duration == pytest.approx(5 * 60.0 / 130.0, rel=0.01)
+    assert float(np.median(np.diff(grid.downbeats))) == pytest.approx(grid.bar_duration, rel=0.01)
+
+
+def test_read_midi_explicit_signature_overrides_file(tmp_path):
+    mid = mido.MidiFile()
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
+    track.append(mido.MetaMessage("time_signature", numerator=5, denominator=4))
+    track.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(120)))
+    track.append(mido.Message("note_on", note=KICK_NOTE, velocity=100, channel=9, time=0))
+    track.append(mido.Message("note_off", note=KICK_NOTE, velocity=0, channel=9, time=120))
+    path = tmp_path / "override.mid"
+    mid.save(path)
+
+    grid, _ = read_midi(str(path), time_signature=(3, 4))
+    assert grid.time_signature == (3, 4)
 
 
 def test_read_midi_velocity_preserved(tmp_path):
