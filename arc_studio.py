@@ -821,7 +821,7 @@ def _apply_project(data: dict):
     dpg.set_value("scene_label",  Path(S.scene_path).name)
     dpg.configure_item("skip_sep_check", default_value=S.skip_separation)
     dpg.set_value("mode_combo", S.mode)
-    dpg.set_value("res_combo",  f"{S.width}x{S.height}")
+    dpg.set_value("res_input",  f"{S.width}x{S.height}")
     dpg.set_value("clips_label", Path(S.clips_dir).name if S.clips_dir else "(none)")
     dpg.set_value("clip_order_combo", S.clip_order)
     dpg.set_value("full_song_check", S.full_song)
@@ -1506,6 +1506,18 @@ def _mode_script(mode: str) -> str:
     return "clip_generator.py" if mode == "clips" else _MODE_SCRIPTS.get(mode, "?")
 
 
+def _on_res_change(s, v):
+    """Parse LARGURAxALTURA (applied on Enter or preset pick)."""
+    try:
+        w, h = (int(x) for x in str(v).lower().replace(" ", "").split("x"))
+        if w < 16 or h < 16 or w % 2 or h % 2:
+            raise ValueError
+        S.width, S.height = w, h
+        _set_status(f"Resolução de render: {w}x{h}")
+    except Exception:
+        _set_status(f"Resolução inválida: {v!r} — use LARGURAxALTURA com valores pares (ex.: 3840x2160)")
+
+
 def _on_mode_change(s, v):
     S.mode = v
     if dpg.does_item_exist("clips_group"):
@@ -1686,14 +1698,19 @@ def _build_ui():
                                       callback=lambda s, v: setattr(S, "fps", v))
                 with dpg.group(horizontal=True):
                     dpg.add_text("Resolution:")
+                    dpg.add_input_text(default_value=f"{S.width}x{S.height}",
+                                       tag="res_input", width=110,
+                                       hint="LxA", on_enter=True,
+                                       callback=_on_res_change)
                     dpg.add_combo(["854x480", "1280x720", "1920x1080",
-                                   "480x480", "720x720", "1080x1080"],
-                                  default_value=f"{S.width}x{S.height}",
-                                  tag="res_combo", width=120,
+                                   "2560x1440", "3840x2160",
+                                   "480x480", "720x720", "1080x1080",
+                                   "2160x2160"],
+                                  default_value="", tag="res_preset",
+                                  width=110,
                                   callback=lambda s, v: (
-                                      setattr(S, "width",  int(v.split("x")[0])),
-                                      setattr(S, "height", int(v.split("x")[1])),
-                                  ))
+                                      dpg.set_value("res_input", v),
+                                      _on_res_change(s, v)))
                 with dpg.group(tag="clips_group", show=(S.mode == "clips")):
                     with dpg.group(horizontal=True):
                         dpg.add_button(label="Clips Folder", width=95,
