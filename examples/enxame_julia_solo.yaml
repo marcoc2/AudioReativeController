@@ -1,0 +1,16 @@
+# Julia navegando a borda do Mandelbrot, fundo escuro, sem clipes.
+# chroma escolhe o ângulo na cardioide (harmonia = família do fractal),
+# graves atravessam a fronteira (calmo = conexo, forte = poeira).
+video:
+  layers:
+    - source: julia
+      resolution: 1080     # grade interna; 256 = mais 8-bit, 1080 = fino
+      iters: 56
+      zoom_pulse:          # bumbo puxa o zoom
+        notes: [36]
+        envelope: 0.3
+      invert:              # caixa GRAVADA (onsets de áudio) inverte a paleta
+        audio: 'C:\Audio\recordings\projeto2024\ep\stems\enxame\enxame_ep_15_07_2026-005_snare.mp3'
+        threshold: 0.3
+        min_gap: 0.08
+        envelope: 0.1

@@ -108,6 +108,7 @@ class _State:
     height: int = 480
     mode:   str = "particles"
     preview_bars: int = 1   # bars rendered by the Preview button (RAM-bound)
+    codec: str = "x264"     # clips-mode encoder; nvenc = GPU, ideal p/ 4K
 
     # clips mode settings
     clips_dir: Optional[str] = None
@@ -1418,6 +1419,7 @@ def _build_render_cmd() -> list:
             cmd += ["--clip-order", S.clip_order]
         if S.clips_seed is not None:
             cmd += ["--seed", str(S.clips_seed)]
+        cmd += ["--codec", S.codec]
         if S.grav_enable:
             cmd += ["--gravity-peak",   str(S.grav_peak),
                     "--gravity-floor",  str(S.grav_floor),
@@ -1441,8 +1443,21 @@ def btn_render_full():
         return
     if S.mode == "clips":
         # clips mode reads MIDI + clips itself; no feature extraction needed
-        if not (S.audio_path and S.clips_dir):
-            _set_status("Clips mode: select an audio file and a clips folder first.")
+        if not S.audio_path:
+            _set_status("Clips mode: select an audio file first.")
+            return
+        needs_clips = True
+        try:
+            import yaml
+            with open(S.scene_path, encoding="utf-8") as f:
+                vc = (yaml.safe_load(f) or {}).get("video", {})
+            layers = vc.get("layers")
+            needs_clips = not layers or any(
+                (l or {}).get("source", "clips") == "clips" for l in layers)
+        except Exception:
+            pass
+        if needs_clips and not S.clips_dir:
+            _set_status("Clips mode: select a clips folder (esta cena usa clipes).")
             return
     elif not S.loaded:
         return
@@ -1690,6 +1705,10 @@ def _build_ui():
                                   callback=_on_mode_change)
                     dpg.add_text(f"→ {_mode_script(S.mode)}",
                                  tag="mode_script_label", color=(140, 170, 140))
+                    dpg.add_text("Enc:")
+                    dpg.add_combo(["x264", "nvenc"], default_value=S.codec,
+                                  tag="codec_combo", width=80,
+                                  callback=lambda s, v: setattr(S, "codec", v))
                     dpg.add_text("Bars:")
                     dpg.add_input_int(default_value=S.bars, width=60,
                                       callback=lambda s, v: setattr(S, "bars", v))

@@ -1,0 +1,10 @@
+# Voo infinito pelo corredor fractal (KIFS periódico), sincronizado com o Enxame.
+# A câmera avança 1 célula do mundo por loop musical — voo eterno, loop perfeito.
+video:
+  layers:
+    - source: mandelbox
+      loop_bars: 2          # 1 célula do corredor a cada 2 compassos
+      hue_spread: 0.4       # abertura do leque de cores (bandas que fluem)
+      zoom_pulse:           # bumbo = surto breve de velocidade pra frente
+        notes: [36]
+        envelope: 0.25

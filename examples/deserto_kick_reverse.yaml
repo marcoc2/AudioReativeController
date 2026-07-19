@@ -1,0 +1,16 @@
+# Música 1 — cada compasso ganha um clipe; todo bumbo inverte a direção do playback.
+# O bloco "gravity" faz cada bumbo agir como um poço gravitacional no tempo:
+# o playback acelera chegando no hit (pico exatamente no bumbo, onde ocorre o
+# reverse) e desacelera se afastando — deixa a inversão nítida mesmo em trechos curtos.
+video:
+  clip_per_bar: true
+  clip_order: sequential   # ou "random" (usa seed)
+  triggers:
+    kick:
+      notes: [36]
+      actions: [reverse]
+      gravity:
+        peak: 3.0      # velocidade no instante do bumbo
+        floor: 0.3     # velocidade longe de qualquer bumbo
+        radius: 0.45   # raio de influência em segundos
+        curve: 2.0     # >1 concentra a "sucção" perto do hit

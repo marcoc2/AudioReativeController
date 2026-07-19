@@ -52,6 +52,8 @@ def main() -> None:
                     default=None, help="Override the scene's clip selection order")
     ap.add_argument("--seed", type=int, default=None,
                     help="Override the scene's shuffle/random seed (reproducible order)")
+    ap.add_argument("--codec", choices=["x264", "nvenc"], default="x264",
+                    help="Encoder: nvenc = GPU (NVIDIA), RAM baixa e rapido em 4K")
     args = ap.parse_args()
 
     W, H = (int(x) for x in args.resolution.split("x"))
@@ -157,7 +159,10 @@ def main() -> None:
             "-s", f"{W}x{H}", "-r", str(fps), "-i", "-",
             "-ss", str(start_sec), "-i", str(args.file),
             "-map", "0:v", "-map", "1:a",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+            *(["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr",
+               "-cq", "19", "-b:v", "0"] if args.codec == "nvenc"
+              else ["-c:v", "libx264", "-crf", "18"]),
+            "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k", "-shortest",
             output_path,
         ],
