@@ -28,7 +28,7 @@ from core.video.layers import build_compositor
 def main() -> None:
     ap = argparse.ArgumentParser(description="ARC clip compositor")
     ap.add_argument("--file",        required=True,  help="Audio file (mp3/wav/flac)")
-    ap.add_argument("--clips",       required=True,  help="Folder of pre-rendered video clips")
+    ap.add_argument("--clips",       default=None,   help="Folder of pre-rendered video clips (optional for pure-generative scenes)")
     ap.add_argument("--midi",        default=None,   help="MIDI file for rhythm grid + drum triggers")
     ap.add_argument("--scene",       default="scenes/clips_kick_reverse.yaml")
     ap.add_argument("--bars",        type=int,   default=8,
@@ -93,9 +93,16 @@ def main() -> None:
                 spec["gravity"].update(overrides)
                 print(f"gravity override on {name!r}: {spec['gravity']}")
 
-    print(f"Loading clips from {args.clips}")
-    library = ClipLibrary(args.clips, W, H, fps, cache_size=args.cache_size)
-    composer = ClipComposer(library, grid, midi_notes, video_cfg)
+    layers_cfg = video_cfg.get("layers")
+    uses_clips = not layers_cfg or any(
+        (l or {}).get("source", "clips") == "clips" for l in layers_cfg)
+    library = composer = None
+    if uses_clips:
+        if not args.clips:
+            raise SystemExit("--clips is required (this scene uses clip layers)")
+        print(f"Loading clips from {args.clips}")
+        library = ClipLibrary(args.clips, W, H, fps, cache_size=args.cache_size)
+        composer = ClipComposer(library, grid, midi_notes, video_cfg)
 
     # generator layers (cells, ...) need per-frame audio features
     features_at = None
@@ -114,7 +121,8 @@ def main() -> None:
     start_sec = float(grid.start_offset) if grid.start_offset else 0.0
     if args.start_time > 0.0:
         start_sec = args.start_time
-    composer.seek(start_sec)
+    if composer is not None:
+        composer.seek(start_sec)
 
     if args.bars > 0:
         total_dur = args.bars * grid.bar_duration
@@ -132,8 +140,9 @@ def main() -> None:
     sig = grid.time_signature
     print(
         f"BPM={grid.bpm:.1f}  sig={sig[0]}/{sig[1]}  bar={grid.bar_duration:.2f}s  "
-        f"start={start_sec:.2f}s  frames={n_frames}  clips={len(library)}  "
-        f"triggers={triggers}  events={len(composer.events)}"
+        f"start={start_sec:.2f}s  frames={n_frames}  "
+        f"clips={len(library) if library else 0}  triggers={triggers}  "
+        f"events={len(composer.events) if composer else 0}"
     )
 
     stem        = Path(args.file).stem
@@ -161,12 +170,15 @@ def main() -> None:
             frame = stack.frame_at(t)
             enc.stdin.write(frame.tobytes())
             if fi % fps == 0:
-                tp = composer.transport
-                print(
-                    f"  {fi:5d}/{n_frames}  t={t:.1f}s  bar={composer._bar_index(t)}  "
-                    f"clip={tp.clip_idx} ({library.paths[tp.clip_idx].name})  "
-                    f"dir={'>>' if tp.direction > 0 else '<<'}  pos={tp.pos:.0f}"
-                )
+                if composer is not None:
+                    tp = composer.transport
+                    print(
+                        f"  {fi:5d}/{n_frames}  t={t:.1f}s  bar={composer._bar_index(t)}  "
+                        f"clip={tp.clip_idx} ({library.paths[tp.clip_idx].name})  "
+                        f"dir={'>>' if tp.direction > 0 else '<<'}  pos={tp.pos:.0f}"
+                    )
+                else:
+                    print(f"  {fi:5d}/{n_frames}  t={t:.1f}s")
     finally:
         enc.stdin.close()
         enc.wait()

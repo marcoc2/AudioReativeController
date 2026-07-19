@@ -198,9 +198,9 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
     Layer triggers accept MIDI ``notes`` or ``audio`` onset sources.
     """
     comp = Compositor()
+    # no layers: section -> legacy single clips base; a layers: list is
+    # used as-is (first layer = canvas), so pure-generative scenes work
     layers_cfg = video_cfg.get("layers") or [{"source": "clips"}]
-    if not any(l.get("source") == "clips" for l in layers_cfg):
-        layers_cfg = [{"source": "clips"}] + list(layers_cfg)
     for spec in layers_cfg:
         src_name = spec.get("source", "clips")
         blend = spec.get("blend", "normal")
