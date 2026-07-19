@@ -56,18 +56,18 @@ void main(){
     vec3 rd = normalize(fw * 1.6 + uv.x * rt + uv.y * up);
 
     float t = 0.0; int steps = 0; bool hit = false;
-    for (int i = 0; i < 100; i++){
+    for (int i = 0; i < 140; i++){
         vec3 p = ro + rd * t;
         float d = DE(p);
-        if (d < 0.0012 * t){ hit = true; break; }
+        if (d < 0.0006 * t){ hit = true; break; }
         t += d; steps = i;
         if (t > 6.0) break;
     }
-    float ao = 1.0 - float(steps) / 100.0;
+    float ao = 1.0 - float(steps) / 140.0;
     vec3 col;
     if (hit){
         vec3 p = ro + rd * t;
-        float e = 0.0015;
+        float e = 0.0004 + 0.0008 * t;   // normal epsilon scales with depth
         vec3 n = normalize(vec3(
             DE(p + vec3(e,0,0)) - DE(p - vec3(e,0,0)),
             DE(p + vec3(0,e,0)) - DE(p - vec3(0,e,0)),
@@ -80,7 +80,7 @@ void main(){
             + rim * hsv2rgb(vec3(u_hue + 0.12, 0.5, 1.0)) * 0.6;
     } else {
         col = hsv2rgb(vec3(u_hue + 0.5, 0.4, 0.05))
-            + u_glow * (float(steps) / 100.0) * hsv2rgb(vec3(u_hue, 0.8, 0.5));
+            + u_glow * (float(steps) / 140.0) * hsv2rgb(vec3(u_hue, 0.8, 0.5));
     }
     f_color = vec4(col, 1.0);
 }
@@ -88,22 +88,25 @@ void main(){
 
 
 class MandelbulbSystem:
-    def __init__(self, width: int, height: int):
+    def __init__(self, width: int, height: int, supersample: int = 2):
         import moderngl
         self.W, self.H = int(width), int(height)
+        self.ss = max(1, int(supersample))
         self.ctx = moderngl.create_standalone_context()
         self.prog = self.ctx.program(vertex_shader=_VS, fragment_shader=_FS)
         quad = np.array([-1, -1, 1, -1, -1, 1, 1, 1], dtype="f4")
         self._vbo = self.ctx.buffer(quad.tobytes())
         self._vao = self.ctx.vertex_array(self.prog, [(self._vbo, "2f", "in_pos")])
-        self._fbo = self.ctx.simple_framebuffer((self.W, self.H), 3)
+        self._fbo = self.ctx.simple_framebuffer(
+            (self.W * self.ss, self.H * self.ss), 3)
         self._mgl = moderngl
-        # animated state
+        # animated state (audio controls are low-passed so the camera is
+        # steady: raw per-frame energy made the motion jitter at 24 Hz)
         self.power = 8.0
         self.angle = 0.0
         self.elev_phase = 0.0
-        self._bass = 0.0
-        self._flux = 0.0
+        self._bass = 0.0     # smoothed
+        self._flux = 0.0     # smoothed
         self._hue = 0.6
 
     def step(self, dt: float, controls: dict) -> None:
@@ -111,17 +114,22 @@ class MandelbulbSystem:
         if ch is not None and len(ch) == 12:
             target = 3.0 + (int(np.argmax(ch)) / 11.0) * 8.0   # 3..11
             self.power += (target - self.power) * min(1.0, dt * 1.5)
-        self._flux = float(controls.get("flux", 0.0) or 0.0)
+        flux_raw = float(controls.get("flux", 0.0) or 0.0)
         sub = controls.get("subbands") or {}
-        self._bass = float(sub.get("bass", controls.get("bass_energy", 0.0) or 0.0))
+        bass_raw = float(sub.get("bass", controls.get("bass_energy", 0.0) or 0.0))
+        # one-pole low-pass: camera responds in ~0.25-0.35s, not per frame
+        self._bass += (bass_raw - self._bass) * (1.0 - float(np.exp(-dt / 0.25)))
+        self._flux += (flux_raw - self._flux) * (1.0 - float(np.exp(-dt / 0.35)))
         cen = controls.get("centroid")
         if cen is not None:
             self._hue = 0.52 + 0.36 * float(cen)
-        self.angle += dt * (0.15 + 1.2 * self._flux)
-        self.elev_phase += dt * 0.23
+        self.angle += dt * (0.12 + 0.8 * self._flux)
+        self.elev_phase += dt * 0.16
 
     def render(self, zoom: float = 0.0) -> np.ndarray:
-        dist = max(1.15, 2.7 - 1.1 * self._bass - 0.7 * float(zoom))
+        z = float(zoom)
+        z = z * z * (3.0 - 2.0 * z)   # smoothstep: soft kick punch, no snap
+        dist = max(1.15, 2.7 - 1.0 * self._bass - 0.65 * z)
         self.prog["u_power"].value = float(self.power)
         self.prog["u_angle"].value = float(self.angle)
         self.prog["u_elev"].value = 0.35 * float(np.sin(self.elev_phase))
@@ -133,5 +141,9 @@ class MandelbulbSystem:
         self._fbo.clear(0.0, 0.0, 0.0)
         self._vao.render(self._mgl.TRIANGLE_STRIP)
         data = self._fbo.read(components=3)
-        img = np.frombuffer(data, dtype=np.uint8).reshape(self.H, self.W, 3)
-        return img[::-1].copy()   # GL origin is bottom-left
+        sw, sh = self.W * self.ss, self.H * self.ss
+        img = np.frombuffer(data, dtype=np.uint8).reshape(sh, sw, 3)[::-1]
+        if self.ss > 1:   # supersampled anti-aliasing: mean-pool down
+            img = img.reshape(self.H, self.ss, self.W, self.ss, 3).mean(
+                axis=(1, 3)).astype(np.uint8)
+        return img.copy()

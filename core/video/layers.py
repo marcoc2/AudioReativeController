@@ -194,7 +194,8 @@ class MandelbulbLayer:
     def __init__(self, spec: dict, notes: Sequence, width: int, height: int,
                  fps: int, features_at=None, onset_loader=None):
         from core.mandelbulb import MandelbulbSystem
-        self.sys = MandelbulbSystem(width, height)
+        self.sys = MandelbulbSystem(width, height,
+                                    supersample=int(spec.get("supersample", 2)))
         self.features_at = features_at
         self.fps = fps
         tspec = spec.get("zoom_pulse") or {}
