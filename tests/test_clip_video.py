@@ -362,6 +362,24 @@ def test_mandelbulb_gpu_render():
     assert not np.array_equal(a, z)     # kick zoom moves the camera
 
 
+def test_mandelbox_infinite_zoom_loops_seamlessly():
+    try:
+        from core.mandelbox import MandelboxSystem
+        mb = MandelboxSystem(64, 64)
+    except Exception:
+        pytest.skip("no GPU/moderngl context available")
+    mb.step(1 / 24, {"flux": 0.3, "centroid": 0.5})
+    a = mb.render(phase=0.0)
+    b = mb.render(phase=0.999999)   # end of the loop == start (self-similar)
+    mid = mb.render(phase=0.5)
+    assert a.shape == (64, 64, 3)
+    assert not np.array_equal(a, mid)                       # zoom moves
+    diff_loop = np.abs(a.astype(int) - b.astype(int)).mean()
+    diff_half = np.abs(a.astype(int) - mid.astype(int)).mean()
+    # residual at the wrap is subpixel edge shimmer, not structure
+    assert diff_loop < diff_half * 0.45                     # wrap is seamless
+
+
 def test_layers_legacy_scene_is_base_only():
     from core.video.layers import build_compositor
     cfg = {"clip_per_bar": True, "triggers": {}}

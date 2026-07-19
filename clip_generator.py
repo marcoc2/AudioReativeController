@@ -106,7 +106,7 @@ def main() -> None:
 
     # generator layers (cells, ...) need per-frame audio features
     features_at = None
-    if any((l or {}).get("source") in ("cells", "julia", "mandelbulb")
+    if any((l or {}).get("source") in ("cells", "julia", "mandelbulb", "mandelbox")
            for l in video_cfg.get("layers") or []):
         from core.feature_extractor import AudioFeatureExtractor
         print("Extracting audio features for generator layers…")
@@ -114,7 +114,7 @@ def main() -> None:
         features_at = lambda t: extractor.get_features_at_time(t, apply_gate=False)
 
     stack = build_compositor(composer, video_cfg, midi_notes, W, H,
-                             fps=fps, features_at=features_at)
+                             fps=fps, features_at=features_at, grid=grid)
     if len(stack) > 1:
         print(f"layers: {len(stack)} (compositing enabled)")
 

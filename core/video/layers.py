@@ -209,9 +209,35 @@ class MandelbulbLayer:
         return self.sys.render(zoom=self._zoom(t) if self._zoom else 0.0)
 
 
+class MandelboxLayer:
+    """Infinite-zoom KIFS (core.mandelbox); loop period locked to bars."""
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int,
+                 fps: int, features_at=None, onset_loader=None, grid=None):
+        from core.mandelbox import MandelboxSystem
+        self.sys = MandelboxSystem(width, height,
+                                   supersample=int(spec.get("supersample", 2)))
+        self.features_at = features_at
+        self.fps = fps
+        if grid is not None:
+            self.loop_s = float(spec.get("loop_bars", 4)) * grid.bar_duration
+        else:
+            self.loop_s = float(spec.get("loop_seconds", 8.0))
+        tspec = spec.get("zoom_pulse") or {}
+        self._pulse = (EnvelopeOpacity(_layer_hits(tspec, notes, onset_loader),
+                                       tspec.get("envelope", 0.3))
+                       if tspec else None)
+
+    def frame_at(self, t: float) -> np.ndarray:
+        controls = (self.features_at(t) if self.features_at else None) or {}
+        self.sys.step(1.0 / self.fps, controls)
+        return self.sys.render(phase=(t / self.loop_s) % 1.0,
+                               pulse=self._pulse(t) if self._pulse else 0.0)
+
+
 def build_compositor(base, video_cfg: dict, notes: Sequence,
                      width: int, height: int, onset_loader=None,
-                     fps: int = 24, features_at=None) -> "Compositor":
+                     fps: int = 24, features_at=None, grid=None) -> "Compositor":
     """Compose ``base`` (ClipComposer) with the scene's extra layers.
 
     Layers with ``source: clips`` map to the base; unknown sources raise.
@@ -243,6 +269,12 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             comp.add(CellsLayer(spec, notes, width, height, fps,
                                 features_at=features_at,
                                 onset_loader=onset_loader),
+                     blend, op_fn)
+            continue
+        if src_name == "mandelbox":
+            comp.add(MandelboxLayer(spec, notes, width, height, fps,
+                                    features_at=features_at,
+                                    onset_loader=onset_loader, grid=grid),
                      blend, op_fn)
             continue
         if src_name == "mandelbulb":
