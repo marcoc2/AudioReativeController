@@ -23,6 +23,8 @@ _FS = """
 #version 330
 in vec2 v_uv; out vec4 f_color;
 uniform float u_z, u_angle, u_roll, u_hue, u_glow, u_aspect, u_spread;
+uniform float u_cr, u_ca, u_ta;   // camera: radial, axial, target-axial
+uniform float u_focal;            // focal length (telephoto crops into the face)
 
 const float SCALE = 2.0;
 const vec3  FIX   = vec3(1.0, 1.0, 1.0);
@@ -58,14 +60,14 @@ void main(){
     vec3 ax = normalize(FIX);
     vec3 b1 = normalize(cross(ax, vec3(0.0, 0.0, 1.0)));
     vec3 b2 = cross(ax, b1);
-    vec3 ro = FIX + 1.5 * (cos(u_angle) * b1 + sin(u_angle) * b2) + 0.9 * ax;
-    vec3 fw = normalize(FIX - 0.5 * ax - ro);   // aim below the vertex, into the gasket
+    vec3 ro = FIX + u_cr * (cos(u_angle) * b1 + sin(u_angle) * b2) + u_ca * ax;
+    vec3 fw = normalize(FIX - u_ta * ax - ro);   // aim below the vertex, into the gasket
     vec3 rt0 = normalize(cross(fw, vec3(0.0, 0.0, 1.0)));
     vec3 up0 = cross(rt0, fw);
     float cr = cos(u_roll), sr = sin(u_roll);
     vec3 rt = rt0 * cr + up0 * sr;
     vec3 up = -rt0 * sr + up0 * cr;
-    vec3 rd = normalize(fw * 1.5 + uv.x * rt + uv.y * up);
+    vec3 rd = normalize(fw * u_focal + uv.x * rt + uv.y * up);
 
     float t = 0.0; int steps = 0; bool hit = false;
     for (int i = 0; i < 150; i++){
@@ -124,6 +126,10 @@ class MandelboxSystem:
         self._flux = 0.0
         self._hue = 0.58
         self.hue_spread = 0.35
+        # camera placement (radial offset, axial offset, look-target axial):
+        # close-in so the gasket fills the frame and the dive flow dominates
+        self.cam = (0.6, 0.3, 1.2)
+        self.focal = 3.0
 
     def step(self, dt: float, controls: dict) -> None:
         flux_raw = float(controls.get("flux", 0.0) or 0.0)
@@ -145,6 +151,10 @@ class MandelboxSystem:
         self.prog["u_hue"].value = float(self._hue)
         self.prog["u_glow"].value = float(0.15 + 0.85 * self._flux)
         self.prog["u_spread"].value = float(self.hue_spread)
+        self.prog["u_cr"].value = float(self.cam[0])
+        self.prog["u_ca"].value = float(self.cam[1])
+        self.prog["u_ta"].value = float(self.cam[2])
+        self.prog["u_focal"].value = float(self.focal)
         self.prog["u_aspect"].value = self.W / self.H
         self._fbo.use()
         self._fbo.clear(0.0, 0.0, 0.0)
