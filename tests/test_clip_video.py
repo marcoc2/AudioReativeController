@@ -265,6 +265,43 @@ def test_layers_flash_from_audio_onsets():
     assert int(stack.frame_at(1.0)[0, 0, 0]) <= 3
 
 
+def test_cells_system_mitosis_and_audio_response():
+    from core.cells import CellSystem
+    sys_ = CellSystem(n_base=6, n_max=10, grid=64, seed=1)
+    assert sys_.n == 6
+    sys_.mitosis()
+    assert sys_.n == 7
+    for _ in range(20):
+        sys_.mitosis()
+    assert sys_.n == 10                      # capped at n_max
+    sys_.step(1 / 24, {"flux": 0.0, "chroma": [0.1] * 12})
+    calm = sys_.render()
+    sys_.step(1 / 24, {"flux": 1.0, "chroma": [1.0] * 12})
+    loud = sys_.render()
+    assert calm.shape == (64, 64, 3) and calm.dtype == np.uint8
+    assert loud.astype(int).sum() > calm.astype(int).sum()   # louder = brighter
+    assert len(np.unique(calm)) <= 8         # posterized (6 levels + mixes)
+
+
+def test_cells_layer_in_compositor():
+    from core.video.layers import build_compositor
+    cfg = {"clip_per_bar": True, "triggers": {},
+           "layers": [{"source": "clips"},
+                      {"source": "cells", "resolution": 32, "n_base": 4,
+                       "seed": 5, "blend": "screen",
+                       "mitosis": {"notes": [38]}}]}
+    comp = make_composer([snare(1.0)], cfg)
+    feats = lambda t: {"flux": 0.5, "chroma": [0.8] * 12}
+    stack = build_compositor(comp, cfg, [snare(1.0)], 48, 48,
+                             fps=4, features_at=feats)
+    f = stack.frame_at(0.25)
+    assert f.shape == (48, 48, 3)
+    cells_layer = stack._layers[1][0]
+    n0 = cells_layer.sys.n
+    stack.frame_at(1.0)                      # snare -> mitosis
+    assert cells_layer.sys.n == n0 + 1
+
+
 def test_layers_legacy_scene_is_base_only():
     from core.video.layers import build_compositor
     cfg = {"clip_per_bar": True, "triggers": {}}

@@ -115,8 +115,45 @@ def _layer_hits(spec: dict, notes: Sequence, onset_loader=None) -> list:
     return [n.time for n in src if n.velocity >= min_vel]
 
 
+class CellsLayer:
+    """8-bit cells (core.cells) rendered per frame and nearest-upscaled.
+
+    ``features_at(t) -> dict`` supplies audio controls (chroma/flux/...);
+    ``mitosis`` trigger spec (notes or audio) splits cells on hits.
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int,
+                 fps: int, features_at=None, onset_loader=None):
+        from core.cells import CellSystem
+        self.sys = CellSystem(
+            n_base=int(spec.get("n_base", 12)),
+            n_max=int(spec.get("n_max", 48)),
+            grid=int(spec.get("resolution", 160)),
+            seed=spec.get("seed"),
+        )
+        self.features_at = features_at
+        self.fps = fps
+        self.W, self.H = width, height
+        mit = spec.get("mitosis") or {}
+        self.hits = sorted(_layer_hits(mit, notes, onset_loader)) if mit else []
+        self._ptr = 0
+
+    def frame_at(self, t: float) -> np.ndarray:
+        while self._ptr < len(self.hits) and self.hits[self._ptr] <= t:
+            self.sys.mitosis()
+            self._ptr += 1
+        controls = (self.features_at(t) if self.features_at else None) or {}
+        self.sys.step(1.0 / self.fps, controls)
+        img = self.sys.render()
+        g = img.shape[0]
+        iy = np.arange(self.H) * g // self.H
+        ix = np.arange(self.W) * g // self.W
+        return img[iy][:, ix]
+
+
 def build_compositor(base, video_cfg: dict, notes: Sequence,
-                     width: int, height: int, onset_loader=None) -> "Compositor":
+                     width: int, height: int, onset_loader=None,
+                     fps: int = 24, features_at=None) -> "Compositor":
     """Compose ``base`` (ClipComposer) with the scene's extra layers.
 
     Layers with ``source: clips`` map to the base; unknown sources raise.
@@ -141,6 +178,12 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
                 hits = _layer_hits(tspec, notes, onset_loader)
                 opacity = EnvelopeOpacity(hits, tspec.get("envelope", 0.1))
             comp.add(src, blend, opacity)
+            continue
+        if src_name == "cells":
+            comp.add(CellsLayer(spec, notes, width, height, fps,
+                                features_at=features_at,
+                                onset_loader=onset_loader),
+                     blend, None)
             continue
         raise ValueError(f"unknown layer source {src_name!r}")
     return comp
