@@ -188,6 +188,26 @@ class JuliaLayer:
         return img[iy][:, ix]
 
 
+class MandelbulbLayer:
+    """GPU ray-marched Mandelbulb (core.mandelbulb) at native resolution."""
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int,
+                 fps: int, features_at=None, onset_loader=None):
+        from core.mandelbulb import MandelbulbSystem
+        self.sys = MandelbulbSystem(width, height)
+        self.features_at = features_at
+        self.fps = fps
+        tspec = spec.get("zoom_pulse") or {}
+        self._zoom = (EnvelopeOpacity(_layer_hits(tspec, notes, onset_loader),
+                                      tspec.get("envelope", 0.3))
+                      if tspec else None)
+
+    def frame_at(self, t: float) -> np.ndarray:
+        controls = (self.features_at(t) if self.features_at else None) or {}
+        self.sys.step(1.0 / self.fps, controls)
+        return self.sys.render(zoom=self._zoom(t) if self._zoom else 0.0)
+
+
 def build_compositor(base, video_cfg: dict, notes: Sequence,
                      width: int, height: int, onset_loader=None,
                      fps: int = 24, features_at=None) -> "Compositor":
@@ -222,6 +242,12 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             comp.add(CellsLayer(spec, notes, width, height, fps,
                                 features_at=features_at,
                                 onset_loader=onset_loader),
+                     blend, op_fn)
+            continue
+        if src_name == "mandelbulb":
+            comp.add(MandelbulbLayer(spec, notes, width, height, fps,
+                                     features_at=features_at,
+                                     onset_loader=onset_loader),
                      blend, op_fn)
             continue
         if src_name == "julia":

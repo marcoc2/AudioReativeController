@@ -347,6 +347,21 @@ def test_layer_static_opacity():
     assert 120 <= int(f[0, 0, 0]) <= 135     # 50% white over near-black base
 
 
+def test_mandelbulb_gpu_render():
+    try:
+        from core.mandelbulb import MandelbulbSystem
+        mb = MandelbulbSystem(48, 48)
+    except Exception:
+        pytest.skip("no GPU/moderngl context available")
+    mb.step(1 / 24, {"chroma": [1] + [0] * 11, "flux": 0.3,
+                     "bass_energy": 0.5, "centroid": 0.5})
+    a = mb.render()
+    assert a.shape == (48, 48, 3) and a.dtype == np.uint8
+    assert a.sum() > 0
+    z = mb.render(zoom=1.0)
+    assert not np.array_equal(a, z)     # kick zoom moves the camera
+
+
 def test_layers_legacy_scene_is_base_only():
     from core.video.layers import build_compositor
     cfg = {"clip_per_bar": True, "triggers": {}}

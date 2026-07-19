@@ -106,7 +106,7 @@ def main() -> None:
 
     # generator layers (cells, ...) need per-frame audio features
     features_at = None
-    if any((l or {}).get("source") in ("cells", "julia")
+    if any((l or {}).get("source") in ("cells", "julia", "mandelbulb")
            for l in video_cfg.get("layers") or []):
         from core.feature_extractor import AudioFeatureExtractor
         print("Extracting audio features for generator layers…")
