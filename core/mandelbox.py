@@ -22,7 +22,7 @@ void main(){ v_uv = in_pos * 0.5 + 0.5; gl_Position = vec4(in_pos, 0.0, 1.0); }
 _FS = """
 #version 330
 in vec2 v_uv; out vec4 f_color;
-uniform float u_z, u_angle, u_roll, u_hue, u_glow, u_aspect;
+uniform float u_z, u_angle, u_roll, u_hue, u_glow, u_aspect, u_spread;
 
 const float SCALE = 2.0;
 const vec3  FIX   = vec3(1.0, 1.0, 1.0);
@@ -86,10 +86,17 @@ void main(){
             map(p + vec3(0,0,e)) - map(p - vec3(0,0,e))));
         vec3 ld = normalize(vec3(0.5, 0.7, 0.6));
         float dif = clamp(dot(n, ld), 0.0, 1.0);
-        vec3 base = hsv2rgb(vec3(u_hue, 0.6, 0.92));
+        // log-radial hue bands: one hue cycle per self-similarity octave,
+        // colors flow outward with the dive; world-position based, so the
+        // loop wrap stays seamless by construction
+        float r = length(p - FIX);
+        float band = 0.5 + 0.5 * sin(6.2832 * log2(max(r, 1e-4)));
+        float az = atan(dot(p - FIX, b1), dot(p - FIX, b2));
+        vec3 base = hsv2rgb(vec3(u_hue + u_spread * band + 0.06 * sin(3.0 * az),
+                                 0.5 + 0.3 * band, 0.92));
         float rim = pow(1.0 - abs(dot(n, -rd)), 2.0);
         col = base * (0.12 + 0.88 * dif) * ao
-            + rim * hsv2rgb(vec3(u_hue + 0.1, 0.5, 1.0)) * 0.55;
+            + rim * hsv2rgb(vec3(u_hue + 0.45, 0.45, 1.0)) * 0.5;
     } else {
         col = hsv2rgb(vec3(u_hue + 0.5, 0.35, 0.04))
             + u_glow * (float(steps) / 150.0) * hsv2rgb(vec3(u_hue, 0.85, 0.45));
@@ -116,6 +123,7 @@ class MandelboxSystem:
         self.roll = 0.0
         self._flux = 0.0
         self._hue = 0.58
+        self.hue_spread = 0.35
 
     def step(self, dt: float, controls: dict) -> None:
         flux_raw = float(controls.get("flux", 0.0) or 0.0)
@@ -129,12 +137,14 @@ class MandelboxSystem:
     def render(self, phase: float, pulse: float = 0.0) -> np.ndarray:
         """``phase`` 0..1 = one seamless self-similarity period (musical)."""
         p = pulse * pulse * (3.0 - 2.0 * pulse)
-        z = float(2.0 ** ((phase % 1.0) + 0.3 * p))
+        # the continuous dive dominates; the kick is an accent on top
+        z = float(2.0 ** ((phase % 1.0) + 0.15 * p))
         self.prog["u_z"].value = z
         self.prog["u_angle"].value = float(self.angle)
         self.prog["u_roll"].value = float(self.roll)
         self.prog["u_hue"].value = float(self._hue)
         self.prog["u_glow"].value = float(0.15 + 0.85 * self._flux)
+        self.prog["u_spread"].value = float(self.hue_spread)
         self.prog["u_aspect"].value = self.W / self.H
         self._fbo.use()
         self._fbo.clear(0.0, 0.0, 0.0)

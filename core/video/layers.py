@@ -217,6 +217,7 @@ class MandelboxLayer:
         from core.mandelbox import MandelboxSystem
         self.sys = MandelboxSystem(width, height,
                                    supersample=int(spec.get("supersample", 2)))
+        self.sys.hue_spread = float(spec.get("hue_spread", 0.35))
         self.features_at = features_at
         self.fps = fps
         if grid is not None:
