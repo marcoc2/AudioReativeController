@@ -162,7 +162,8 @@ class JuliaLayer:
                  fps: int, features_at=None, onset_loader=None):
         from core.fractal import JuliaSystem
         self.sys = JuliaSystem(grid=int(spec.get("resolution", 256)),
-                               iters=int(spec.get("iters", 48)))
+                               iters=int(spec.get("iters", 48)),
+                               aspect=height / width)
         self.features_at = features_at
         self.fps = fps
         self.W, self.H = width, height
@@ -182,9 +183,9 @@ class JuliaLayer:
             zoom=self._zoom(t) if self._zoom else 0.0,
             invert=self._invert(t) if self._invert else 0.0,
         )
-        g = img.shape[0]
-        iy = np.arange(self.H) * g // self.H
-        ix = np.arange(self.W) * g // self.W
+        gh, gw = img.shape[:2]
+        iy = np.arange(self.H) * gh // self.H
+        ix = np.arange(self.W) * gw // self.W
         return img[iy][:, ix]
 
 

@@ -29,15 +29,19 @@ def _cardioid(theta: float) -> complex:
 
 
 class JuliaSystem:
-    def __init__(self, grid: int = 256, iters: int = 48):
+    def __init__(self, grid: int = 256, iters: int = 48, aspect: float = 1.0):
+        """``grid`` is the internal width; height = grid * aspect (H/W)."""
         self.grid = int(grid)
         self.iters = int(iters)
         self.theta = 0.0          # current angle on the cardioid
         self.cycle = 0.0          # palette cycling phase
         self._radius = 0.96
         self._hue = 0.6
-        ax = np.linspace(-1.6, 1.6, self.grid, dtype=np.float32)
-        self._plane = (ax[None, :] + 1j * ax[:, None]).astype(np.complex64)
+        gw = self.grid
+        gh = max(1, int(round(gw * aspect)))
+        ax = np.linspace(-1.6, 1.6, gw, dtype=np.float32)
+        ay = np.linspace(-1.6 * aspect, 1.6 * aspect, gh, dtype=np.float32)
+        self._plane = (ax[None, :] + 1j * ay[:, None]).astype(np.complex64)
 
     def step(self, dt: float, controls: dict) -> None:
         ch = controls.get("chroma")
