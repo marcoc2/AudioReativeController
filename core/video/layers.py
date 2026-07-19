@@ -151,6 +151,43 @@ class CellsLayer:
         return img[iy][:, ix]
 
 
+class JuliaLayer:
+    """Audio-driven Julia set (core.fractal), nearest-upscaled.
+
+    ``zoom_pulse`` and ``invert`` trigger specs (notes or audio) drive
+    envelopes: kick sucks the camera in, snare flips the palette.
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int,
+                 fps: int, features_at=None, onset_loader=None):
+        from core.fractal import JuliaSystem
+        self.sys = JuliaSystem(grid=int(spec.get("resolution", 256)),
+                               iters=int(spec.get("iters", 48)))
+        self.features_at = features_at
+        self.fps = fps
+        self.W, self.H = width, height
+        def env(key, default_dur):
+            tspec = spec.get(key) or {}
+            if not tspec:
+                return None
+            hits = _layer_hits(tspec, notes, onset_loader)
+            return EnvelopeOpacity(hits, tspec.get("envelope", default_dur))
+        self._zoom = env("zoom_pulse", 0.25)
+        self._invert = env("invert", 0.1)
+
+    def frame_at(self, t: float) -> np.ndarray:
+        controls = (self.features_at(t) if self.features_at else None) or {}
+        self.sys.step(1.0 / self.fps, controls)
+        img = self.sys.render(
+            zoom=self._zoom(t) if self._zoom else 0.0,
+            invert=self._invert(t) if self._invert else 0.0,
+        )
+        g = img.shape[0]
+        iy = np.arange(self.H) * g // self.H
+        ix = np.arange(self.W) * g // self.W
+        return img[iy][:, ix]
+
+
 def build_compositor(base, video_cfg: dict, notes: Sequence,
                      width: int, height: int, onset_loader=None,
                      fps: int = 24, features_at=None) -> "Compositor":
@@ -167,12 +204,14 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
     for spec in layers_cfg:
         src_name = spec.get("source", "clips")
         blend = spec.get("blend", "normal")
+        static_op = spec.get("opacity")
+        op_fn = (lambda t, v=float(static_op): v) if isinstance(static_op, (int, float)) else None
         if src_name == "clips":
-            comp.add(base, "normal", None)
+            comp.add(base, blend if len(comp) else "normal", op_fn)
             continue
         if src_name == "solid":
             src = SolidLayer(width, height, spec.get("color", [255, 255, 255]))
-            opacity = None
+            opacity = op_fn
             trig = spec.get("triggers") or {}
             for name, tspec in trig.items():
                 hits = _layer_hits(tspec, notes, onset_loader)
@@ -183,7 +222,13 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             comp.add(CellsLayer(spec, notes, width, height, fps,
                                 features_at=features_at,
                                 onset_loader=onset_loader),
-                     blend, None)
+                     blend, op_fn)
+            continue
+        if src_name == "julia":
+            comp.add(JuliaLayer(spec, notes, width, height, fps,
+                                features_at=features_at,
+                                onset_loader=onset_loader),
+                     blend, op_fn)
             continue
         raise ValueError(f"unknown layer source {src_name!r}")
     return comp

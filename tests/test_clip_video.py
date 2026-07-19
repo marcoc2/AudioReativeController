@@ -302,6 +302,51 @@ def test_cells_layer_in_compositor():
     assert cells_layer.sys.n == n0 + 1
 
 
+def test_julia_system_responds_to_audio():
+    from core.fractal import JuliaSystem
+    js = JuliaSystem(grid=64, iters=24)
+    js.step(1 / 24, {"chroma": [0] * 6 + [1] + [0] * 5, "flux": 0.2,
+                     "bass_energy": 0.1, "centroid": 0.3})
+    calm = js.render()
+    assert calm.shape == (64, 64, 3) and calm.dtype == np.uint8
+    for _ in range(24):
+        js.step(1 / 24, {"chroma": [1] + [0] * 11, "flux": 0.9,
+                         "bass_energy": 0.95, "centroid": 0.9})
+    loud = js.render()
+    assert not np.array_equal(calm, loud)          # audio morphs the fractal
+    zoomed = js.render(zoom=1.0)
+    assert not np.array_equal(loud, zoomed)        # kick zoom pulse
+    inv = js.render(invert=1.0)
+    assert inv.astype(int).sum() != loud.astype(int).sum()
+
+
+def test_julia_layer_in_compositor():
+    from core.video.layers import build_compositor
+    cfg = {"clip_per_bar": True, "triggers": {},
+           "layers": [{"source": "julia", "resolution": 32, "iters": 16,
+                       "zoom_pulse": {"notes": [36]}},
+                      {"source": "clips", "blend": "screen"}]}
+    comp = make_composer([kick(1.0)], cfg)
+    feats = lambda t: {"chroma": [0.5] * 12, "flux": 0.4, "centroid": 0.5}
+    stack = build_compositor(comp, cfg, [kick(1.0)], 48, 48,
+                             fps=4, features_at=feats)
+    assert len(stack) == 2
+    f = stack.frame_at(0.25)
+    assert f.shape == (48, 48, 3)
+
+
+def test_layer_static_opacity():
+    from core.video.layers import build_compositor
+    cfg = {"clip_per_bar": True, "triggers": {},
+           "layers": [{"source": "clips"},
+                      {"source": "solid", "color": [255, 255, 255],
+                       "blend": "normal", "opacity": 0.5}]}
+    comp = make_composer([], cfg)
+    stack = build_compositor(comp, cfg, [], 1, 1)
+    f = stack.frame_at(0.0)
+    assert 120 <= int(f[0, 0, 0]) <= 135     # 50% white over near-black base
+
+
 def test_layers_legacy_scene_is_base_only():
     from core.video.layers import build_compositor
     cfg = {"clip_per_bar": True, "triggers": {}}
