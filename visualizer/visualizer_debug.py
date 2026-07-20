@@ -136,7 +136,7 @@ def main():
                 elif event.key == pygame.K_u: extractor.vocal_threshold -= 0.05
                 elif event.key == pygame.K_i: extractor.vocal_threshold += 0.05
                 elif event.key == pygame.K_r:
-                    cmd = [sys.executable, str(PROJECT_ROOT / "animation_generator.py"), "--file", str(file_path), "--mode", extractor.separation_mode, "--out", f"render_output/{file_path.stem}_seed.mp4"]
+                    cmd = [sys.executable, str(PROJECT_ROOT / "generators" / "animation_generator.py"), "--file", str(file_path), "--mode", extractor.separation_mode, "--out", f"render_output/{file_path.stem}_seed.mp4"]
                     os.makedirs(PROJECT_ROOT / "render_output", exist_ok=True)
                     subprocess.Popen(cmd)
                 elif event.key == pygame.K_PLUS or event.key == pygame.K_EQUALS: extractor.update_num_bands(extractor.num_bands + 1)

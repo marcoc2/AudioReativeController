@@ -18,6 +18,9 @@ from pathlib import Path
 
 import pygame
 
+import sys as _sys
+from pathlib import Path as _P
+_sys.path.insert(0, str(_P(__file__).resolve().parents[1]))  # repo root: core/ imports
 from core.feature_extractor import AudioFeatureExtractor
 from core.particles_v3 import ParticleSystemV3
 from core.pipeline import ARCPipeline

@@ -31,7 +31,7 @@ Advanced AI-driven audio visualization and animation seed generator for video-to
 Render a high-contrast animation seed for a specific segment of a song:
 
 ```bash
-python animation_generator.py --file "path/to/audio.mp3" --duration 10 --preset zigzag --trail 10 --speed 0.5 --scale 0.7
+python generators/animation_generator.py --file "path/to/audio.mp3" --duration 10 --preset zigzag --trail 10 --speed 0.5 --scale 0.7
 ```
 
 **Main Arguments:**
@@ -59,6 +59,7 @@ python visualizer/visualizer_debug.py --file "path/to/audio.mp3"
 
 - `core/`: Audio DSP and AI separation logic.
 - `visualizer/`: Real-time visualization engines.
-- `animation_generator.py`: Main CLI tool for offline rendering.
+- `clip_generator.py`: main CLI (clip compositing + generative layers).
+- `generators/`: legacy standalone generators (particles/geometry).
 - `stems_output/`: Cache for AI-separated files.
 - `render_output/`: Destination for generated MP4 seeds.

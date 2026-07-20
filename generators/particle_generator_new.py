@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Audio-reactive particle animation generator.
+"""Enhanced audio-reactive particle animation generator (V2).
 
-Drives a NumPy particle physics engine from ARCPipeline feature data and
-assembles the rendered frames into an MP4 with audio via ffmpeg.
+Uses ParticleSystemV2 for richer visuals:
+  • Particle trails / motion blur
+  • Gaussian bloom / glow
+  • Kick shockwave rings
+  • Three particle populations (core, ambient, sparks)
+  • Nebula background that breathes with sub-bass
+  • Cinematic vignette & Reinhard tonemapping
+
+Drives the same ARCPipeline and accepts the same CLI arguments as the original.
 
 Usage examples
 --------------
-  python particle_generator.py --file audio.mp3 --midi song.mid --bars 16
-  python particle_generator.py --file audio.mp3 --n-particles 40000 --bars 8
-  python particle_generator.py --file audio.mp3 --stems solo=guitar.wav --bars 8
+  python particle_generator_new.py --file audio.mp3 --midi song.mid --bars 16
+  python particle_generator_new.py --file audio.mp3 --n-particles 40000 --bars 8
+  python particle_generator_new.py --file audio.mp3 --stems solo=guitar.wav --bars 8
 """
 
 import argparse
@@ -18,11 +25,13 @@ from pathlib import Path
 
 import pygame
 
+import sys as _sys
+from pathlib import Path as _P
+_sys.path.insert(0, str(_P(__file__).resolve().parents[1]))  # repo root: core/ imports
 from core.feature_extractor import AudioFeatureExtractor
-from core.particles import ParticleSystem
+from core.particles_v2 import ParticleSystemV2
 from core.pipeline import ARCPipeline
 from core.rhythm.grid import RhythmGrid
-from core.rhythm.midi_automation import MidiAutomationReader
 from core.rhythm.midi_reader import read_midi
 
 
@@ -43,7 +52,7 @@ def _parse_stems(raw: list[str]) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="ARC particle animation generator")
+    ap = argparse.ArgumentParser(description="ARC particle animation generator (V2 — enhanced visuals)")
     ap.add_argument("--file",         required=True,  help="Audio file (mp3/wav/flac)")
     ap.add_argument("--midi",         default=None,   help="MIDI file for rhythm grid")
     ap.add_argument("--scene",        default="scenes/default.yaml")
@@ -71,11 +80,9 @@ def main() -> None:
     extractor.update_num_bands(32)
 
     # --- Rhythm grid ---------------------------------------------------
-    midi_automation = None
     if args.midi:
         print(f"Reading MIDI: {args.midi}")
         grid, _ = read_midi(args.midi, fps=fps)
-        midi_automation = MidiAutomationReader(args.midi, fps=fps)
         if args.midi_offset != 0.0:
             shift = args.midi_offset
             if grid.beats is not None:
@@ -83,16 +90,11 @@ def main() -> None:
             if grid.downbeats is not None:
                 grid.downbeats = grid.downbeats + shift
             grid.start_offset += shift
-        lanes = midi_automation.available_lanes
-        if lanes:
-            print(f"[MIDI Automation] {len(lanes)} lanes: {', '.join(lanes[:8])}"
-                  + (" …" if len(lanes) > 8 else ""))
     else:
         grid = RhythmGrid(bpm=120.0, fps=fps)
 
     # --- Pipeline ------------------------------------------------------
-    pipeline = ARCPipeline.from_yaml(extractor, grid, args.scene,
-                                     midi_automation=midi_automation)
+    pipeline = ARCPipeline.from_yaml(extractor, grid, args.scene)
 
     bar_dur    = pipeline.bar_duration
     start_sec  = float(grid.start_offset) if grid.start_offset else 0.0
@@ -105,13 +107,13 @@ def main() -> None:
         f"particles={args.n_particles:,}"
     )
 
-    # --- Particle system -----------------------------------------------
-    particles = ParticleSystem(n=args.n_particles)
+    # --- Particle system (V2 enhanced) ---------------------------------
+    particles = ParticleSystemV2(n=args.n_particles)
 
     # --- Render loop ---------------------------------------------------
     pygame.init()
     surface    = pygame.Surface((W, H))
-    frame_dir  = Path(tempfile.mkdtemp(prefix="arc_particles_"))
+    frame_dir  = Path(tempfile.mkdtemp(prefix="arc_particles_v2_"))
     print(f"Writing frames to {frame_dir}")
 
     for fi in range(n_frames):
@@ -152,12 +154,14 @@ def main() -> None:
             print(
                 f"  {fi:5d}/{n_frames}  t={t:.1f}s  "
                 f"bass={c.get('bass_energy', 0):.2f}  "
-                f"flux={c.get('flux', 0):.2f}"
+                f"flux={c.get('flux', 0):.2f}  "
+                f"kick={c.get('kick_intensity', 0):.2f}  "
+                f"shockwaves={len(particles.shockwaves)}"
             )
 
     # --- Assemble video ------------------------------------------------
     stem        = Path(args.file).stem
-    output_path = args.output or f"render_output/{stem}_particles.mp4"
+    output_path = args.output or f"render_output/{stem}_particles_v2.mp4"
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
     print("Assembling video with ffmpeg…")
@@ -174,7 +178,7 @@ def main() -> None:
         ],
         check=True,
     )
-    print(f"\nDone! → {output_path}")
+    print(f"\nDone! -> {output_path}")
 
 
 if __name__ == "__main__":

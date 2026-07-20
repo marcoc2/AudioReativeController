@@ -35,10 +35,10 @@ EVENT_COLORS = [
 
 # render mode -> generator script (clips mode is handled separately)
 _MODE_SCRIPTS = {
-    "particles":    "particle_generator.py",
-    "particles_v2": "particle_generator_new.py",
-    "particles_v3": "particle_generator_v3.py",
-    "geometry":     "animation_generator.py",
+    "particles":    "generators/particle_generator.py",
+    "particles_v2": "generators/particle_generator_new.py",
+    "particles_v3": "generators/particle_generator_v3.py",
+    "geometry":     "generators/animation_generator.py",
 }
 
 TRACK_COLORS = [
@@ -1426,7 +1426,7 @@ def _build_render_cmd() -> list:
                     "--gravity-radius", str(S.grav_radius),
                     "--gravity-curve",  str(S.grav_curve)]
     else:
-        script = _MODE_SCRIPTS.get(S.mode, "particle_generator.py")
+        script = _MODE_SCRIPTS.get(S.mode, "generators/particle_generator.py")
         cmd = [sys.executable, script,
                "--file",  S.audio_path,
                "--bars",  str(S.bars),

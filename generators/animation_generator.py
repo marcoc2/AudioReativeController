@@ -14,7 +14,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 try:
-    from core.feature_extractor import AudioFeatureExtractor
+    import sys as _sys
+from pathlib import Path as _P
+_sys.path.insert(0, str(_P(__file__).resolve().parents[1]))  # repo root: core/ imports
+from core.feature_extractor import AudioFeatureExtractor
     from core.motion import create_zigzag_preset
     from core.pipeline import ARCPipeline, FrameSlice
     from core.rhythm.analyzer import analyze

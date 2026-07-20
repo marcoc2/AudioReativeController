@@ -55,7 +55,7 @@ def test_particles_mode_unchanged():
     _reset_state()
     S.mode = "particles"
     cmd = _build_render_cmd()
-    assert cmd[1] == "particle_generator.py"
+    assert cmd[1] == "generators/particle_generator.py"
     assert "--clips" not in cmd
     assert cmd[cmd.index("--midi") + 1] == "song.mid"
 
@@ -69,10 +69,10 @@ def test_no_midi_omits_flag():
 
 def test_mode_script_map():
     _reset_state()
-    for mode, script in (("particles", "particle_generator.py"),
-                         ("particles_v2", "particle_generator_new.py"),
-                         ("particles_v3", "particle_generator_v3.py"),
-                         ("geometry", "animation_generator.py")):
+    for mode, script in (("particles", "generators/particle_generator.py"),
+                         ("particles_v2", "generators/particle_generator_new.py"),
+                         ("particles_v3", "generators/particle_generator_v3.py"),
+                         ("geometry", "generators/animation_generator.py")):
         S.mode = mode
         assert _build_render_cmd()[1] == script
 

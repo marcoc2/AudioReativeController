@@ -14,7 +14,7 @@ certo é a decisão mais importante.
 | **Layer source** | Gerador de imagem: produz um frame RGB por chamada | O efeito desenha conteúdo próprio (fractais, partículas, geometria) | `core/cells.py`, `core/fractal.py`, `core/mandelbulb.py`, `core/mandelbox.py` + wrappers em `core/video/layers.py` |
 | **Post-op** | Transforma o composto acumulado (pixels) | O efeito modifica a imagem existente (aberração, feedback/túnel, hue shift, blur) | `RgbSplit` em `core/video/layers.py` |
 | **Transport action / GravityWarp** | Muda o playback dos clipes (tempo) | O efeito é temporal: direção, velocidade, salto de clipe | `ACTIONS` e `GravityWarp` em `core/video/composer.py` |
-| **Legado (congelado)** | `particle_generator*.py`, `animation_generator.py`, `core/particles*.py`, `core/visual.py` | **Nunca estenda.** São modos standalone antigos, despachados pela GUI. Efeitos deles migram virando layer source | — |
+| **Legado (congelado)** | `generators/*.py`, `core/particles*.py`, `core/visual.py` | **Nunca estenda.** São modos standalone antigos, despachados pela GUI. Efeitos deles migram virando layer source | — |
 
 Fluxo de dados (não altere): `clip_generator.py` monta grid+notes+
 features → `build_compositor()` (único ponto de registro) → loop chama
@@ -119,7 +119,7 @@ video:
       trigger: {notes: [38, 40], envelope: 0.12}
 ```
 
-## 6. Status do legado (`particle_generator*.py`)
+## 6. Status do legado (`generators/`)
 
 Verificado em 2026-07-19: são usados por (a) despacho de modos da GUI
 (`_MODE_SCRIPTS` no `arc_studio.py`), (b) hotkey [R] do
