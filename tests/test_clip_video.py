@@ -380,6 +380,31 @@ def test_mandelbox_infinite_zoom_loops_seamlessly():
     assert diff_loop < diff_half * 0.45                     # wrap is seamless
 
 
+def test_rgb_split_post_op():
+    from core.video.layers import RgbSplit
+
+    grad = np.zeros((4, 8, 3), dtype=np.uint8)
+    grad[:, :, 0] = np.arange(8, dtype=np.uint8) * 10   # R ramp
+    grad[:, :, 1] = 7
+    grad[:, :, 2] = np.arange(8, dtype=np.uint8) * 5    # B ramp
+    op = RgbSplit({"amount": 2, "trigger": {"notes": [38], "envelope": 0.5}},
+                  [snare(1.0)], fps=4)
+    calm = op.process(grad, 0.5)                        # envelope 0 -> identity
+    assert np.array_equal(calm, grad)
+    hit = op.process(grad, 1.0)                         # full split at the hit
+    assert np.array_equal(hit[:, :, 0], np.roll(grad[:, :, 0], 2, axis=1))
+    assert np.array_equal(hit[:, :, 2], np.roll(grad[:, :, 2], -2, axis=1))
+    assert np.array_equal(hit[:, :, 1], grad[:, :, 1])  # G untouched
+
+
+def test_post_op_cannot_be_base():
+    from core.video.layers import Compositor, RgbSplit
+    comp = Compositor()
+    op = RgbSplit({"amount": 4}, [], 24)
+    with pytest.raises(ValueError, match="base layer"):
+        comp.add(op)
+
+
 def test_layers_legacy_scene_is_base_only():
     from core.video.layers import build_compositor
     cfg = {"clip_per_bar": True, "triggers": {}}

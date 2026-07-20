@@ -80,6 +80,8 @@ class Compositor:
             opacity: Optional[Callable[[float], float]] = None) -> None:
         if blend not in BLENDS:
             raise ValueError(f"unknown blend {blend!r}; expected {sorted(BLENDS)}")
+        if not self._layers and hasattr(source, "process"):
+            raise ValueError("a post-op cannot be the base layer")
         self._layers.append((source, blend, opacity))
 
     def __len__(self) -> int:
@@ -91,6 +93,10 @@ class Compositor:
         src0, _, _ = self._layers[0]
         out = src0.frame_at(t)
         for src, blend, opacity in self._layers[1:]:
+            if hasattr(src, "process"):
+                # post-op: transforms the composite built so far
+                out = src.process(out, t)
+                continue
             op = 1.0 if opacity is None else float(opacity(t))
             if op <= 0.0:
                 continue
@@ -237,6 +243,40 @@ class MandelboxLayer:
                                pulse=self._pulse(t) if self._pulse else 0.0)
 
 
+class RgbSplit:
+    """Post-op reference implementation: chromatic aberration on impact.
+
+    Shifts the R and B channels apart by up to ``amount`` pixels, driven
+    by a trigger envelope (e.g. snare hits) — the classic "camera hit"
+    glitch that resolves with the drum's decay. Stateless; identity when
+    the envelope is at zero, so scenes without hits are untouched.
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, fps: int,
+                 features_at=None, onset_loader=None):
+        tspec = spec.get("trigger") or {}
+        self._env = (EnvelopeOpacity(_layer_hits(tspec, notes, onset_loader),
+                                     tspec.get("envelope", 0.12))
+                     if tspec else None)
+        self.amount = float(spec.get("amount", 8.0))
+        self.features_at = features_at
+
+    def process(self, frame: np.ndarray, t: float) -> np.ndarray:
+        if self._env is not None:
+            e = self._env(t)
+        elif self.features_at is not None:
+            e = float((self.features_at(t) or {}).get("flux", 0.0) or 0.0)
+        else:
+            e = 0.0
+        px = int(round(self.amount * e))
+        if px <= 0:
+            return frame
+        out = frame.copy()
+        out[:, :, 0] = np.roll(frame[:, :, 0], px, axis=1)
+        out[:, :, 2] = np.roll(frame[:, :, 2], -px, axis=1)
+        return out
+
+
 def build_compositor(base, video_cfg: dict, notes: Sequence,
                      width: int, height: int, onset_loader=None,
                      fps: int = 24, features_at=None, grid=None) -> "Compositor":
@@ -272,6 +312,10 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
                                 features_at=features_at,
                                 onset_loader=onset_loader),
                      blend, op_fn)
+            continue
+        if src_name == "rgb_split":
+            comp.add(RgbSplit(spec, notes, fps, features_at=features_at,
+                              onset_loader=onset_loader), "normal", None)
             continue
         if src_name == "mandelbox":
             comp.add(MandelboxLayer(spec, notes, width, height, fps,
