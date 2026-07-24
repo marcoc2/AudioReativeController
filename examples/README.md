@@ -10,6 +10,7 @@ passo a passo pra replicar na GUI (`arc_studio.py`).
 | [`enxame_cells`](enxame_cells.md) | Células 8-bit sobre os clipes; harmonia pinta, caixa dispara mitose |
 | [`enxame_julia_solo`](enxame_julia_solo.md) | Julia 8-bit navegando a cardioide; kick = zoom, caixa = inversão |
 | [`enxame_voo`](enxame_voo.md) | Voo infinito por corredor fractal 3D (GPU); kick = surto de velocidade |
+| [`enxame_cubos`](enxame_cubos.md) | Palco 3D (GPU): clipes reativos nas faces de cubos que a câmera atravessa; kick inverte/avança |
 
 Outras fontes de camada disponíveis (combináveis nas cenas acima):
 `solid` (flash por trigger), `cells` (células 8-bit com mitose),

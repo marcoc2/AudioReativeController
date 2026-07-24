@@ -277,6 +277,110 @@ class RgbSplit:
         return out
 
 
+class CubesLayer:
+    """Stage/scenography layer: reactive clips painted on a lattice of cubes
+    that a camera flies through, over an otherwise empty solid-color space.
+
+    This is a *stage*, not a generated world: it takes clip footage — the
+    content — and shows it on the faces of cubes floating in space. It owns
+    its own clip playback (``ClipLibrary`` + ``ClipComposer``), so it is
+    self-contained and never touches the global clip base.
+
+    Scene YAML (``source: cubes``)::
+
+        - source: cubes
+          clips_dir: C:/path/to/clips     # own clip pool (required)
+          bg_color: [0, 0, 0]             # empty-space color
+          n_cubes: 40                     # cubes in the periodic corridor
+          faces_with_clips: 3             # 0..6 faces showing the clip screen
+          face_resolution: 256            # per-face texture size (RAM/CPU)
+          crop_faces: true                # center-crop 16:9 clips to fill (no bars)
+          one_clip_per_face: false        # false: same screen on all faces;
+                                          # true: an independent clip per face-index
+          loop_bars: 2                    # camera advances 1 corridor / N bars
+          zoom_pulse: {notes: [36], envelope: 0.25}   # kick = forward lurch
+          clip_reactivity:                # a ClipComposer config (the "screen")
+            clip_per_bar: true
+            clip_order: shuffle           # per-face variety comes from seeded streams
+            triggers:
+              kick: {notes: [36], actions: [reverse]}
+
+    ``one_clip_per_face`` toggles the depth of the recursion: false = a single
+    internal ``ClipComposer`` shown on every clip face (Stage 0); true = one
+    ``ClipComposer`` per face-index (0..``faces_with_clips``-1), each an
+    independent reactive stream (Stage 1). All composers share one decode
+    library, so per-face variety costs O(faces) RAM, not O(cubes). Distinct
+    faces come from per-face seeds; use ``clip_order: shuffle`` or ``random``
+    (``sequential`` keeps faces in lock-step by design).
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int,
+                 fps: int, grid=None, features_at=None, onset_loader=None):
+        from core.video.clip_library import ClipLibrary
+        from core.video.composer import ClipComposer
+        self.W, self.H = width, height
+        self.fps = fps
+        clips_dir = spec.get("clips_dir")
+        if not clips_dir:
+            raise ValueError("cubes layer requires 'clips_dir'")
+        face_res = int(spec.get("face_resolution", 256))
+
+        # one reactive screen shared by all faces (Stage 0), or one per
+        # face-index when one_clip_per_face is set (Stage 1) — bounded to the
+        # 0..6 face count, never to the cube count.
+        k = max(0, min(6, int(spec.get("faces_with_clips", 3))))
+        n_screens = k if (spec.get("one_clip_per_face") and k > 0) else 1
+
+        # a single shared library (a decode cache): size it to hold every
+        # screen's current clip at once, so per-face variety costs O(faces),
+        # not O(cubes), in RAM.
+        cache = max(int(spec.get("cache_size", 4)), n_screens + 2)
+        # cover = center-crop 16:9 footage to fill the square faces (no bars)
+        fit = "cover" if spec.get("crop_faces") else "contain"
+        self.lib = ClipLibrary(clips_dir, face_res, face_res, fps,
+                               cache_size=cache, fit=fit)
+
+        base_react = dict(spec.get("clip_reactivity") or {})
+        base_seed = spec.get("seed")
+        self.composers = []
+        for i in range(n_screens):
+            react = dict(base_react)
+            # distinct stream per face (shuffle/random spread apart by seed);
+            # keep Stage 0's single-composer seed exactly as before.
+            react["seed"] = base_react.get("seed", base_seed) if n_screens == 1 else (
+                None if base_seed is None else int(base_seed) + i * 9973)
+            comp = ClipComposer(self.lib, grid, notes, react, onset_loader=onset_loader)
+            if n_screens > 1 and len(self.lib) > 1:
+                comp._first_selection = False           # don't force clip 0 on bar 0
+                comp.transport.set_clip(i % len(self.lib))   # distinct start per face
+            self.composers.append(comp)
+
+        self.bg = spec.get("bg_color", [0, 0, 0])
+        if grid is not None:
+            self.loop_s = float(spec.get("loop_bars", 2)) * grid.bar_duration
+        else:
+            self.loop_s = float(spec.get("loop_seconds", 8.0))
+        zspec = spec.get("zoom_pulse") or {}
+        self._pulse = (EnvelopeOpacity(_layer_hits(zspec, notes, onset_loader),
+                                       zspec.get("envelope", 0.25))
+                       if zspec else None)
+        self._pulse_gain = float(spec.get("pulse_gain", 0.12))
+        from core.cubes import CubeField
+        self.field = CubeField(width, height, spec, seed=base_seed, n_screens=n_screens)
+        self._seeked = False
+
+    def frame_at(self, t: float) -> np.ndarray:
+        if not self._seeked:
+            for comp in self.composers:
+                comp.seek(t)          # don't dump pre-start events on frame 0
+            self._seeked = True
+        screens = [comp.frame_at(t) for comp in self.composers]   # one per face-index
+        phase = (t / self.loop_s) % 1.0
+        if self._pulse is not None:                     # kick = transient lurch
+            phase = (phase + self._pulse_gain * self._pulse(t)) % 1.0
+        return self.field.render(phase, screens, self.bg)
+
+
 def build_compositor(base, video_cfg: dict, notes: Sequence,
                      width: int, height: int, onset_loader=None,
                      fps: int = 24, features_at=None, grid=None) -> "Compositor":
@@ -334,6 +438,12 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
                                 features_at=features_at,
                                 onset_loader=onset_loader),
                      blend, op_fn)
+            continue
+        if src_name == "cubes":
+            comp.add(CubesLayer(spec, notes, width, height, fps,
+                                grid=grid, features_at=features_at,
+                                onset_loader=onset_loader),
+                     blend if len(comp) else "normal", op_fn)
             continue
         raise ValueError(f"unknown layer source {src_name!r}")
     return comp
