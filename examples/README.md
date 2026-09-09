@@ -11,6 +11,10 @@ passo a passo pra replicar na GUI (`arc_studio.py`).
 | [`enxame_julia_solo`](enxame_julia_solo.md) | Julia 8-bit navegando a cardioide; kick = zoom, caixa = inversão |
 | [`enxame_voo`](enxame_voo.md) | Voo infinito por corredor fractal 3D (GPU); kick = surto de velocidade |
 | [`enxame_cubos`](enxame_cubos.md) | Palco 3D (GPU): clipes reativos nas faces de cubos que a câmera atravessa; kick inverte/avança |
+| [`enxame_orbiters`](enxame_orbiters.md) | Mandala de órbitas aninhadas e satélites; centroid/flux guiam raios |
+| [`enxame_particles`](enxame_particles.md) | Partículas em órbita; batidas de caixa disparam jatos de faíscas nos vértices |
+| [`enxame_feedback`](enxame_feedback.md) | Túnel psicodélico de feedback com zoom reativo a bumbo e rotação espectral |
+| [`enxame_echoes`](enxame_echoes.md) | Ecos de vídeo dinâmicos com redução progressiva de escala (Doppler) e hue shift |
 
 Outras fontes de camada disponíveis (combináveis nas cenas acima):
 `solid` (flash por trigger), `cells` (células 8-bit com mitose),

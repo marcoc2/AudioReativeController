@@ -106,12 +106,12 @@ def main() -> None:
         library = ClipLibrary(args.clips, W, H, fps, cache_size=args.cache_size)
         composer = ClipComposer(library, grid, midi_notes, video_cfg)
 
-    # generator layers (cells, ...) need per-frame audio features
+    # generator and post-op layers need per-frame audio features
     features_at = None
-    if any((l or {}).get("source") in ("cells", "julia", "mandelbulb", "mandelbox")
+    if any((l or {}).get("source", "clips") not in ("clips", "solid")
            for l in video_cfg.get("layers") or []):
         from core.feature_extractor import AudioFeatureExtractor
-        print("Extracting audio features for generator layers…")
+        print("Extracting audio features for layers…")
         extractor = AudioFeatureExtractor(args.file, fps=fps, skip_separation=True)
         features_at = lambda t: extractor.get_features_at_time(t, apply_gate=False)
 

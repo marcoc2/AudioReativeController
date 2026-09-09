@@ -1,7 +1,118 @@
 import numpy as np
 import pytest
 
+from core.video.layers import Compositor, OrbitersLayer, ParticlesLayer, FeedbackLayer, EchoesLayer
 from core.rhythm.grid import RhythmGrid
+
+
+def test_orbiters_layer_shape_and_advance():
+    width, height = 320, 240
+    fps = 24
+    grid = RhythmGrid(bpm=120.0, fps=fps)
+    spec = {
+        "source": "orbiters",
+        "resolution": 80,
+        "n_parents": 3,
+        "n_satellites": 2,
+    }
+    
+    layer = OrbitersLayer(spec, notes=[], width=width, height=height, fps=fps, grid=grid)
+    frame1 = layer.frame_at(0.0)
+    
+    assert frame1.shape == (height, width, 3)
+    assert frame1.dtype == np.uint8
+    
+    # After advancing time, the frame should change due to orbital motion
+    frame2 = layer.frame_at(1.0)
+    assert frame2.shape == (height, width, 3)
+    assert not np.array_equal(frame1, frame2)
+
+
+def test_particles_layer_burst_on_trigger():
+    width, height = 320, 240
+    fps = 24
+    spec = {
+        "source": "particles",
+        "resolution": 80,
+        "n_particles": 1000,
+        "n_vertices": 4,
+        "triggers": {
+            "burst": {
+                "notes": [36],
+                "quantity": 100,
+            }
+        }
+    }
+    from core.rhythm.midi_reader import MidiNote
+    notes = [MidiNote(time=0.5, pitch=36, velocity=100, channel=9, duration=0.1)]
+    
+    layer = ParticlesLayer(spec, notes=notes, width=width, height=height, fps=fps)
+    
+    # Frame at t=0.0 (no burst)
+    frame1 = layer.frame_at(0.0)
+    assert frame1.shape == (height, width, 3)
+    
+    # Frame at t=0.6 (burst triggered at t=0.5)
+    frame2 = layer.frame_at(0.6)
+    assert frame2.shape == (height, width, 3)
+    # The particles should have moved/respawned, so the frames should differ
+    assert not np.array_equal(frame1, frame2)
+
+
+def test_feedback_layer_identity_and_blend():
+    width, height = 320, 240
+    fps = 24
+    
+    # Test identity when decay is 0
+    spec_identity = {"source": "feedback", "decay": 0.0}
+    layer_id = FeedbackLayer(spec_identity, notes=[], fps=fps)
+    
+    base_frame = np.full((height, width, 3), 100, dtype=np.uint8)
+    res_id = layer_id.process(base_frame, 0.0)
+    assert np.array_equal(res_id, base_frame)
+    
+    # Test feedback warp blending
+    spec_active = {"source": "feedback", "decay": 0.8, "base_scale": 0.9}
+    layer_act = FeedbackLayer(spec_active, notes=[], fps=fps)
+    
+    res1 = layer_act.process(base_frame, 0.0)
+    # First frame has no history, so it just returns base_frame
+    assert np.array_equal(res1, base_frame)
+    
+    # Next frame has history, so the previous frame is scaled and blended
+    # Let's feed a different base frame (e.g. all 50)
+    next_frame = np.full((height, width, 3), 50, dtype=np.uint8)
+    res2 = layer_act.process(next_frame, 1.0)
+    assert res2.shape == (height, width, 3)
+    # Should not be all 50 because the history of 100 was warped and blended
+    assert not np.all(res2 == 50)
+
+
+def test_echoes_layer_identity_and_accumulation():
+    width, height = 320, 240
+    fps = 24
+    
+    # Test identity when depth/opacity_decay is 0
+    spec_identity = {"source": "echoes", "depth": 0}
+    layer_id = EchoesLayer(spec_identity, notes=[], fps=fps)
+    
+    base_frame = np.full((height, width, 3), 100, dtype=np.uint8)
+    res_id = layer_id.process(base_frame, 0.0)
+    assert np.array_equal(res_id, base_frame)
+    
+    # Test echoes active accumulation
+    spec_active = {"source": "echoes", "depth": 3, "opacity_decay": 0.8, "scale_decay": 0.9}
+    layer_act = EchoesLayer(spec_active, notes=[], fps=fps)
+    
+    res1 = layer_act.process(base_frame, 0.0)
+    # One frame in history -> no echoes blended yet, returns base_frame
+    assert np.array_equal(res1, base_frame)
+    
+    # Add another frame
+    next_frame = np.full((height, width, 3), 50, dtype=np.uint8)
+    res2 = layer_act.process(next_frame, 1.0)
+    assert res2.shape == (height, width, 3)
+    assert not np.all(res2 == 50)
 
 
 # ---------------------------------------------------------------------------
