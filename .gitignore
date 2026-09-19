@@ -24,3 +24,6 @@ rhythm_cache/
 
 # Tooling
 .understand-anything/
+
+# SheetSage2 transcriptions (regenerated per song, see core/score)
+input/*/sheetsage/

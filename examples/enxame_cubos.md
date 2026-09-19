@@ -22,8 +22,8 @@ musical + triggers de bateria.
 
 ```powershell
 python clip_generator.py `
-  --file input/deserto_de_lama.mp3 `
-  --midi input/deserto_de_lama_ep.mid `
+  --file input/deserto_de_lama/deserto_de_lama.mp3 `
+  --midi input/deserto_de_lama/deserto_de_lama_ep.mid `
   --scene examples/enxame_cubos.yaml `
   --bars 8 --resolution 854x480 `
   --output render_output/enxame_cubos.mp4

@@ -10,8 +10,8 @@ desacelera saindo (peak/floor/radius/curve).
 
 ```powershell
 .venv\Scripts\python.exe clip_generator.py `
-  --file input/deserto_de_lama.mp3 `
-  --midi input/deserto_de_lama_ep_clean.mid `
+  --file input/deserto_de_lama/deserto_de_lama.mp3 `
+  --midi input/deserto_de_lama/deserto_de_lama_ep_clean.mid `
   --clips C:\Users\marco\Videos\deserto_square `
   --scene examples/deserto_kick_reverse.yaml `
   --bars 0 --cache-size 101 --resolution 480x480 --clip-order shuffle `
@@ -23,8 +23,8 @@ Overrides rápidos sem editar YAML: `--gravity-peak 7 --gravity-floor 0.7
 
 ## Na GUI (ARC Studio)
 
-1. **Audio** = `input/deserto_de_lama.mp3`, **MIDI** =
-   `input/deserto_de_lama_ep_clean.mid`, **Scene** =
+1. **Audio** = `input/deserto_de_lama/deserto_de_lama.mp3`, **MIDI** =
+   `input/deserto_de_lama/deserto_de_lama_ep_clean.mid`, **Scene** =
    `examples/deserto_kick_reverse.yaml`.
 2. **Mode: clips** → **Clips Folder** = `deserto_square`; Order =
    shuffle; Full song se quiser a música toda. **Load Project** (a barra
