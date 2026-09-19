@@ -21,3 +21,6 @@ rhythm_cache/
 .vscode/
 .idea/
 .DS_Store
+
+# Tooling
+.understand-anything/
