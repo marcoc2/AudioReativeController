@@ -152,3 +152,22 @@ def read_midi(
         ),
         notes,
     )
+
+
+def shift_in_time(grid: RhythmGrid, notes: List[MidiNote], seconds: float) -> None:
+    """Move a MIDI reading ``seconds`` later so it lines up with the audio.
+
+    A MIDI file counts from DAW bar 1; the audio it belongs to may start a
+    little later (encoder padding, a trimmed export). Everything that carries
+    a time moves together — beats, downbeats, the grid's anchor and the notes —
+    so ``t_audio = t_midi + seconds`` holds for all of them. In place.
+    """
+    if seconds == 0.0:
+        return
+    if grid.beats is not None:
+        grid.beats = grid.beats + seconds
+    if grid.downbeats is not None:
+        grid.downbeats = grid.downbeats + seconds
+    grid.start_offset += seconds
+    for n in notes:
+        n.time += seconds
