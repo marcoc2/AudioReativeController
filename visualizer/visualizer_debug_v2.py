@@ -4,9 +4,26 @@ ARC Debug Dashboard v2 — 4K feature inspector.
 Shows all extracted audio features in a 4-column × 2-row grid:
   Row 1: FFT Spectrum | Mel Bands | Sub-Band Energy | AI Stems
   Row 2: Spectral Centroid | Flux + Onsets | Chroma / Piano | HUD
+  Texture: Loudness + Swell | Harmonic Change | Percussive / Noisiness | Tremolo
+  Rhythm:  Rhythm Grid | MIDI Notes (2 cols) | MIDI Automation Lanes  (only with a grid)
+  Score:   Harmony Now | Score Timeline (2 cols) | Song Map    (only with a score)
+
+The rhythm row follows the bar/beat grid that drives triggers. The grid comes
+from --midi (with --midi-offset), else from the score, else from --bpm.
+
+The texture row plots core/texture — what moves in the sound when nothing
+attacks — over a window of -15 s .. +5 s around the playhead.
+
+Row 3 shows what SheetSage2 transcribed — key, chords, sections, beats and
+melody (see core/score). It appears when --score points at a SheetSage2
+output folder, or when a "sheetsage" folder sits next to the audio file.
 
 Usage:
     .venv/Scripts/python.exe visualizer/visualizer_debug_v2.py --file audio.mp3
+    ... --score path/to/sheetsage_output     explicit transcription folder
+    ... --no-stems                           skip AI stem separation (no GPU work)
+    ... --midi drums.mid --midi-offset 0.059 grid + notes + automation lanes
+    ... --stem solo=solo_guitarra.mp3        extra original stem (repeatable)
 
 Keys:
     S        toggle temporal smoothing
@@ -18,6 +35,7 @@ Keys:
 """
 import sys
 import argparse
+import colorsys
 import numpy as np
 import pygame
 from collections import deque
@@ -27,7 +45,22 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+from dataclasses import dataclass, field
+
 from core.feature_extractor import AudioFeatureExtractor
+from core.rhythm import RhythmGrid, read_midi, shift_in_time
+from core.rhythm.midi_automation import MidiAutomationReader
+from core.score import Score, has_score, parse_chord, read_score
+
+
+@dataclass
+class RhythmInput:
+    """The bar/beat grid the dashboard follows, and the MIDI it came with (if any)."""
+    grid: RhythmGrid
+    source: str                                   # "MIDI", "score (SheetSage2)", "--bpm"
+    notes: list = field(default_factory=list)     # MidiNote, already shifted to audio time
+    automation: MidiAutomationReader | None = None
+    offset: float = 0.0                           # t_audio = t_midi + offset
 
 # ── palette ────────────────────────────────────────────────────────────────────
 BG        = (8,   8,  12)
@@ -67,15 +100,45 @@ STEM_COLORS = {
     "other":  GREY,
 }
 
+SECTION_COLORS = {
+    "intro": (70, 110, 160), "outro": (70, 110, 160), "fade-out": (60, 80, 110),
+    "verse": (60, 150, 110), "pre-chorus": (150, 160, 60), "chorus": (220, 120, 50),
+    "post-chorus": (200, 150, 70), "bridge": (160, 80, 190), "interlude": (90, 90, 140),
+    "instrumental": (90, 90, 140), "solo": (220, 70, 120), "silence": (35, 35, 45),
+}
+GM_DRUMS = {   # General MIDI percussion names; a kit mapped differently will not match
+    35: "kick", 36: "kick", 37: "rim", 38: "snare", 39: "clap", 40: "snare 2",
+    41: "tom", 43: "tom", 45: "tom", 47: "tom", 48: "tom", 50: "tom",
+    42: "hat", 44: "hat ped", 46: "hat open", 49: "crash", 57: "crash 2",
+    51: "ride", 59: "ride 2", 53: "bell", 52: "china", 55: "splash", 56: "cowbell",
+}
+MAX_NOTE_LANES = 14      # busiest pitches shown in the MIDI notes panel
+
+TEXTURE_HUD_LABELS = {   # short enough for the HUD's key column at 1080p
+    "loudness": "TX LOUD", "swell": "TX SWELL", "harmonic_change": "TX HARM CHG",
+    "percussive": "TX PERC", "noisiness": "TX NOISE",
+    "tremolo_depth": "TX TREM", "tremolo_rate": "TX TREM Hz",
+}
+TEXTURE_PAST    = 15.0   # texture is slow: a long look back ...
+TEXTURE_FUTURE  = 5.0    # ... and a short look ahead of the playhead
+TREMOLO_MAX_HZ  = 12.0   # top of the tremolo-rate curve (core.texture.TREMOLO_RANGE)
+SCORE_PAST   = 4.0    # seconds of score shown behind the playhead
+SCORE_FUTURE = 12.0   # ... and ahead of it: what is about to be played
+
 HISTORY_LEN = 300  # ~5 s at 60 fps
 SPEC_H      = 200  # rows in the scrolling spectrogram texture
 
 
 # ── Dashboard ──────────────────────────────────────────────────────────────────
 class Dashboard4K:
-    def __init__(self, screen: pygame.Surface, extractor: AudioFeatureExtractor):
+    def __init__(self, screen: pygame.Surface, extractor: AudioFeatureExtractor,
+                 score: Score | None = None, rhythm: RhythmInput | None = None):
         self.screen    = screen
         self.extractor = extractor
+        self.score     = score
+        self.rhythm    = rhythm
+        extra = [s for s in getattr(extractor, "stems_energy", {}) if s not in STEM_ORDER]
+        self.stem_names = STEM_ORDER + sorted(extra)
         self.W, self.H = screen.get_size()
 
         # Fonts — scale relative to 1080p baseline
@@ -83,6 +146,7 @@ class Dashboard4K:
         self.fs = pygame.font.SysFont("monospace", max(12, int(14 * scale)))
         self.fl = pygame.font.SysFont("monospace", max(16, int(20 * scale)), bold=True)
         self.ft = pygame.font.SysFont("monospace", max(10, int(11 * scale)))
+        self.fx = pygame.font.SysFont("monospace", max(28, int(54 * scale)), bold=True)
 
         # Layout constants
         M   = 10   # outer margin
@@ -93,23 +157,57 @@ class Dashboard4K:
         body_h = self.H - body_y - M
         body_w = self.W - 2 * M
 
-        row_h = (body_h - GAP) // 2
+        # Rows share the body height by weight. Texture curves are slow and
+        # need less height than the spectral panels; the score row only exists
+        # when there is a transcription to show.
+        row_weights = {"features_1": 1.0, "features_2": 1.0, "texture": 0.6}
+        if rhythm is not None:
+            row_weights["rhythm"] = 0.8
+        if score is not None:
+            row_weights["score"] = 1.0
+        usable  = body_h - (len(row_weights) - 1) * GAP
+        total_w = sum(row_weights.values())
+        rows, y = {}, body_y
+        for name, weight in row_weights.items():
+            h = int(usable * weight / total_w)
+            rows[name] = (y, h)
+            y += h + GAP
         col_w = (body_w - 3 * GAP) // 4
-
-        row1_y = body_y
-        row2_y = body_y + row_h + GAP
 
         self.header_rect = pygame.Rect(M, M, self.W - 2 * M, HH - 2 * M)
 
-        panel_names_r1 = ["fft",      "bands", "subbands", "stems"]
-        panel_names_r2 = ["centroid", "flux",  "chroma",   "hud"]
+        row_panels = {
+            "features_1": ["fft",       "bands",    "subbands",    "stems"],
+            "features_2": ["centroid",  "flux",     "chroma",      "hud"],
+            "texture":    ["tex_loud",  "tex_harm", "tex_surface", "tex_trem"],
+        }
         self.panels: dict[str, pygame.Rect] = {}
-        for ci, name in enumerate(panel_names_r1):
-            x = M + ci * (col_w + GAP)
-            self.panels[name] = pygame.Rect(x, row1_y, col_w, row_h)
-        for ci, name in enumerate(panel_names_r2):
-            x = M + ci * (col_w + GAP)
-            self.panels[name] = pygame.Rect(x, row2_y, col_w, row_h)
+        for row, names in row_panels.items():
+            ry, rh = rows[row]
+            for ci, name in enumerate(names):
+                self.panels[name] = pygame.Rect(M + ci * (col_w + GAP), ry, col_w, rh)
+
+        if rhythm is not None:
+            ry, rh = rows["rhythm"]
+            self.panels["rhythm_grid"]  = pygame.Rect(M, ry, col_w, rh)
+            self.panels["rhythm_notes"] = pygame.Rect(M + col_w + GAP, ry, 2 * col_w + GAP, rh)
+            self.panels["rhythm_lanes"] = pygame.Rect(M + 3 * (col_w + GAP), ry, col_w, rh)
+            counts: dict[int, int] = {}
+            for n in rhythm.notes:
+                counts[n.pitch] = counts.get(n.pitch, 0) + 1
+            busiest = sorted(counts, key=counts.get, reverse=True)[:MAX_NOTE_LANES]
+            self._note_lanes = sorted(busiest)            # low pitch at the bottom
+            self._note_times = np.array([n.time for n in rhythm.notes])
+
+        if score is not None:
+            row3_y, row_h = rows["score"]
+            self.panels["harmony"]  = pygame.Rect(M, row3_y, col_w, row_h)
+            self.panels["timeline"] = pygame.Rect(M + col_w + GAP, row3_y, 2 * col_w + GAP, row_h)
+            self.panels["songmap"]  = pygame.Rect(M + 3 * (col_w + GAP), row3_y, col_w, row_h)
+            pitches = [n.pitch for n in score.melody_vocal + score.melody_instrumental]
+            self._pitch_lo = (min(pitches) if pitches else 48) - 2
+            self._pitch_hi = (max(pitches) if pitches else 84) + 2
+        self._songmap_surf: pygame.Surface | None = None
 
         # Rolling histories
         self.hist: dict[str, deque] = {}
@@ -118,7 +216,7 @@ class Dashboard4K:
         self.hist["onset"] = deque([False] * HISTORY_LEN, maxlen=HISTORY_LEN)
         for n in SUBBAND_ORDER:
             self.hist[f"sb_{n}"] = deque([0.0] * HISTORY_LEN, maxlen=HISTORY_LEN)
-        for s in STEM_ORDER:
+        for s in self.stem_names:
             self.hist[f"st_{s}"] = deque([0.0] * HISTORY_LEN, maxlen=HISTORY_LEN)
 
         # Scrolling spectrogram texture: (SPEC_H × HISTORY_LEN × 3)
@@ -140,7 +238,8 @@ class Dashboard4K:
         pygame.draw.rect(self.screen, PANEL_BG, rect, border_radius=6)
         pygame.draw.rect(self.screen, BORDER,   rect, width=1, border_radius=6)
         self._txt(title, (rect.x + 10, rect.y + 8), color=title_color, large=True)
-        return pygame.Rect(rect.x + 8, rect.y + 38, rect.w - 16, rect.h - 46)
+        top = max(38, 8 + self.fl.get_height() + 8)   # title font grows with the window
+        return pygame.Rect(rect.x + 8, rect.y + top, rect.w - 16, rect.h - top - 8)
 
     def _h_bar(self, value: float, rect: pygame.Rect, color: tuple,
                label: str = "", show_val: bool = True):
@@ -185,7 +284,7 @@ class Dashboard4K:
         for n in SUBBAND_ORDER:
             self.hist[f"sb_{n}"].append(float(sb.get(n, 0)))
         st = features.get("stems", {})
-        for s in STEM_ORDER:
+        for s in self.stem_names:
             self.hist[f"st_{s}"].append(float(st.get(s, 0)))
         self._push_spec(features)
 
@@ -318,13 +417,14 @@ class Dashboard4K:
         title_color = (140, 140, 60) if no_service else GOLD
         inner = self._panel_bg(self.panels["stems"], "AI STEMS ENERGY", title_color)
         st    = features.get("stems", {})
-        n     = len(STEM_ORDER)
+        n     = len(self.stem_names)
         bar_h = max(10, (inner.h * 55 // 100 - n * 4) // max(1, n))
         bar_w = inner.w * 78 // 100
 
-        for i, name in enumerate(STEM_ORDER):
+        for i, name in enumerate(self.stem_names):
             v = float(st.get(name, 0))
-            c = STEM_COLORS[name] if not no_service else (50, 50, 60)
+            extra = name not in STEM_COLORS        # a stem the user supplied: always real data
+            c = ORANGE if extra else (STEM_COLORS[name] if not no_service else (50, 50, 60))
             r = pygame.Rect(inner.x, inner.y + i * (bar_h + 4), bar_w, bar_h)
             self._h_bar(v, r, c, label=name.upper())
 
@@ -343,8 +443,8 @@ class Dashboard4K:
                                             ha.y + 20 + j * 28))
             else:
                 self._txt("energy history", (ha.x + 4, ha.y + 2), GREY, tiny=True)
-                for name in STEM_ORDER:
-                    self._line_hist(f"st_{name}", ha, STEM_COLORS[name], lw=1)
+                for name in self.stem_names:
+                    self._line_hist(f"st_{name}", ha, STEM_COLORS.get(name, ORANGE), lw=1)
 
     # panel 5 — Spectral centroid
     def _draw_centroid(self, features: dict):
@@ -510,24 +610,49 @@ class Dashboard4K:
             ("PITCH",    f"{NOTE_NAMES[int(features.get('dominant_pitch', 0))]} "
                          f"({features.get('dominant_pitch', 0)})"),
         ]
+        if self.score is not None:
+            key, chord = self.score.key_at(t), self.score.chord_at(t)
+            section    = self.score.section_at(t)
+            bar, beat  = self.score.bar_beat_at(t)
+            rows += [
+                ("KEY",      key.label if key else "-"),
+                ("CHORD",    chord.label if chord else "-"),
+                ("SECTION",  section.label if section else "-"),
+                ("BAR.BEAT", f"{bar}.{beat}"),
+            ]
+        for name, value in features.get("texture", {}).items():
+            rows.append((TEXTURE_HUD_LABELS.get(name, name.upper()),
+                         f"{value:+.4f}" if name == "swell" else f"{value:.4f}"))
         sb = features.get("subbands", {})
         for n in SUBBAND_ORDER:
             rows.append((n.upper().replace("_", " "), f"{sb.get(n, 0):.4f}"))
         st = features.get("stems", {})
-        for s in STEM_ORDER:
+        for s in self.stem_names:
             rows.append((f"STEM/{s.upper()}", f"{st.get(s, 0):.4f}"))
 
-        # Adaptive row height
-        lh  = max(16, inner.h // (len(rows) + 5))
-        cx2 = inner.x + inner.w // 2
+        # Rows never overlap: line height follows the font, and when one column
+        # cannot hold them all (a third panel row makes this panel shorter) they
+        # wrap into a second key/value column.
+        lh       = self.fs.get_height() + 2
+        legend_h = 3 * (self.ft.get_height() + 4) + 6
+        per_col  = max(1, (inner.h - legend_h) // lh)
+        n_cols   = 1 if len(rows) <= per_col else 2
+        col_w    = inner.w // n_cols
 
-        for i, (k, v) in enumerate(rows):
-            ry = inner.y + i * lh
-            if ry + lh > inner.bottom - 58:
-                break
+        # When not everything fits, the last slot says so instead of dropping rows
+        # silently (every value is also drawn in its own panel).
+        capacity = per_col * n_cols
+        if len(rows) > capacity:
+            capacity -= 1
+        for i, (k, v) in enumerate(rows[:capacity]):
+            cx = inner.x + (i // per_col) * col_w
+            ry = inner.y + (i % per_col) * lh
             vc = GREEN if (k == "ONSET" and v == "YES") else WHITE
-            self._txt(k, (inner.x + 4, ry), GREY)
-            self._txt(v, (cx2, ry), vc)
+            self._txt(k, (cx + 4, ry), GREY)
+            self._txt(v, (cx + col_w // 2, ry), vc)
+        if len(rows) > capacity:
+            self._txt(f"+{len(rows) - capacity} more (see panels)",
+                      (inner.x + (n_cols - 1) * col_w + 4, inner.y + (per_col - 1) * lh), GREY)
 
         # Controls legend at bottom
         ctrl_lines = [
@@ -537,8 +662,340 @@ class Dashboard4K:
             "[K/L] contrast  [+/−] bands  [S] smooth  [N] norm",
             "[SPACE] pause  [ESC] quit",
         ]
+        ctrl_lh = self.ft.get_height() + 4
         for i, line in enumerate(ctrl_lines):
-            self._txt(line, (inner.x + 4, inner.bottom - (len(ctrl_lines) - i) * 18), GREY, tiny=True)
+            self._txt(line, (inner.x + 4, inner.bottom - (len(ctrl_lines) - i) * ctrl_lh), GREY, tiny=True)
+
+    # ── rhythm row — the grid and the MIDI that drives triggers ───────────────
+
+    def _draw_rhythm_grid(self, t: float):
+        rh    = self.rhythm
+        grid  = rh.grid
+        inner = self._panel_bg(self.panels["rhythm_grid"], f"RHYTHM GRID  ({rh.source})", GREEN)
+        num, den  = grid.time_signature
+        bar_phase, beat_phase = grid.phase(t), grid.beat_phase(t)
+        started   = t >= grid.start_offset
+        bar       = int((t - grid.start_offset) // grid.bar_duration) + 1 if started else 0
+        beat      = int(bar_phase * num) + 1 if started else 0
+
+        self._txt(f"{grid.bpm:.2f} BPM   {num}/{den}   offset {rh.offset:+.3f}s",
+                  (inner.x, inner.y), WHITE)
+        big   = self.fx.render(f"{bar}.{beat}", True, GOLD if beat == 1 else WHITE)
+        big_y = inner.y + self.fs.get_height() + 4
+        self.screen.blit(big, (inner.x, big_y))
+
+        bar_h = self.fs.get_height() + 4
+        y     = big_y + big.get_height() + 6
+        if y + 2 * bar_h + 6 <= inner.bottom:
+            self._h_bar(bar_phase,  pygame.Rect(inner.x, y, inner.w, bar_h), GREEN, label="BAR PHASE")
+            self._h_bar(beat_phase, pygame.Rect(inner.x, y + bar_h + 6, inner.w, bar_h), CYAN,
+                        label="BEAT PHASE")
+        # beat lamps: one per beat of the bar, the current one lit
+        lamp = max(10, big.get_height() // 2)
+        for i in range(num):
+            on = started and i == beat - 1
+            color = (GOLD if i == 0 else CYAN) if on else (40, 40, 55)
+            pygame.draw.circle(self.screen, color,
+                               (inner.right - (num - i) * (lamp + 8) + lamp // 2, big_y + big.get_height() // 2),
+                               lamp // 2)
+        if started and beat == 1 and beat_phase < 0.25:          # downbeat flash
+            pygame.draw.rect(self.screen, GOLD, self.panels["rhythm_grid"], width=3, border_radius=6)
+
+    def _draw_rhythm_notes(self, t: float):
+        rh    = self.rhythm
+        title = "MIDI NOTES  (GM names, -{:.0f}s ... +{:.0f}s)".format(SCORE_PAST, SCORE_FUTURE)
+        inner = self._panel_bg(self.panels["rhythm_notes"], title, GREEN)
+        t0, t1   = t - SCORE_PAST, t + SCORE_FUTURE
+        label_w  = self.ft.size("127 hat open ")[0]
+        area     = pygame.Rect(inner.x + label_w, inner.y, inner.w - label_w, inner.h - 14)
+        px_per_s = area.w / (t1 - t0)
+        pygame.draw.rect(self.screen, (20, 20, 28), area, border_radius=3)
+
+        grid = rh.grid                                   # bar lines, numbered
+        first = int(np.floor((t0 - grid.start_offset) / grid.bar_duration))
+        for b in range(max(0, first), int((t1 - grid.start_offset) / grid.bar_duration) + 1):
+            x = area.x + int((grid.start_offset + b * grid.bar_duration - t0) * px_per_s)
+            if area.x <= x <= area.right:
+                pygame.draw.line(self.screen, (70, 70, 95), (x, area.y), (x, area.bottom), 1)
+                self._txt(str(b + 1), (x + 3, area.bottom + 1), GREY, tiny=True)
+
+        if not self._note_lanes:
+            self._txt("no MIDI notes loaded (--midi)", (area.x + 8, area.y + 8), GREY)
+        lane_h = area.h / max(1, len(self._note_lanes))
+        lane_y = {p: area.bottom - (i + 1) * lane_h for i, p in enumerate(self._note_lanes)}
+        for p, y in lane_y.items():
+            self._txt(f"{p:3d} {GM_DRUMS.get(p, '')}", (inner.x, int(y + lane_h / 2 - 6)), GREY, tiny=True)
+        lo, hi = np.searchsorted(self._note_times, [t0, t1]) if len(self._note_times) else (0, 0)
+        for n in rh.notes[lo:hi]:
+            if n.pitch not in lane_y:
+                continue
+            x      = area.x + int((n.time - t0) * px_per_s)
+            level  = n.velocity / 127.0
+            recent = 0.0 <= t - n.time < 0.12                      # just hit: flash white
+            color  = WHITE if recent else (int(60 + 176 * level), int(215 * level + 30), int(100 * level + 40))
+            h      = max(3, int(lane_h * (0.35 + 0.6 * level)))
+            pygame.draw.rect(self.screen, color,
+                             (x, int(lane_y[n.pitch] + (lane_h - h) / 2), max(3, int(0.03 * px_per_s)), h))
+        px = area.x + int(SCORE_PAST * px_per_s)
+        pygame.draw.line(self.screen, WHITE, (px, area.y), (px, area.bottom), 2)
+
+    def _draw_rhythm_lanes(self, t: float):
+        rh    = self.rhythm
+        inner = self._panel_bg(self.panels["rhythm_lanes"], "MIDI AUTOMATION LANES (now)", GREEN)
+        if rh.automation is None:
+            self._txt("no MIDI loaded (--midi)", (inner.x, inner.y), GREY)
+            return
+        # The reader indexes by frame of MIDI time; undo the offset to look it up.
+        frame = max(0, int((t - rh.offset) * self.extractor.fps))
+        lanes = [l for l in rh.automation.available_lanes if not l.startswith("ch")]
+        lh    = self.fs.get_height() + 6            # _h_bar labels use the small font
+        shown = lanes[: max(1, inner.h // lh)]
+        for i, lane in enumerate(shown):
+            self._h_bar(rh.automation.get(lane, frame),
+                        pygame.Rect(inner.x, inner.y + i * lh, inner.w, lh - 3),
+                        ORANGE if lane.startswith("cc") else GREEN, label=lane)
+        if len(lanes) > len(shown):
+            self._txt(f"+{len(lanes) - len(shown)} more", (inner.right - 80, inner.bottom - lh), GREY, tiny=True)
+
+    # ── texture row — what moves when nothing attacks (core/texture) ──────────
+
+    def _texture_window(self, name: str, t: float, n: int):
+        """``n`` samples of a texture array across [t - TEXTURE_PAST, t + TEXTURE_FUTURE].
+
+        Read from the precomputed arrays rather than a rolling history: texture
+        is slow (a swell can last several seconds), so the window has to be long,
+        and the stretch ahead of the playhead shows what is about to happen.
+        """
+        times = self.extractor.times
+        grid  = np.linspace(t - TEXTURE_PAST, t + TEXTURE_FUTURE, n)
+        vals  = np.interp(grid, times, self.extractor.texture[name], left=0.0, right=0.0)
+        return vals
+
+    def _texture_plot(self, rect: pygame.Rect, t: float, curves, bipolar: bool = False):
+        """Plot texture curves in ``rect``. curves: [(name, colour, scale)], value*scale -> 0..1."""
+        pygame.draw.rect(self.screen, (20, 20, 28), rect, border_radius=4)
+        n   = max(2, rect.w // 2)
+        xs  = np.linspace(rect.x, rect.right - 1, n).astype(int)
+        mid = rect.centery
+        if bipolar:
+            pygame.draw.line(self.screen, (50, 50, 66), (rect.x, mid), (rect.right, mid), 1)
+        for name, color, scale in curves:
+            vals = np.clip(self._texture_window(name, t, n) * scale, -1.0, 1.0)
+            if bipolar:
+                ys = (mid - vals * (rect.h / 2 - 2)).astype(int)
+            else:
+                ys = (rect.bottom - 2 - np.clip(vals, 0.0, 1.0) * (rect.h - 4)).astype(int)
+            pygame.draw.lines(self.screen, color, False, list(zip(xs.tolist(), ys.tolist())), 2)
+        px = rect.x + int(TEXTURE_PAST / (TEXTURE_PAST + TEXTURE_FUTURE) * rect.w)
+        pygame.draw.line(self.screen, WHITE, (px, rect.y), (px, rect.bottom), 1)
+
+    def _texture_panel(self, key: str, title: str, color, readout: str, t: float,
+                       curves, bipolar: bool = False):
+        inner = self._panel_bg(self.panels[key], title, color)
+        self._txt(readout, (inner.x, inner.y), color)
+        top = inner.y + self.fs.get_height() + 4
+        if inner.bottom - top > 12:
+            self._texture_plot(pygame.Rect(inner.x, top, inner.w, inner.bottom - top), t, curves, bipolar)
+
+    def _draw_texture(self, features: dict, t: float):
+        tex = features.get("texture", {})
+        v   = lambda k: float(tex.get(k, 0.0))
+        self._texture_panel(
+            "tex_loud", "LOUDNESS (dB) + SWELL", GOLD,
+            f"loud {v('loudness'):.2f}   swell {v('swell'):+.2f}  (gold / green, -{TEXTURE_PAST:.0f}s..+{TEXTURE_FUTURE:.0f}s)",
+            t, [("loudness", GOLD, 1.0), ("swell", GREEN, 1.0)], bipolar=True)
+        self._texture_panel(
+            "tex_harm", "HARMONIC CHANGE", PINK,
+            f"change {v('harmonic_change'):.2f}   (peaks = the harmony moved)",
+            t, [("harmonic_change", PINK, 1.0)])
+        self._texture_panel(
+            "tex_surface", "SURFACE: PERCUSSIVE / NOISINESS", CYAN,
+            f"percussive {v('percussive'):.2f} (red)   noisiness {v('noisiness'):.2f} (cyan)",
+            t, [("percussive", RED, 1.0), ("noisiness", CYAN, 1.0)])
+        self._texture_panel(
+            "tex_trem", "TREMOLO (volume pulsation)", PURPLE,
+            f"depth {v('tremolo_depth'):.2f} (purple)   rate {v('tremolo_rate'):.2f} Hz (grey, /{TREMOLO_MAX_HZ:.0f})",
+            t, [("tremolo_rate", GREY, 1.0 / TREMOLO_MAX_HZ), ("tremolo_depth", PURPLE, 1.0)])
+
+    # ── row 3 — the score (SheetSage2) ────────────────────────────────────────
+
+    @staticmethod
+    def _chord_color(label: str) -> tuple:
+        """Hue = root around the circle of fifths (neighbours in key look alike);
+        minor-family chords are darker; no-chord is a neutral grey."""
+        root, quality, _ = parse_chord(label)
+        if root is None:
+            return (45, 45, 58)
+        hue = ((root * 7) % 12) / 12.0
+        val = 0.62 if quality.startswith(("min", "dim", "hdim")) else 0.92
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.70, val)
+        return (int(r * 255), int(g * 255), int(b * 255))
+
+    @staticmethod
+    def _section_color(label: str) -> tuple:
+        return SECTION_COLORS.get(label, (100, 100, 120))
+
+    def _spans_lane(self, spans, lane: pygame.Rect, t0: float, t1: float,
+                    color_of, labels: bool = True):
+        """Draw labelled spans as blocks on a time lane covering [t0, t1]."""
+        pygame.draw.rect(self.screen, (20, 20, 28), lane, border_radius=3)
+        px_per_s = lane.w / (t1 - t0)
+        for s in spans:
+            if s.end <= t0 or s.start >= t1:
+                continue
+            x0 = lane.x + int((max(s.start, t0) - t0) * px_per_s)
+            x1 = lane.x + int((min(s.end, t1) - t0) * px_per_s)
+            if x1 - x0 < 1:
+                continue
+            pygame.draw.rect(self.screen, color_of(s.label),
+                             (x0, lane.y, max(1, x1 - x0 - 1), lane.h), border_radius=3)
+            if labels:
+                txt = self.fs.render(s.label, True, (10, 10, 14))
+                if txt.get_width() + 8 < x1 - x0:
+                    self.screen.blit(txt, (x0 + 5, lane.y + (lane.h - txt.get_height()) // 2))
+
+    # panel 9 — what is written right now
+    def _draw_harmony(self, features: dict, t: float):
+        inner = self._panel_bg(self.panels["harmony"], "HARMONY NOW (SheetSage2)", GOLD)
+        sc    = self.score
+        key, chord, nxt = sc.key_at(t), sc.chord_at(t), sc.next_chord(t)
+        section   = sc.section_at(t)
+        bar, beat = sc.bar_beat_at(t)
+        label     = chord.label if chord else "-"
+        root, _, tones = parse_chord(label)
+
+        self._txt(f"KEY {key.label if key else '-'}   bar {bar}.{beat}",
+                  (inner.x, inner.y), WHITE, large=True)
+        sec_lbl = section.label if section else "-"
+        sec_txt = self.fl.render(sec_lbl.upper(), True, self._section_color(sec_lbl))
+        self.screen.blit(sec_txt, (inner.right - sec_txt.get_width(), inner.y))
+
+        big   = self.fx.render(label, True, self._chord_color(label) if root is not None else GREY)
+        big_y = inner.y + self.fl.get_height() + 6
+        self.screen.blit(big, (inner.x, big_y))
+        if nxt is not None:
+            self._txt(f"next  {nxt.label}  in {nxt.start - t:4.1f}s",
+                      (inner.x + big.get_width() + 24, big_y + big.get_height() // 2 - 10),
+                      self._chord_color(nxt.label), large=True)
+
+        # How much of the *heard* chroma sits on the *written* chord tones:
+        # a cheap check that transcription and audio agree (and are in sync).
+        heard = np.asarray(features.get("chroma", np.zeros(12)), dtype=float)
+        match = float(heard[list(tones)].sum() / heard.sum()) if tones and heard.sum() > 0 else 0.0
+        bar_y = big_y + big.get_height() + 8
+        bar_h = max(14, inner.h // 12)
+        self._h_bar(match, pygame.Rect(inner.x, bar_y, inner.w, bar_h), GREEN,
+                    label="HEARD CHROMA ON CHORD TONES")
+
+        melody = "  ".join(
+            f"{name}:{NOTE_NAMES[n.pitch % 12]}{n.pitch // 12 - 1}"
+            for name, n in (("voc", sc.melody_at(t, "vocal")),
+                            ("inst", sc.melody_at(t, "instrumental")))
+            if n is not None)
+        mel_y = bar_y + bar_h + 6
+        self._txt(f"melody  {melody or '-'}", (inner.x, mel_y), CYAN)
+
+        piano_y = mel_y + self.fs.get_height() + 8
+        piano_h = inner.bottom - piano_y - 4
+        if piano_h > 20:
+            written = np.zeros(12)
+            written[list(tones)] = 1.0
+            self._draw_piano(inner.x, piano_y, inner.w, piano_h, written,
+                             root if root is not None else -1)
+
+    # panel 10 — a window of the score around the playhead
+    def _draw_timeline(self, t: float):
+        inner = self._panel_bg(self.panels["timeline"],
+                               f"SCORE TIMELINE  (-{SCORE_PAST:.0f}s ... +{SCORE_FUTURE:.0f}s)", GOLD)
+        sc       = self.score
+        t0, t1   = t - SCORE_PAST, t + SCORE_FUTURE
+        px_per_s = inner.w / (t1 - t0)
+
+        def x_of(time: float) -> int:
+            return inner.x + int((time - t0) * px_per_s)
+
+        lane_h     = max(18, inner.h // 9)
+        sec_lane   = pygame.Rect(inner.x, inner.y, inner.w, lane_h)
+        chord_lane = pygame.Rect(inner.x, sec_lane.bottom + 4, inner.w, int(lane_h * 1.5))
+        roll       = pygame.Rect(inner.x, chord_lane.bottom + 4, inner.w,
+                                 inner.bottom - chord_lane.bottom - 4 - 18)
+        self._spans_lane(sc.sections, sec_lane, t0, t1, self._section_color)
+        self._spans_lane(sc.chords, chord_lane, t0, t1, self._chord_color)
+
+        # beats through the piano roll; downbeats brighter, with bar numbers
+        pygame.draw.rect(self.screen, (20, 20, 28), roll, border_radius=3)
+        lo, hi = np.searchsorted(sc.beats, [t0, t1])
+        for i in range(lo, hi):
+            down = sc.beat_numbers[i] == 1
+            x    = x_of(sc.beats[i])
+            pygame.draw.line(self.screen, (70, 70, 95) if down else (34, 34, 46),
+                             (x, roll.y), (x, roll.bottom), 2 if down else 1)
+            if down:
+                bar = int(np.searchsorted(sc.downbeats, sc.beats[i], side="right"))
+                self._txt(str(bar), (x + 3, roll.bottom + 2), GREY, tiny=True)
+
+        # melody: vocal gold, instrumental cyan; the sounding note turns white
+        span   = max(1, self._pitch_hi - self._pitch_lo)
+        note_h = max(3, roll.h // span)
+        for notes, color in ((sc.melody_instrumental, CYAN), (sc.melody_vocal, GOLD)):
+            for n in notes:
+                if n.time + n.duration <= t0:
+                    continue
+                if n.time >= t1:
+                    break
+                x0 = max(roll.x, x_of(n.time))
+                x1 = min(roll.right, x_of(n.time + n.duration))
+                y  = roll.bottom - int((n.pitch - self._pitch_lo) / span * roll.h) - note_h
+                sounding = n.time <= t < n.time + n.duration
+                pygame.draw.rect(self.screen, WHITE if sounding else color,
+                                 (x0, y, max(2, x1 - x0 - 1), note_h), border_radius=2)
+        self._txt("melody: vocal (gold)  instrumental (cyan)",
+                  (roll.x + 4, roll.y + 2), GREY, tiny=True)
+
+        px = x_of(t)
+        pygame.draw.line(self.screen, WHITE, (px, inner.y - 2), (px, roll.bottom), 2)
+
+    # panel 11 — the whole song at a glance
+    def _draw_songmap(self, t: float):
+        inner = self._panel_bg(self.panels["songmap"], "SONG MAP", GOLD)
+        sc    = self.score
+        dur   = max(sc.duration, float(getattr(self.extractor, "duration", 0.0)), 1e-6)
+        map_h = inner.h * 45 // 100
+
+        if self._songmap_surf is None:    # static: drawn once, blitted every frame
+            screen, self.screen = self.screen, pygame.Surface((inner.w, map_h))
+            self.screen.fill(PANEL_BG)
+            lane_h = max(12, map_h // 6)
+            self._spans_lane(sc.sections, pygame.Rect(0, 0, inner.w, lane_h), 0.0, dur,
+                             self._section_color, labels=False)
+            self._spans_lane(sc.chords, pygame.Rect(0, lane_h + 3, inner.w, lane_h), 0.0, dur,
+                             self._chord_color, labels=False)
+            dots = pygame.Rect(0, 2 * lane_h + 6, inner.w, map_h - 2 * lane_h - 6)
+            pygame.draw.rect(self.screen, (20, 20, 28), dots, border_radius=3)
+            span = max(1, self._pitch_hi - self._pitch_lo)
+            for notes, color in ((sc.melody_instrumental, CYAN), (sc.melody_vocal, GOLD)):
+                for n in notes:
+                    x0 = int(n.time / dur * inner.w)
+                    x1 = int((n.time + n.duration) / dur * inner.w)
+                    y  = dots.bottom - 2 - int((n.pitch - self._pitch_lo) / span * (dots.h - 4))
+                    pygame.draw.line(self.screen, color, (x0, y), (max(x0 + 1, x1), y), 2)
+            self._songmap_surf, self.screen = self.screen, screen
+
+        self.screen.blit(self._songmap_surf, (inner.x, inner.y))
+        px = inner.x + int(min(t / dur, 1.0) * inner.w)
+        pygame.draw.line(self.screen, WHITE, (px, inner.y - 2), (px, inner.y + map_h), 2)
+
+        # section list, current one highlighted
+        list_y = inner.y + map_h + 8
+        lh     = self.fs.get_height() + 2
+        for i, s in enumerate(sc.sections):
+            y = list_y + i * lh
+            if y + lh > inner.bottom:
+                break
+            current = s.start <= t < s.end
+            m0, s0  = divmod(int(s.start), 60)
+            self._txt(f"{'>' if current else ' '} {m0}:{s0:02d}  {s.label:<14} {s.duration:5.1f}s",
+                      (inner.x + 4, y), self._section_color(s.label) if current else GREY)
 
     # ── main render ────────────────────────────────────────────────────────────
 
@@ -554,6 +1011,15 @@ class Dashboard4K:
         self._draw_flux(features)
         self._draw_chroma(features)
         self._draw_hud(features, t)
+        self._draw_texture(features, t)
+        if self.rhythm is not None:
+            self._draw_rhythm_grid(t)
+            self._draw_rhythm_notes(t)
+            self._draw_rhythm_lanes(t)
+        if self.score is not None:
+            self._draw_harmony(features, t)
+            self._draw_timeline(t)
+            self._draw_songmap(t)
 
 
 # ── entry point ────────────────────────────────────────────────────────────────
@@ -564,6 +1030,18 @@ def main():
     parser.add_argument("--fps",    type=int, default=60)
     parser.add_argument("--mode",   default="demucs",
                         choices=["vocals", "demucs", "roformer"])
+    parser.add_argument("--midi", default=None,
+                        help="MIDI file: gives the bar/beat grid, the notes and the automation lanes")
+    parser.add_argument("--midi-offset", type=float, default=0.0,
+                        help="Seconds to move the MIDI later so it lines up with the audio")
+    parser.add_argument("--bpm", type=float, default=None,
+                        help="Fixed-tempo grid when there is no MIDI (bar 1 at t=0, 4/4)")
+    parser.add_argument("--stem", action="append", default=[], metavar="NAME=FILE",
+                        help="Extra original stem to show beside the AI stems (repeatable)")
+    parser.add_argument("--score", default=None,
+                        help="SheetSage2 output folder (default: 'sheetsage' next to the audio)")
+    parser.add_argument("--no-stems", action="store_true",
+                        help="Skip AI stem separation (no GPU work; stems panel stays empty)")
     parser.add_argument("--width",  type=int, default=3840,
                         help="Window width  (default 3840 for 4K)")
     parser.add_argument("--height", type=int, default=2160,
@@ -582,9 +1060,43 @@ def main():
     clock  = pygame.time.Clock()
 
     print(f"Loading: {file_path.name}")
+    prebuilt = {}
+    for spec in args.stem:
+        name, sep, path = spec.partition("=")
+        if not sep or not Path(path).exists():
+            print(f"[ERROR] --stem expects NAME=FILE with an existing file, got: {spec}")
+            sys.exit(1)
+        prebuilt[name] = path
+
     extractor = AudioFeatureExtractor(str(file_path), fps=args.fps,
-                                      separation_mode=args.mode)
-    dashboard = Dashboard4K(screen, extractor)
+                                      separation_mode=args.mode,
+                                      skip_separation=args.no_stems,
+                                      prebuilt_stems=prebuilt)
+
+    score_dir = Path(args.score) if args.score else file_path.parent / "sheetsage"
+    score = None
+    if has_score(score_dir):
+        score = read_score(score_dir)
+        print(f"Score: {score_dir}  ({len(score.chords)} chords, {len(score.sections)} sections, "
+              f"{len(score.melody_vocal) + len(score.melody_instrumental)} melody notes)")
+    elif args.score:
+        print(f"[ERROR] No SheetSage2 output in: {score_dir}")
+        sys.exit(1)
+    # The grid comes from the most trustworthy source available. No beat tracker
+    # here on purpose: a debug view showing a guessed grid misleads more than
+    # it helps — declare the tempo with --bpm instead.
+    rhythm = None
+    if args.midi:
+        grid, notes = read_midi(args.midi, fps=args.fps)
+        shift_in_time(grid, notes, args.midi_offset)
+        automation = MidiAutomationReader(args.midi, fps=args.fps, duration=extractor.duration)
+        rhythm = RhythmInput(grid, "MIDI", notes, automation, args.midi_offset)
+        print(f"MIDI: {args.midi}  ({len(notes)} notes, {grid.bpm:.2f} BPM, offset {args.midi_offset:+.3f}s)")
+    elif score is not None and score.grid(args.fps) is not None:
+        rhythm = RhythmInput(score.grid(args.fps), "score (SheetSage2)")
+    elif args.bpm:
+        rhythm = RhythmInput(RhythmGrid(bpm=args.bpm, fps=args.fps), "--bpm")
+    dashboard = Dashboard4K(screen, extractor, score, rhythm)
 
     pygame.mixer.music.load(str(file_path))
     pygame.mixer.music.play()
