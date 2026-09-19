@@ -21,6 +21,8 @@ except ImportError:
         print("[Feature Extractor] Error: StemService not found.")
         StemService = None
 
+from core.texture import TEXTURE_NAMES, texture_features
+
 def _bm_points(num_bands: int):
     """Return (b_point, m_point) that trisect num_bands with no empty slice."""
     b = max(1, num_bands // 4)
@@ -147,6 +149,10 @@ class AudioFeatureExtractor:
             e_max = float(energy.max())
             self.subbands[name] = energy / (e_max + 1e-6) if e_max > 0 else energy
 
+        # 3.6 texture: loudness, swell, harmonic change, ... for material without attacks
+        self.texture_names = list(TEXTURE_NAMES)
+        self.texture = texture_features(self.stft_mag, sr, self.n_fft, self.hop_length)
+
     def _load_prebuilt_stems(self):
         """Load extra audio files into stems_energy. Called after normal separation."""
         n_frames = self.spectrogram.shape[1]
@@ -260,6 +266,7 @@ class AudioFeatureExtractor:
         current_features["flux"] = float(self.flux[idx])
         current_features["onset"] = bool(self.onset_mask[idx])
         current_features["subbands"] = {n: float(self.subbands[n][idx]) for n in self.subband_names}
+        current_features["texture"] = {n: float(self.texture[n][idx]) for n in self.texture_names}
         if use_smoothing and self.prev_features:
             smoothed, f = {}, self.temporal_smoothing
             prev_bands = self.prev_features["bands"]
@@ -272,7 +279,7 @@ class AudioFeatureExtractor:
             smoothed["mid"]   = _safe_mean(smoothed["bands"][b_point:m_point])
             smoothed["high"]  = _safe_mean(smoothed["bands"][m_point:])
             smoothed["pulse"], smoothed["frame_idx"] = 1.0 + (smoothed["bass"] ** 2) * 0.15, idx
-            for k in ("centroid", "chroma", "dominant_pitch", "flux", "onset", "subbands"):
+            for k in ("centroid", "chroma", "dominant_pitch", "flux", "onset", "subbands", "texture"):
                 smoothed[k] = current_features[k]
             self.prev_features = smoothed
             return smoothed
