@@ -1,0 +1,23 @@
+# Efeito de feedback com acumulação e rotação acumulada (túnel psicodélico).
+# O post-op feedback é colocado por cima das células 8-bit.
+# Cada batida de bumbo (MIDI) provoca uma contração/pulsação no túnel de feedback (zoom).
+video:
+  layers:
+    - source: cells
+      blend: normal
+      resolution: 120
+      n_base: 8
+      n_max: 32
+      seed: 7
+      mitosis:
+        audio: 'C:\Audio\recordings\projeto2024\ep\stems\enxame\enxame_ep_15_07_2026-005_snare.mp3'
+        threshold: 0.3
+        min_gap: 0.08
+    - source: feedback
+      decay: 0.86          # decaimento de opacidade da imagem anterior (0..1)
+      base_scale: 0.96     # escala base de redução do túnel
+      max_scale: 1.06      # escala máxima alcançada no pulso de zoom
+      max_rotate: 0.08     # ângulo máximo de rotação do feedback (rad)
+      zoom_pulse:
+        notes: [36]        # bumbo MIDI dispara o zoom
+        envelope: 0.2

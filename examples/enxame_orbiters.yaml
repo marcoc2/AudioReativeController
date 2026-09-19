@@ -1,0 +1,16 @@
+# Órbitas geométricas em cascata sincronizadas com o Enxame.
+# O mandala de pais orbita por bar_phase e os satélites orbitam por beat_phase.
+# A abertura radial dos pais responde ao centroid, e dos satélites ao flux.
+# A harmonia (chroma) determina as cores e brilho de cada ramo do mandala.
+video:
+  layers:
+    - source: orbiters
+      blend: normal
+      resolution: 1024      # alta definição nativa
+      seed: 7
+      n_parents: 6
+      n_satellites: 4
+      parent_radius_spec: centroid
+      satellite_radius_spec: flux
+      parent_r_base: 0.22
+      sat_r_base: 0.08

@@ -1,0 +1,24 @@
+# Julia fractal + Orbiters geometry on top
+video:
+  layers:
+    - source: julia
+      resolution: 1024
+      iters: 56
+      zoom_pulse:
+        notes: [36]
+        envelope: 0.3
+      invert:
+        audio: 'C:\Audio\recordings\projeto2024\ep\stems\enxame\enxame_ep_15_07_2026-005_snare.mp3'
+        threshold: 0.3
+        min_gap: 0.08
+        envelope: 0.1
+    - source: orbiters
+      blend: screen
+      resolution: 1024
+      seed: 7
+      n_parents: 6
+      n_satellites: 4
+      parent_radius_spec: centroid
+      satellite_radius_spec: flux
+      parent_r_base: 0.22
+      sat_r_base: 0.08
