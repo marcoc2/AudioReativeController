@@ -84,6 +84,59 @@ def test_grid_tempo_survives_10ms_rounding(tmp_path):
     assert read_score(tmp_path).grid().bpm == pytest.approx(130.0, abs=0.02)
 
 
+def _trusted_grid(bpm=120.0, time_signature=(5, 4), seconds=12.0):
+    from core.rhythm import RhythmGrid
+    beat = 60.0 / bpm
+    beats = np.arange(0.0, seconds, beat)
+    return RhythmGrid(bpm=bpm, time_signature=time_signature,
+                      beats=beats, downbeats=beats[:: time_signature[0]])
+
+
+def test_snap_moves_boundaries_onto_the_trusted_grid(folder):
+    # the transcription slipped ~0.18 s late, as SheetSage2 does for long stretches
+    _write(folder, "chord.lab", [(0.0, 2.68, "A:maj"), (2.68, 5.17, "D:maj"), (5.17, 10.0, "A:maj")])
+    snapped = read_score(folder).snap_to(_trusted_grid(), unit="beat")
+    assert [(s.start, s.end, s.label) for s in snapped.chords] == [
+        (0.0, 2.5, "A:maj"), (2.5, 5.0, "D:maj"), (5.0, 10.0, "A:maj")]
+    assert [e.time for e in snapped.chord_changes()] == [0.0, 2.5, 5.0]
+
+
+def test_snap_to_bar_and_adopts_the_grids_meter(folder):
+    score = read_score(folder)
+    assert score.time_signature == (4, 4)                      # what SheetSage2 always says
+    snapped = score.snap_to(_trusted_grid(), unit="bar")       # 5/4 at 120 BPM: bars every 2.5 s
+    assert snapped.time_signature == (5, 4)
+    assert all(s.start % 2.5 == pytest.approx(0.0, abs=1e-9) for s in snapped.chords)
+    assert snapped.bar_beat_at(2.5) == (2, 1)                  # bar 2 starts at 2.5 s, not at 2.0 s
+    assert snapped.bar_beat_at(4.6) == (2, 5)                  # fifth beat of a 5/4 bar
+    assert score.bar_beat_at(4.6) == (3, 2)                    # the original is left untouched
+
+
+def test_snap_drops_spans_squeezed_to_nothing_and_rejoins_neighbours(folder):
+    _write(folder, "chord.lab", [(0.0, 2.4, "A:maj"), (2.4, 2.6, "E:maj"), (2.6, 10.0, "A:maj")])
+    snapped = read_score(folder).snap_to(_trusted_grid(), unit="bar")
+    assert [(s.start, s.end, s.label) for s in snapped.chords] == [(0.0, 10.0, "A:maj")]
+
+
+def test_snap_carries_the_grid_past_its_last_marker(folder):
+    # a MIDI file often ends before its audio does
+    short = _trusted_grid(seconds=3.0)
+    snapped = read_score(folder).snap_to(short, unit="beat")
+    assert snapped.beats[-1] >= 9.5 and snapped.downbeats[-1] >= 7.5
+    assert np.allclose(np.diff(snapped.beats), 0.5)
+
+
+def test_snap_leaves_melody_alone_unless_asked(folder):
+    score = read_score(folder)
+    _write(folder, "melody_instrumental.lab", [(2.13, 2.4, 69), (3.31, 4.0, 73)])
+    score = read_score(folder)
+    grid = _trusted_grid()
+    assert [n.time for n in score.snap_to(grid).melody()] == [2.13, 3.31]
+    assert [n.time for n in score.snap_to(grid, melody_division=4).melody()] == [2.125, 3.25]
+    with pytest.raises(ValueError):
+        score.snap_to(grid, unit="16th")
+
+
 def test_partial_folder_and_detection(tmp_path):
     assert not has_score(tmp_path)
     _write(tmp_path, "chord.lab", [(0.0, 3.0, "C:maj")])

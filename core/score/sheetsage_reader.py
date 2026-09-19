@@ -105,6 +105,43 @@ def _merge(spans: Sequence[Span]) -> List[Span]:
     return merged
 
 
+def _grid_lines(grid: RhythmGrid, unit: str, until: float) -> np.ndarray:
+    """Every beat (``unit="beat"``) or bar line (``"bar"``) of ``grid`` up to ``until`` seconds.
+
+    Uses the grid's own markers when it has them and carries on metronomically
+    past the last one — a MIDI file often ends before its audio does.
+    """
+    if unit not in ("beat", "bar"):
+        raise ValueError(f"unit must be 'beat' or 'bar', got {unit!r}")
+    step = grid.beat_duration if unit == "beat" else grid.bar_duration
+    marks = grid.beats if unit == "beat" else grid.downbeats
+    if marks is not None and len(marks) >= 2:
+        lines = np.asarray(marks, dtype=float)
+    else:
+        lines = np.array([float(grid.start_offset)])
+    if lines[-1] < until:
+        extra = lines[-1] + step * np.arange(1, int(np.ceil((until - lines[-1]) / step)) + 1)
+        lines = np.concatenate([lines, extra])
+    return lines
+
+
+def _snap(times, lines: np.ndarray) -> np.ndarray:
+    """Move each time to the nearest of ``lines`` (sorted)."""
+    times = np.asarray(times, dtype=float)
+    right = np.clip(np.searchsorted(lines, times), 1, len(lines) - 1)
+    left = right - 1
+    return np.where(times - lines[left] <= lines[right] - times, lines[left], lines[right])
+
+
+def _snap_spans(spans: Sequence[Span], lines: np.ndarray) -> List[Span]:
+    if not spans or len(lines) < 2:
+        return list(spans)
+    starts = _snap([s.start for s in spans], lines)
+    ends = _snap([s.end for s in spans], lines)
+    # a span squeezed to nothing between two lines disappears; equal neighbours rejoin
+    return _merge([Span(float(a), float(b), s.label) for s, a, b in zip(spans, starts, ends) if b > a])
+
+
 def _span_at(spans: Sequence[Span], starts: Sequence[float], t: float) -> Optional[Span]:
     i = bisect_right(starts, t) - 1
     if i < 0:
@@ -197,6 +234,62 @@ class Score:
         return RhythmGrid(bpm=60.0 / seconds_per_beat, time_signature=self.time_signature, fps=fps,
                           beats=self.beats, downbeats=self.downbeats,
                           start_offset=float(self.beats[0]))
+
+    def snap_to(self, grid: RhythmGrid, unit: str = "bar",
+                melody_division: Optional[int] = None) -> "Score":
+        """This score re-timed onto a grid you trust (typically the song's MIDI).
+
+        SheetSage2 hears harmony well and rhythm badly: it assumes 4/4 whatever
+        the song is, its bar lines wander, and its beats can sit ~0.2 s off for
+        long stretches. So when a trusted grid exists, the score keeps *what*
+        happens and the grid decides *when*:
+
+        - chord, key and section boundaries move to the nearest ``unit`` of the
+          grid: ``"bar"`` (default) or ``"beat"``. Prefer bars. Measured against
+          Reaper MIDI on two songs at 130 BPM, SheetSage2's chord changes sat
+          0.25-0.65 s away from the real bar line. That is more than half a beat
+          (0.23 s), so snapping to the nearest *beat* is a coin flip — on a 5/4
+          song it put 32 of 45 changes on beat 5 instead of beat 1 — while the
+          nearest *bar* was right every time. Use ``"beat"`` only for music whose
+          harmony really moves inside the bar and whose transcribed beats you
+          have checked to be tight;
+        - beats, downbeats and time signature become the grid's, so
+          ``bar_beat_at`` agrees with everything else that follows that grid;
+        - melody keeps its own timing unless ``melody_division`` is given
+          (grid lines per beat: 2 = eighths, 4 = sixteenths) — a melody is
+          rhythm, and coarse snapping would flatten it.
+
+        Returns a new Score; this one is left as transcribed.
+        """
+        beats = _grid_lines(grid, "beat", self.duration)
+        downbeats = _grid_lines(grid, "bar", self.duration)
+        lines = beats if unit == "beat" else _grid_lines(grid, unit, self.duration)
+
+        # number each beat within its bar: 1 on a downbeat, 0 before the first bar
+        bar_of = np.searchsorted(downbeats, beats + 1e-6, side="right") - 1
+        since_bar = beats - downbeats[np.maximum(bar_of, 0)]
+        beat_numbers = np.where(bar_of >= 0, np.round(since_bar / grid.beat_duration).astype(int) + 1, 0)
+
+        def snap_melody(notes: List[MidiNote]) -> List[MidiNote]:
+            if not melody_division or not notes:
+                return list(notes)
+            step = grid.beat_duration / melody_division
+            fine = beats[0] + step * np.arange(int(np.ceil((self.duration - beats[0]) / step)) + 2)
+            times = _snap([n.time for n in notes], fine)
+            return [MidiNote(time=float(t), pitch=n.pitch, velocity=n.velocity,
+                             channel=n.channel, duration=max(n.duration, step))
+                    for n, t in zip(notes, times)]
+
+        return Score(
+            duration=self.duration,
+            chords=_snap_spans(self.chords, lines),
+            keys=_snap_spans(self.keys, lines),
+            sections=_snap_spans(self.sections, lines),
+            beats=beats, beat_numbers=beat_numbers, downbeats=downbeats,
+            time_signature=grid.time_signature,
+            melody_vocal=snap_melody(self.melody_vocal),
+            melody_instrumental=snap_melody(self.melody_instrumental),
+        )
 
     def _voice(self, voice: str) -> List[MidiNote]:
         if voice == "vocal":
