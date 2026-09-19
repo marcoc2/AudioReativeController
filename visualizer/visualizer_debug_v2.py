@@ -132,10 +132,12 @@ SPEC_H      = 200  # rows in the scrolling spectrogram texture
 # ── Dashboard ──────────────────────────────────────────────────────────────────
 class Dashboard4K:
     def __init__(self, screen: pygame.Surface, extractor: AudioFeatureExtractor,
-                 score: Score | None = None, rhythm: RhythmInput | None = None):
+                 score: Score | None = None, rhythm: RhythmInput | None = None,
+                 score_label: str = "SheetSage2"):
         self.screen    = screen
         self.extractor = extractor
         self.score     = score
+        self.score_label = score_label      # says whose timing the score row is showing
         self.rhythm    = rhythm
         extra = [s for s in getattr(extractor, "stems_energy", {}) if s not in STEM_ORDER]
         self.stem_names = STEM_ORDER + sorted(extra)
@@ -856,7 +858,7 @@ class Dashboard4K:
 
     # panel 9 — what is written right now
     def _draw_harmony(self, features: dict, t: float):
-        inner = self._panel_bg(self.panels["harmony"], "HARMONY NOW (SheetSage2)", GOLD)
+        inner = self._panel_bg(self.panels["harmony"], f"HARMONY NOW ({self.score_label})", GOLD)
         sc    = self.score
         key, chord, nxt = sc.key_at(t), sc.chord_at(t), sc.next_chord(t)
         section   = sc.section_at(t)
@@ -874,9 +876,15 @@ class Dashboard4K:
         big_y = inner.y + self.fl.get_height() + 6
         self.screen.blit(big, (inner.x, big_y))
         if nxt is not None:
-            self._txt(f"next  {nxt.label}  in {nxt.start - t:4.1f}s",
-                      (inner.x + big.get_width() + 24, big_y + big.get_height() // 2 - 10),
-                      self._chord_color(nxt.label), large=True)
+            # right-aligned beside the big label; a long label (G#:maj/3) leaves little
+            # room, so fall back to the small font rather than run off the panel
+            text  = f"next {nxt.label} in {nxt.start - t:.1f}s"
+            room  = inner.right - (inner.x + big.get_width() + 16)
+            font  = self.fl if self.fl.size(text)[0] <= room else self.fs
+            surf  = font.render(text, True, self._chord_color(nxt.label))
+            if surf.get_width() <= room:
+                self.screen.blit(surf, (inner.right - surf.get_width(),
+                                        big_y + (big.get_height() - surf.get_height()) // 2))
 
         # How much of the *heard* chroma sits on the *written* chord tones:
         # a cheap check that transcription and audio agree (and are in sync).
@@ -1040,6 +1048,9 @@ def main():
                         help="Extra original stem to show beside the AI stems (repeatable)")
     parser.add_argument("--score", default=None,
                         help="SheetSage2 output folder (default: 'sheetsage' next to the audio)")
+    parser.add_argument("--score-snap", default="bar", choices=["bar", "beat", "off"],
+                        help="With --midi: move the score's chord/section changes onto the MIDI grid "
+                             "(default: bar; SheetSage2's own timing is 0.25-0.65 s off)")
     parser.add_argument("--no-stems", action="store_true",
                         help="Skip AI stem separation (no GPU work; stems panel stays empty)")
     parser.add_argument("--width",  type=int, default=3840,
@@ -1075,6 +1086,7 @@ def main():
 
     score_dir = Path(args.score) if args.score else file_path.parent / "sheetsage"
     score = None
+    score_label = "SheetSage2"
     if has_score(score_dir):
         score = read_score(score_dir)
         print(f"Score: {score_dir}  ({len(score.chords)} chords, {len(score.sections)} sections, "
@@ -1092,11 +1104,17 @@ def main():
         automation = MidiAutomationReader(args.midi, fps=args.fps, duration=extractor.duration)
         rhythm = RhythmInput(grid, "MIDI", notes, automation, args.midi_offset)
         print(f"MIDI: {args.midi}  ({len(notes)} notes, {grid.bpm:.2f} BPM, offset {args.midi_offset:+.3f}s)")
+        if score is not None and args.score_snap != "off":
+            # The MIDI knows when; the score only knows what. See Score.snap_to.
+            before = len(score.chord_changes())
+            score = score.snap_to(grid, unit=args.score_snap)
+            score_label = f"SheetSage2 on MIDI {args.score_snap}s"
+            print(f"Score snapped to MIDI {args.score_snap}s ({before} -> {len(score.chord_changes())} chord changes)")
     elif score is not None and score.grid(args.fps) is not None:
         rhythm = RhythmInput(score.grid(args.fps), "score (SheetSage2)")
     elif args.bpm:
         rhythm = RhythmInput(RhythmGrid(bpm=args.bpm, fps=args.fps), "--bpm")
-    dashboard = Dashboard4K(screen, extractor, score, rhythm)
+    dashboard = Dashboard4K(screen, extractor, score, rhythm, score_label=score_label)
 
     pygame.mixer.music.load(str(file_path))
     pygame.mixer.music.play()
