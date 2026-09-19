@@ -76,6 +76,14 @@ def test_grid_from_transcribed_beats(folder):
     assert np.allclose(grid.downbeats, [0, 2, 4, 6, 8])
 
 
+def test_grid_tempo_survives_10ms_rounding(tmp_path):
+    # SheetSage2 writes times rounded to 10 ms; at 130 BPM the median gap then says 130.43
+    beats = np.round(np.arange(400) * 60.0 / 130.0, 2)
+    _write(tmp_path, "beat.lab", [(f"{t:.2f}", i % 4 + 1, 4, 4) for i, t in enumerate(beats)])
+    assert 60.0 / np.median(np.diff(beats)) == pytest.approx(130.43, abs=0.01)   # the trap
+    assert read_score(tmp_path).grid().bpm == pytest.approx(130.0, abs=0.02)
+
+
 def test_partial_folder_and_detection(tmp_path):
     assert not has_score(tmp_path)
     _write(tmp_path, "chord.lab", [(0.0, 3.0, "C:maj")])

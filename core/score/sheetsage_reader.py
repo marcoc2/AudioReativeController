@@ -190,8 +190,13 @@ class Score:
         """The transcribed beats as a RhythmGrid, or None with fewer than 2 beats."""
         if len(self.beats) < 2:
             return None
-        return RhythmGrid.from_beats(self.beats, time_signature=self.time_signature,
-                                     fps=fps, downbeats=self.downbeats)
+        # Tempo from a line fitted through every beat, not from the median gap:
+        # SheetSage2 rounds times to 10 ms, so a 461.5 ms beat reads 460 ms and
+        # the median reports 130.43 BPM for any song at 130.
+        seconds_per_beat = float(np.polyfit(np.arange(len(self.beats)), self.beats, 1)[0])
+        return RhythmGrid(bpm=60.0 / seconds_per_beat, time_signature=self.time_signature, fps=fps,
+                          beats=self.beats, downbeats=self.downbeats,
+                          start_offset=float(self.beats[0]))
 
     def _voice(self, voice: str) -> List[MidiNote]:
         if voice == "vocal":
