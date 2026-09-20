@@ -1,0 +1,34 @@
+# Kiss — a harmonia troca o clipe até a bateria entrar; daí em diante o bumbo comanda.
+#
+# Música sem ataques nos primeiros 2 minutos (drone + pad): não há bumbo para seguir,
+# então o evento é "o acorde mudou", lido de uma transcrição do SheetSage2 (core/score).
+# A transcrição sabe O QUE acontece bem melhor do que QUANDO — as trocas dela ficam
+# 0,25–0,65 s longe da barra real — por isso `snap: auto` as encaixa nos compassos do
+# MIDI (grade de 130 BPM exata). Sem --midi a grade é só um tempo fictício e o snap
+# se desliga sozinho.
+#
+#   python clip_generator.py --file input/scott/kiss.mp3 \
+#       --midi input/scott/Instrumento.mid --midi-offset 0.059 \
+#       --clips <pasta de clipes> --scene examples/kiss_harmony_handover.yaml \
+#       --output render_output/kiss_harmony_handover.mp4
+#
+# A transcrição é gerada à parte (venv do SheetSage2, pesos no cache HF global) em
+# input/scott/sheetsage/ — essas pastas ficam fora do git.
+#
+# Resultado nesta música: trocas nos compassos 44, 45, 48, 49 … 68, 69 (A#min por 3
+# compassos, G#sus4 por 1); o bumbo assume no compasso 71. Os compassos 1–43 são um
+# acorde só: ali o que se move é textura (texture.loudness / texture.swell), não evento.
+video:
+  clip_per_bar: false
+  clip_order: shuffle
+  triggers:
+    harmony:
+      score: input/scott/sheetsage
+      events: chord_changes     # chord_changes | section_changes | melody
+      snap: auto                # auto | bar | beat | off
+      # notes: [8]              # só as chegadas em G# (0 = C … 11 = B)
+      actions: [next_clip]
+      until: kick               # passa o bastão no primeiro bumbo
+    kick:
+      notes: [36]
+      actions: [next_clip]

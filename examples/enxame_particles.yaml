@@ -1,0 +1,19 @@
+# Simulador de partículas em grade 8-bit sincronizado com o Enxame.
+# Partículas flutuam e são atraídas para o centro, e batidas de caixa gravadas
+# disparam jatos (bursts) saindo diretamente dos vértices do pentágono rotativo central.
+video:
+  layers:
+    - source: particles
+      blend: normal
+      resolution: 1024      # alta definição nativa
+      n_particles: 12000
+      seed: 42
+      n_vertices: 5        # pentágono central
+      emitter_radius: 0.22 # raio do emissor central
+      rotation_speed: 1.2  # rotação do emissor (rad/s)
+      triggers:
+        burst:
+          audio: 'C:\Audio\recordings\projeto2024\ep\stems\enxame\enxame_ep_15_07_2026-005_snare.mp3'
+          threshold: 0.15
+          min_gap: 0.08
+          quantity: 400    # partículas injetadas por batida

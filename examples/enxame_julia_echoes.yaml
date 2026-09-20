@@ -1,0 +1,19 @@
+# Julia fractal + Echoes post-op
+video:
+  layers:
+    - source: julia
+      resolution: 1024
+      iters: 56
+      zoom_pulse:
+        notes: [36]
+        envelope: 0.3
+      invert:
+        audio: 'C:\Audio\recordings\projeto2024\ep\stems\enxame\enxame_ep_15_07_2026-005_snare.mp3'
+        threshold: 0.3
+        min_gap: 0.08
+        envelope: 0.1
+    - source: echoes
+      depth: 6
+      opacity_decay: 0.76
+      scale_decay: 0.94
+      hue_shift: 0.08

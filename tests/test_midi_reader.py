@@ -145,3 +145,21 @@ def test_read_midi_velocity_preserved(tmp_path):
 def test_read_midi_missing_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         read_midi(str(tmp_path / "nope.mid"))
+
+
+def test_shift_in_time_moves_grid_and_notes_together():
+    import numpy as np
+    from core.rhythm import MidiNote, RhythmGrid, shift_in_time
+
+    grid = RhythmGrid(bpm=120.0, beats=np.array([0.0, 0.5, 1.0]), downbeats=np.array([0.0]))
+    notes = [MidiNote(time=1.0, pitch=36, velocity=100, channel=9, duration=0.1)]
+
+    shift_in_time(grid, notes, 0.0)                       # no-op
+    assert notes[0].time == 1.0 and grid.start_offset == 0.0
+
+    shift_in_time(grid, notes, 0.059)                     # t_audio = t_midi + offset, for everything
+    assert notes[0].time == pytest.approx(1.059)
+    assert np.allclose(grid.beats, [0.059, 0.559, 1.059])
+    assert np.allclose(grid.downbeats, [0.059])
+    assert grid.start_offset == pytest.approx(0.059)
+    assert grid.phase(0.059) == pytest.approx(0.0)        # bar 1 now starts where the audio does

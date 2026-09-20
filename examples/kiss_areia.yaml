@@ -1,0 +1,43 @@
+# Kiss — "Areia": figuras de Chladni. Areia sobre uma placa que vibra com a música:
+# os grãos fogem de onde a placa se mexe e param nas linhas que ficam quietas, e cada
+# acorde tem a sua figura. Só CPU, sem clipes.
+#
+#   python clip_generator.py --file input/scott/kiss.mp3 \
+#       --midi input/scott/Instrumento.mid --midi-offset 0.059 \
+#       --scene examples/kiss_areia.yaml --bars 0 --resolution 1280x720 --fps 24 \
+#       --output render_output/kiss_areia.mp4
+#
+# Compassos 1–43 (drone): a placa começa vazia e a areia vai sendo despejada conforme o
+# som soa (pour). Não há ataque nenhum: a figura vagueia quando o timbre se move
+# (texture.harmonic_change), fica mais fina quando o som clareia (centroid) e a areia
+# anda mais depressa quando o volume sobe (texture.loudness).
+# Do 44 em diante a harmonia troca a figura: A#min <-> G#sus4 de 4 em 4 compassos — as
+# linhas paradas mudam de lugar e a areia migra de uma figura para a outra.
+# Do 71 em diante entra a bateria, que aqui são rajadas de semicolcheias em cinco vozes.
+# Cada voz tem um gesto instantâneo, no frame do toque, feito só no desenho (a areia não
+# sai das linhas, então a figura continua nítida): 36 incha e clareia a figura, 40 faz os
+# grãos saltarem dourados, 48 torce a figura para um lado e para o outro, 37/39 soltam
+# uma onda de choque que atravessa a areia. Nos compassos 87–94 os
+# agudos abrem e os grãos faíscam (texture.noisiness). No fim o som morre e a última
+# figura (C#maj7) fica parada na placa.
+video:
+  layers:
+    - source: chladni
+      seed: 3
+      grains: 140000
+      root: 10                  # A#min até a primeira troca de acorde
+      modes:
+        10: [2, 3]              # A#  — a figura "de casa"
+        8: [3, 5]               # G#  — sus4 e maj/3
+        1: [1, 4]               # C#  — o final
+      fineness: [0.75, 1.5]
+      pour: 14
+      harmony:
+        score: input/scott/sheetsage
+        snap: auto
+        bloom: 1.5
+      hits:
+        - {notes: [36], gesture: punch, envelope: 0.10}
+        - {notes: [40], gesture: sizzle, envelope: 0.09}
+        - {notes: [48], gesture: twist, envelope: 0.10}
+        - {notes: [37, 39], gesture: ring}

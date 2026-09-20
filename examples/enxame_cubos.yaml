@@ -1,0 +1,40 @@
+# Cubos no vazio — um palco 3D onde os clipes tocam nas FACES de cubos que a
+# câmera atravessa (no espírito do enxame_voo, mas o conteúdo são os próprios
+# clipes, não um fractal). A geometria é cenografia; o que REAGE ao áudio são
+# os clipes, via `clip_reactivity` (uma config de ClipComposer por dentro).
+#
+# Cena autocontida: a camada `cubes` carrega o próprio pool de clipes
+# (`clips_dir`), então --clips na CLI NÃO é usado por ela. Passe --midi para
+# ter grade musical + triggers de bateria.
+#
+#   python clip_generator.py --file input/deserto_de_lama/deserto_de_lama.mp3 \
+#       --midi input/deserto_de_lama/deserto_de_lama_ep.mid \
+#       --scene examples/enxame_cubos.yaml --bars 8 --resolution 854x480
+video:
+  layers:
+    - source: cubes
+      clips_dir: C:/Users/marco/Videos/ltx2/2_3_samples
+      bg_color: [0, 0, 0]          # espaço vazio (comece com preto)
+      n_cubes: 40                  # cubos no corredor periódico (loop perfeito)
+      faces_with_clips: 6          # 0..6 faces mostrando a tela de clipes
+      one_clip_per_face: true      # cada face-index é um clipe reativo independente
+      crop_faces: true             # crop central: preenche a face quadrada (sem faixas)
+      face_resolution: 256         # textura por face (poupa RAM/CPU)
+      face_color: [18, 18, 22]     # cor das faces sem clipe (usada se faces_with_clips<6)
+      radius_min: 1.6              # anel de cubos: centro fica vazio (câmera passa)
+      radius_max: 5.5
+      loop_bars: 2                 # câmera avança 1 corredor a cada 2 compassos
+      zoom_pulse:                  # bumbo = surto breve de avanço da câmera
+        notes: [36]
+        envelope: 0.25
+      clip_reactivity:             # a "tela" reativa pintada nas faces:
+        clip_per_bar: true         #   novo clipe por compasso
+        clip_order: shuffle
+        seed: 7
+        triggers:
+          kick:
+            notes: [36]
+            actions: [reverse]     # bumbo inverte o playback do clipe
+          snare:
+            notes: [38, 40]
+            actions: [next_clip]   # caixa pula para o próximo clipe

@@ -43,13 +43,24 @@ class ClipLibrary:
         height: int,
         fps: int,
         cache_size: int = 4,
+        fit: str = "contain",
     ):
+        """``fit`` controls how a clip whose aspect ratio differs from
+        ``width:height`` is fitted:
+          - ``"contain"`` (default): scale to fit, black-pad the rest
+            (letterbox/pillarbox) — preserves the whole frame.
+          - ``"cover"``: scale to fill, center-crop the overflow — no black
+            bars (useful for square cube faces from 16:9 footage).
+        """
         self.folder = Path(folder)
         if not self.folder.is_dir():
             raise NotADirectoryError(self.folder)
+        if fit not in ("contain", "cover"):
+            raise ValueError(f"fit must be 'contain' or 'cover', got {fit!r}")
         self.width = width
         self.height = height
         self.fps = fps
+        self.fit = fit
         self.cache_size = max(1, cache_size)
         self.paths: List[Path] = sorted(
             p for p in self.folder.iterdir() if p.suffix.lower() in VIDEO_EXTS
@@ -74,10 +85,16 @@ class ClipLibrary:
 
     def _decode(self, path: Path) -> ClipFrames:
         W, H = self.width, self.height
-        vf = (
-            f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps={self.fps}"
-        )
+        if self.fit == "cover":
+            vf = (
+                f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+                f"crop={W}:{H},setsar=1,fps={self.fps}"          # center-crop, no bars
+            )
+        else:
+            vf = (
+                f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps={self.fps}"
+            )
         cmd = [
             "ffmpeg", "-v", "error",
             "-i", str(path),

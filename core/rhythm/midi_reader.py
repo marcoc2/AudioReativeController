@@ -2,9 +2,12 @@
 
 Conventions
 -----------
-- ``set_tempo`` events drive BPM (last value wins) and ``time_signature``
-  meta events drive the bar formula (first value wins). Both assume a
-  static value per file, typical for sequenced MIDI.
+- ``set_tempo`` events drive BPM (last value wins; one tempo per file).
+- ``time_signature`` meta events drive the bar formula, and every one of
+  them counts: a change takes effect at the bar line it sits on, so a tune
+  in 5/4 with five bars of 6/4 in the middle gets bar lines where the DAW
+  has them. When the file does not carry the changes (exported without
+  them), declare them by bar with ``meter_changes``.
 - With tempo meta present, the grid is metronomic: beats/downbeats laid
   from t=0 (DAW bar 1) at the declared BPM and time signature, so bars
   match the session's bar lines exactly.
@@ -15,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import mido
 import numpy as np
@@ -34,10 +37,51 @@ class MidiNote:
     duration: float   # seconds; 0.0 if note_off not seen
 
 
+MeterChanges = Sequence[Tuple[int, Tuple[int, int]]]   # (bar number, 1-based) -> (num, den)
+
+
+def parse_meter_changes(text: str) -> List[Tuple[int, Tuple[int, int]]]:
+    """``"22:6/4,27:5/4"`` -> ``[(22, (6, 4)), (27, (5, 4))]`` (bar numbers as the DAW shows them)."""
+    changes = []
+    for item in filter(None, (part.strip() for part in text.split(","))):
+        try:
+            bar, sig = item.split(":")
+            num, den = sig.split("/")
+            changes.append((int(bar), (int(num), int(den))))
+        except ValueError:
+            raise ValueError(f"meter change {item!r}: expected BAR:NUM/DEN, e.g. 22:6/4") from None
+        if changes[-1][0] < 1 or min(changes[-1][1]) < 1:
+            raise ValueError(f"meter change {item!r}: bar and signature must be positive")
+    return sorted(changes)
+
+
+def _lay_bars(total_beats: float, first: Tuple[int, int],
+              at_beat: Sequence[Tuple[float, Tuple[int, int]]], at_bar: MeterChanges):
+    """Walk the song bar by bar and return (downbeat positions in quarter-note beats, beats per bar).
+
+    ``at_beat`` are the file's own meter events (they take effect at the bar
+    line they sit on); ``at_bar`` are declared by 1-based bar number and win.
+    """
+    by_bar = dict(at_bar)
+    pending = sorted(at_beat)
+    sig, pos, bar = first, 0.0, 1
+    downbeats, bar_beats = [], []
+    while pos < total_beats or not downbeats:
+        while pending and pending[0][0] <= pos + 1e-6:
+            sig = pending.pop(0)[1]
+        sig = by_bar.get(bar, sig)
+        downbeats.append(pos)
+        bar_beats.append(sig[0])
+        pos += sig[0] * 4.0 / sig[1]          # bar length in quarter notes
+        bar += 1
+    return np.array(downbeats), np.array(bar_beats, dtype=int)
+
+
 def read_midi(
     path: str | Path,
     time_signature: Optional[Tuple[int, int]] = None,
     fps: int = 24,
+    meter_changes: Optional[MeterChanges] = None,
 ) -> Tuple[RhythmGrid, List[MidiNote]]:
     """Parse ``path`` and return (grid, notes).
 
@@ -58,14 +102,17 @@ def read_midi(
     starts: Dict[Tuple[int, int], Tuple[float, int]] = {}
     bpm: Optional[float] = None
     ts_meta: Optional[Tuple[int, int]] = None
+    ts_events: List[Tuple[float, Tuple[int, int]]] = []    # (seconds, signature), every one
 
     t = 0.0
     for msg in mid:
         t += msg.time  # mido cumulative iteration yields seconds
         if msg.type == "set_tempo":
             bpm = float(mido.tempo2bpm(msg.tempo))
-        elif msg.type == "time_signature" and ts_meta is None:
-            ts_meta = (int(msg.numerator), int(msg.denominator))
+        elif msg.type == "time_signature":
+            ts_events.append((t, (int(msg.numerator), int(msg.denominator))))
+            if ts_meta is None:
+                ts_meta = ts_events[-1][1]
         elif msg.type == "note_on" and msg.velocity > 0:
             starts[(msg.channel, msg.note)] = (t, msg.velocity)
         elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
@@ -104,6 +151,18 @@ def read_midi(
         # session's bar lines, independent of where the drums actually hit.
         bar_dur = beat_dur * beats_per_bar
         last_t  = (notes[-1].time if notes else 0.0) + bar_dur
+        later   = [(sec / beat_dur, sig) for sec, sig in ts_events if sec > 1e-6]
+        if later or meter_changes:
+            # The meter moves along the song: lay the bars one by one.
+            downbeats, bar_beats = _lay_bars(last_t / beat_dur, time_signature, later, meter_changes or ())
+            return (
+                RhythmGrid(
+                    bpm=bpm, time_signature=time_signature, fps=fps,
+                    beats=np.arange(0.0, float(downbeats[-1]) * beat_dur + bar_dur, beat_dur),
+                    downbeats=downbeats * beat_dur, bar_beats=bar_beats, start_offset=0.0,
+                ),
+                notes,
+            )
         return (
             RhythmGrid(
                 bpm=bpm,
@@ -152,3 +211,22 @@ def read_midi(
         ),
         notes,
     )
+
+
+def shift_in_time(grid: RhythmGrid, notes: List[MidiNote], seconds: float) -> None:
+    """Move a MIDI reading ``seconds`` later so it lines up with the audio.
+
+    A MIDI file counts from DAW bar 1; the audio it belongs to may start a
+    little later (encoder padding, a trimmed export). Everything that carries
+    a time moves together — beats, downbeats, the grid's anchor and the notes —
+    so ``t_audio = t_midi + seconds`` holds for all of them. In place.
+    """
+    if seconds == 0.0:
+        return
+    if grid.beats is not None:
+        grid.beats = grid.beats + seconds
+    if grid.downbeats is not None:
+        grid.downbeats = grid.downbeats + seconds
+    grid.start_offset += seconds
+    for n in notes:
+        n.time += seconds

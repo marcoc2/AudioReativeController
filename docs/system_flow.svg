@@ -1,0 +1,105 @@
+<svg viewBox="0 0 900 500" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="inputGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#818cf8;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#6366f1;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="procGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#22d3ee;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0891b2;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="outputGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#34d399;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#059669;stop-opacity:1" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur stdDeviation="3" result="blur" />
+      <feOffset dx="2" dy="2" result="offsetBlur" />
+      <feComposite in="SourceGraphic" in2="offsetBlur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="100%" height="100%" fill="#0f172a" rx="12" />
+
+  <!-- Headers -->
+  <g font-family="Inter, sans-serif" font-weight="bold" font-size="18">
+    <text x="100" y="60" fill="#a5b4fc">INPUT</text>
+    <text x="400" y="60" fill="#67e8f9">PROCESSING (ARC CORE)</text>
+    <text x="730" y="60" fill="#6ee7b7">OUTPUT</text>
+  </g>
+
+  <!-- Connectors -->
+  <g stroke="#334155" stroke-width="3" fill="none">
+    <!-- Input to Processing -->
+    <path d="M220 150 L300 150" />
+    <path d="M220 250 L300 250" />
+    <path d="M220 350 L300 350" />
+    
+    <!-- Processing to Output -->
+    <path d="M600 250 L680 200" />
+    <path d="M600 250 L680 300" />
+    <path d="M600 250 L680 400" />
+    
+    <!-- Internal Processing Flow -->
+    <path d="M450 180 L450 210" stroke_dasharray="4" />
+    <path d="M450 290 L450 320" stroke_dasharray="4" />
+  </g>
+
+  <!-- Input Blocks -->
+  <g transform="translate(40, 100)" filter="url(#shadow)">
+    <rect width="180" height="80" rx="10" fill="url(#inputGrad)" />
+    <text x="90" y="35" text-anchor="middle" fill="white" font-family="Inter" font-weight="bold" font-size="14">Audio File</text>
+    <text x="90" y="55" text-anchor="middle" fill="white" font-family="Inter" font-size="11" opacity="0.8">MP3, WAV, FLAC</text>
+
+    <rect y="100" width="180" height="80" rx="10" fill="url(#inputGrad)" />
+    <text x="90" y="135" text-anchor="middle" fill="white" font-family="Inter" font-weight="bold" font-size="14">MIDI Data</text>
+    <text x="90" y="155" text-anchor="middle" fill="white" font-family="Inter" font-size="11" opacity="0.8">(Optional) Precision Beats</text>
+
+    <rect y="200" width="180" height="80" rx="10" fill="url(#inputGrad)" />
+    <text x="90" y="235" text-anchor="middle" fill="white" font-family="Inter" font-weight="bold" font-size="14">Config</text>
+    <text x="90" y="255" text-anchor="middle" fill="white" font-family="Inter" font-size="11" opacity="0.8">BPM, Presets, FPS</text>
+  </g>
+
+  <!-- Processing Center -->
+  <g transform="translate(300, 80)" filter="url(#shadow)">
+    <rect width="300" height="340" rx="15" fill="#1e293b" stroke="#0891b2" stroke-width="2" />
+    
+    <!-- Step 1: Separation -->
+    <rect x="20" y="30" width="260" height="70" rx="8" fill="url(#procGrad)" />
+    <text x="150" y="60" text-anchor="middle" fill="white" font-family="Inter" font-weight="bold" font-size="14">Stem Separation (AI)</text>
+    <text x="150" y="80" text-anchor="middle" fill="white" font-family="Inter" font-size="11" opacity="0.9">Demucs / RoFormer Models</text>
+
+    <!-- Step 2: Extraction -->
+    <rect x="20" y="130" width="260" height="70" rx="8" fill="url(#procGrad)" />
+    <text x="150" y="160" text-anchor="middle" fill="white" font-family="Inter" font-weight="bold" font-size="14">Feature &amp; Rhythm Analysis</text>
+    <text x="150" y="180" text-anchor="middle" fill="white" font-family="Inter" font-size="11" opacity="0.9">RMS, FFT, Beat Tracking</text>
+
+    <!-- Step 3: Mapping -->
+    <rect x="20" y="230" width="260" height="80" rx="8" fill="url(#procGrad)" />
+    <text x="150" y="260" text-anchor="middle" fill="white" font-family="Inter" font-weight="bold" font-size="14">Motion &amp; Render</text>
+    <text x="150" y="280" text-anchor="middle" fill="white" font-family="Inter" font-size="11" opacity="0.9">Pygame Animation Frames</text>
+  </g>
+
+  <!-- Output Blocks -->
+  <g transform="translate(680, 150)" filter="url(#shadow)">
+    <rect width="180" height="70" rx="10" fill="url(#outputGrad)" />
+    <text x="90" y="30" text-anchor="middle" fill="white" font-family="Inter" font-weight="bold" font-size="14">MP4 Video</text>
+    <text x="90" y="50" text-anchor="middle" fill="white" font-family="Inter" font-size="11" opacity="0.8">Encoded via FFmpeg</text>
+
+    <rect y="100" width="180" height="70" rx="10" fill="url(#outputGrad)" />
+    <text x="90" y="130" text-anchor="middle" fill="white" font-family="Inter" font-weight="bold" font-size="14">Audio Stems</text>
+    <text x="90" y="150" text-anchor="middle" fill="white" font-family="Inter" font-size="11" opacity="0.8">Separated FLAC/WAV</text>
+
+    <rect y="200" width="180" height="70" rx="10" fill="url(#outputGrad)" />
+    <text x="90" y="230" text-anchor="middle" fill="white" font-family="Inter" font-weight="bold" font-size="14">Live Preview</text>
+    <text x="90" y="250" text-anchor="middle" fill="white" font-family="Inter" font-size="11" opacity="0.8">Real-time Visualizer</text>
+  </g>
+
+  <!-- Labels on paths -->
+  <g font-family="Inter" font-size="10" fill="#94a3b8">
+    <text x="235" y="140">Audio Stream</text>
+    <text x="615" y="190">Frames</text>
+    <text x="615" y="290">Stems</text>
+  </g>
+</svg>

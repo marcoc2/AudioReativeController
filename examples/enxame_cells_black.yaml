@@ -1,0 +1,16 @@
+# Células 8-bit vistas no microscópio, renderizadas em um fundo preto (sem clipes).
+# chroma amarra cada célula a uma classe de altura (a harmonia pinta a
+# lâmina), flux ondula as membranas, graves aceleram a deriva, e cada
+# batida da caixa GRAVADA dispara uma mitose (célula se divide).
+video:
+  layers:
+    - source: cells
+      blend: normal
+      resolution: 120      # grade 8-bit interna (upscale nearest)
+      n_base: 10           # células iniciais
+      n_max: 48            # teto populacional
+      seed: 7
+      mitosis:             # a caixa divide células
+        audio: 'C:\Audio\recordings\projeto2024\ep\stems\enxame\enxame_ep_15_07_2026-005_snare.mp3'
+        threshold: 0.3
+        min_gap: 0.08

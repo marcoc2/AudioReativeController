@@ -1,0 +1,22 @@
+# Julia fractal + Feedback post-op
+video:
+  layers:
+    - source: julia
+      resolution: 1024
+      iters: 56
+      zoom_pulse:
+        notes: [36]
+        envelope: 0.3
+      invert:
+        audio: 'C:\Audio\recordings\projeto2024\ep\stems\enxame\enxame_ep_15_07_2026-005_snare.mp3'
+        threshold: 0.3
+        min_gap: 0.08
+        envelope: 0.1
+    - source: feedback
+      decay: 0.86
+      base_scale: 0.96
+      max_scale: 1.06
+      max_rotate: 0.08
+      zoom_pulse:
+        notes: [36]
+        envelope: 0.2

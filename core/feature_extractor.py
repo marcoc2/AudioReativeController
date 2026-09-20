@@ -21,6 +21,8 @@ except ImportError:
         print("[Feature Extractor] Error: StemService not found.")
         StemService = None
 
+from core.texture import TEXTURE_NAMES, texture_features
+
 def _bm_points(num_bands: int):
     """Return (b_point, m_point) that trisect num_bands with no empty slice."""
     b = max(1, num_bands // 4)
@@ -36,7 +38,7 @@ class AudioFeatureExtractor:
     Advanced feature extractor with dynamic AI separation modes.
     """
     def __init__(self, file_path, fps=60, temporal_smoothing=0.7, frequency_smoothing=1.5, separation_mode="demucs",
-                 prebuilt_stems=None, skip_separation=False):
+                 prebuilt_stems=None, skip_separation=False, max_seconds=None):
         self.file_path = Path(file_path)             # Absolute path to the audio file
         self.fps = fps                               # Frames per second for the output animation
         self.sample_rate = 0                         # Audio sample rate (e.g., 44100Hz)
@@ -66,13 +68,14 @@ class AudioFeatureExtractor:
         self.hop_length = 512                        # Samples between analysis windows (time resolution)
         self.stem_service = StemService() if (StemService and not skip_separation) else None
         self.prebuilt_stems = prebuilt_stems or {}  # {name: file_path} — loaded additively after AI
+        self.max_seconds = max_seconds               # Analyse only the first N seconds (None = whole file)
 
         self.load_audio()
         self.precompute_features()
         self.update_num_bands(3) 
 
     def load_audio(self):
-        self.y, self.sample_rate = librosa.load(self.file_path, sr=None)
+        self.y, self.sample_rate = librosa.load(self.file_path, sr=None, duration=self.max_seconds)
         self.duration = librosa.get_duration(y=self.y, sr=self.sample_rate)
         self.hop_length = int(self.sample_rate / self.fps)
 
@@ -147,12 +150,16 @@ class AudioFeatureExtractor:
             e_max = float(energy.max())
             self.subbands[name] = energy / (e_max + 1e-6) if e_max > 0 else energy
 
+        # 3.6 texture: loudness, swell, harmonic change, ... for material without attacks
+        self.texture_names = list(TEXTURE_NAMES)
+        self.texture = texture_features(self.stft_mag, sr, self.n_fft, self.hop_length)
+
     def _load_prebuilt_stems(self):
         """Load extra audio files into stems_energy. Called after normal separation."""
         n_frames = self.spectrogram.shape[1]
         for name, path in self.prebuilt_stems.items():
             try:
-                sy, _ = librosa.load(path, sr=self.sample_rate)
+                sy, _ = librosa.load(path, sr=self.sample_rate, duration=self.max_seconds)
                 energy = librosa.feature.rms(y=sy, hop_length=self.hop_length)[0]
                 energy = energy[:n_frames] if len(energy) >= n_frames else np.pad(energy, (0, n_frames - len(energy)))
                 e_max = float(energy.max())
@@ -260,6 +267,7 @@ class AudioFeatureExtractor:
         current_features["flux"] = float(self.flux[idx])
         current_features["onset"] = bool(self.onset_mask[idx])
         current_features["subbands"] = {n: float(self.subbands[n][idx]) for n in self.subband_names}
+        current_features["texture"] = {n: float(self.texture[n][idx]) for n in self.texture_names}
         if use_smoothing and self.prev_features:
             smoothed, f = {}, self.temporal_smoothing
             prev_bands = self.prev_features["bands"]
@@ -272,7 +280,7 @@ class AudioFeatureExtractor:
             smoothed["mid"]   = _safe_mean(smoothed["bands"][b_point:m_point])
             smoothed["high"]  = _safe_mean(smoothed["bands"][m_point:])
             smoothed["pulse"], smoothed["frame_idx"] = 1.0 + (smoothed["bass"] ** 2) * 0.15, idx
-            for k in ("centroid", "chroma", "dominant_pitch", "flux", "onset", "subbands"):
+            for k in ("centroid", "chroma", "dominant_pitch", "flux", "onset", "subbands", "texture"):
                 smoothed[k] = current_features[k]
             self.prev_features = smoothed
             return smoothed

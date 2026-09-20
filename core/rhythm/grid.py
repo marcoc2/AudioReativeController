@@ -29,6 +29,11 @@ class RhythmGrid:
     beats: Optional[np.ndarray] = None
     downbeats: Optional[np.ndarray] = None
     start_offset: float = 0.0
+    # Beats in each bar, aligned with ``downbeats``. None means every bar has
+    # ``time_signature[0]``. Set when the meter changes along the song (a few
+    # bars of 6/4 inside a 5/4 tune): ``time_signature`` then only names the
+    # meter the song opens with.
+    bar_beats: Optional[np.ndarray] = None
 
     def __post_init__(self):
         if self.bpm <= 0:
@@ -37,6 +42,10 @@ class RhythmGrid:
             self.beats = np.asarray(self.beats, dtype=float)
         if self.downbeats is not None:
             self.downbeats = np.asarray(self.downbeats, dtype=float)
+        if self.bar_beats is not None:
+            self.bar_beats = np.asarray(self.bar_beats, dtype=int)
+            if self.downbeats is None or len(self.bar_beats) != len(self.downbeats):
+                raise ValueError("bar_beats must have one entry per downbeat")
 
     @classmethod
     def from_beats(cls, beats, time_signature=(4, 4), fps=24, downbeats=None) -> "RhythmGrid":
@@ -61,6 +70,55 @@ class RhythmGrid:
     @property
     def whole_duration(self) -> float:
         return self.beat_duration * self.time_signature[1]
+
+    # ── bars, when they are not all the same length ───────────────────────────
+    # Ask the grid instead of dividing by ``bar_duration``: that arithmetic is
+    # only right while the meter never changes.
+
+    def _last_bar_length(self) -> float:
+        if self._has_markers(self.downbeats) and self.bar_beats is not None:
+            return float(self.bar_beats[-1]) * self.beat_duration
+        if self.downbeats is not None and len(self.downbeats) >= 2:
+            return float(self.downbeats[-1] - self.downbeats[-2])
+        return self.bar_duration
+
+    def bar_index(self, t: float) -> int:
+        """0-based index of the bar containing ``t`` (-1 before the first bar).
+
+        Past the last marker the bars carry on at the last bar's length.
+        """
+        if not self._has_markers(self.downbeats):
+            return int(np.floor((t - self.start_offset) / self.bar_duration))
+        idx = int(np.searchsorted(self.downbeats, t, side="right")) - 1
+        last = len(self.downbeats) - 1
+        if idx == last:
+            idx += int((t - float(self.downbeats[-1])) // self._last_bar_length())
+        return idx
+
+    def bar_start(self, index: int) -> float:
+        """Start time of bar ``index`` (0-based), extrapolating past the markers."""
+        if not self._has_markers(self.downbeats):
+            return self.start_offset + index * self.bar_duration
+        last = len(self.downbeats) - 1
+        if index <= last:
+            return float(self.downbeats[max(index, 0)]) + min(index, 0) * self.bar_duration
+        return float(self.downbeats[-1]) + (index - last) * self._last_bar_length()
+
+    def beats_in_bar(self, index: int) -> int:
+        """How many beats bar ``index`` has."""
+        if self.bar_beats is None or not len(self.bar_beats):
+            return int(self.time_signature[0])
+        return int(self.bar_beats[min(max(index, 0), len(self.bar_beats) - 1)])
+
+    def beat_in_bar(self, t: float) -> Tuple[int, int]:
+        """(beat, beats in this bar), beat 1-based; beat 0 before the first bar."""
+        index = self.bar_index(t)
+        n = self.beats_in_bar(index)
+        if index < 0:
+            return 0, n
+        length = self.bar_start(index + 1) - self.bar_start(index)
+        beat = int((t - self.bar_start(index)) / (length / n)) + 1
+        return min(beat, n), n
 
     def _default_tol(self) -> float:
         return 0.5 / self.fps

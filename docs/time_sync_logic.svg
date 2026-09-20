@@ -1,0 +1,67 @@
+<svg width="800" height="450" viewBox="0 0 800 450" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0d0d1a;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1a1a2e;stop-opacity:1" />
+    </linearGradient>
+    <filter id="neon">
+      <feGaussianBlur stdDeviation="1.5" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#bgGrad)" rx="10" />
+
+  <!-- Title -->
+  <text x="400" y="40" text-anchor="middle" fill="#00d2ff" font-family="Arial, sans-serif" font-size="22" font-weight="bold" filter="url(#neon)">The Time Sync Bridge: Video to Audio Mapping</text>
+
+  <!-- Step 1: Video Frame -->
+  <rect x="50" y="100" width="180" height="80" fill="#0f3460" stroke="#e94560" stroke-width="2" rx="5" />
+  <text x="140" y="130" text-anchor="middle" fill="#e94560" font-family="Arial, sans-serif" font-size="14" font-weight="bold">ANIMATION GEN</text>
+  <text x="140" y="155" text-anchor="middle" fill="#fff" font-family="monospace" font-size="12">Frame 120 (60fps)</text>
+
+  <!-- Formula -->
+  <path d="M 230 140 L 300 140" stroke="#fff" stroke-width="2" marker-end="url(#arrowhead)" />
+  <text x="265" y="130" text-anchor="middle" fill="#a2a8d3" font-family="Arial, sans-serif" font-size="10">frame / fps</text>
+
+  <!-- Common Time (Seconds) -->
+  <circle cx="340" cy="140" r="40" fill="#16213e" stroke="#fff" stroke-width="2" stroke-dasharray="4,2" />
+  <text x="340" y="145" text-anchor="middle" fill="#00d2ff" font-family="monospace" font-size="16" font-weight="bold">2.0s</text>
+  <text x="340" y="195" text-anchor="middle" fill="#a2a8d3" font-family="Arial, sans-serif" font-size="11">Universal Time</text>
+
+  <!-- Request Arrow -->
+  <path d="M 380 140 L 530 140" stroke="#fff" stroke-width="2" marker-end="url(#arrowhead)" />
+  <text x="455" y="130" text-anchor="middle" fill="#fff" font-family="Arial, sans-serif" font-size="11">Request Data at 2.0s</text>
+
+  <!-- Step 2: Feature Extractor -->
+  <rect x="540" y="100" width="200" height="280" fill="#0f3460" stroke="#00d2ff" stroke-width="2" rx="5" />
+  <text x="640" y="130" text-anchor="middle" fill="#00d2ff" font-family="Arial, sans-serif" font-size="14" font-weight="bold">CORE (EXTRACTOR)</text>
+  
+  <!-- SearchSorted Logic -->
+  <rect x="560" y="160" width="160" height="60" fill="#16213e" stroke="#e94560" stroke-width="1" rx="5" />
+  <text x="640" y="185" text-anchor="middle" fill="#fff" font-family="monospace" font-size="11">np.searchsorted()</text>
+  <text x="640" y="205" text-anchor="middle" fill="#a2a8d3" font-family="monospace" font-size="10">Translates 2.0s -> Index</text>
+
+  <!-- Audio Timeline -->
+  <line x1="560" y1="260" x2="720" y2="260" stroke="#a2a8d3" stroke-width="1" />
+  <rect x="660" y="240" width="10" height="40" fill="#e94560" filter="url(#neon)" />
+  <text x="665" y="300" text-anchor="middle" fill="#fff" font-family="monospace" font-size="12">Slice 187</text>
+  <text x="640" y="330" text-anchor="middle" fill="#a2a8d3" font-family="Arial, sans-serif" font-size="10">Audio Resolution (~93.7 fps)</text>
+
+  <!-- Return Arrow -->
+  <path d="M 540 340 L 140 340 L 140 180" stroke="#00d2ff" stroke-width="2" stroke-dasharray="5,5" fill="none" marker-end="url(#arrowhead)" />
+  <text x="340" y="330" text-anchor="middle" fill="#00d2ff" font-family="Arial, sans-serif" font-size="12" font-style="italic">Return features (Bass: 0.8, Vocal: 0.2...)</text>
+
+  <!-- Markers -->
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#fff" />
+    </marker>
+  </defs>
+
+  <!-- Footer Legend -->
+  <text x="50" y="420" fill="#a2a8d3" font-family="Arial, sans-serif" font-size="12">Why? Video and Audio have different sampling rates. Time (seconds) is the common bridge.</text>
+</svg>
