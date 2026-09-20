@@ -66,7 +66,7 @@ def test_changes_as_trigger_events(folder):
     # entering "N" is not an event; pitch carries the new root
     assert [(e.time, e.pitch) for e in changes] == [(2.0, 9), (6.0, 6)]
     assert changes[0].duration == pytest.approx(4.0)
-    assert [e.time for e in score.section_changes()] == [0.0, 4.0]
+    assert [e.time for e in score.section_changes()] == [4.0]        # the opening section is not a change
 
 
 def test_grid_from_transcribed_beats(folder):
@@ -98,7 +98,7 @@ def test_snap_moves_boundaries_onto_the_trusted_grid(folder):
     snapped = read_score(folder).snap_to(_trusted_grid(), unit="beat")
     assert [(s.start, s.end, s.label) for s in snapped.chords] == [
         (0.0, 2.5, "A:maj"), (2.5, 5.0, "D:maj"), (5.0, 10.0, "A:maj")]
-    assert [e.time for e in snapped.chord_changes()] == [0.0, 2.5, 5.0]
+    assert [e.time for e in snapped.chord_changes()] == [2.5, 5.0]    # the opening chord is not a change
 
 
 def test_snap_to_bar_and_adopts_the_grids_meter(folder):

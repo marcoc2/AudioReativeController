@@ -1,6 +1,6 @@
 from core.rhythm.grid import RhythmGrid, SUBDIVISIONS
 from core.rhythm.analyzer import analyze, analyze_file
-from core.rhythm.midi_reader import read_midi, shift_in_time, MidiNote, KICK_NOTE
+from core.rhythm.midi_reader import read_midi, shift_in_time, parse_meter_changes, MidiNote, KICK_NOTE
 
 __all__ = [
     "RhythmGrid",
@@ -9,6 +9,7 @@ __all__ = [
     "analyze_file",
     "read_midi",
     "shift_in_time",
+    "parse_meter_changes",
     "MidiNote",
     "KICK_NOTE",
 ]

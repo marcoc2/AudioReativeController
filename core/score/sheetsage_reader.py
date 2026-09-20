@@ -113,8 +113,14 @@ def _grid_lines(grid: RhythmGrid, unit: str, until: float) -> np.ndarray:
     """
     if unit not in ("beat", "bar"):
         raise ValueError(f"unit must be 'beat' or 'bar', got {unit!r}")
-    step = grid.beat_duration if unit == "beat" else grid.bar_duration
     marks = grid.beats if unit == "beat" else grid.downbeats
+    # past the last marker, bars carry on at the last bar's length: the meter
+    # a song ends in is not always the one it opened with
+    if unit == "beat":
+        step = grid.beat_duration
+    else:
+        last_bar = grid.bar_index(until)
+        step = grid.bar_start(last_bar + 1) - grid.bar_start(last_bar)
     if marks is not None and len(marks) >= 2:
         lines = np.asarray(marks, dtype=float)
     else:
@@ -205,9 +211,12 @@ class Score:
         """One event per chord change; ``pitch`` is the new root's pitch class.
 
         Going into a no-chord stretch is not an event — nothing new arrives.
+        Neither is the chord the song opens with: nothing changed, and a
+        trigger firing on the very first frame would skip whatever was meant
+        to be seen first. (A chord arriving after an opening silence counts.)
         """
         events = []
-        for s in self.chords:
+        for s in self.chords[1:]:
             root, _, _ = parse_chord(s.label)
             if root is not None:
                 events.append(MidiNote(time=s.start, pitch=root, velocity=CHANGE_VELOCITY,
@@ -215,10 +224,13 @@ class Score:
         return events
 
     def section_changes(self) -> List[MidiNote]:
-        """One event per section start; ``pitch`` indexes the section in song order."""
+        """One event per change of section; ``pitch`` indexes the section in song order.
+
+        The opening section is not a change (see ``chord_changes``).
+        """
         return [MidiNote(time=s.start, pitch=i, velocity=CHANGE_VELOCITY,
                          channel=SCORE_CHANNEL, duration=s.duration)
-                for i, s in enumerate(self.sections)]
+                for i, s in enumerate(self.sections) if i > 0]
 
     def melody(self, voice: str = "instrumental") -> List[MidiNote]:
         return list(self._voice(voice))

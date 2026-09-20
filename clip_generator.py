@@ -19,7 +19,7 @@ from pathlib import Path
 import yaml
 
 from core.rhythm.grid import RhythmGrid
-from core.rhythm.midi_reader import read_midi
+from core.rhythm.midi_reader import parse_meter_changes, read_midi
 from core.video.clip_library import ClipLibrary
 from core.video.composer import ClipComposer
 from core.video.layers import build_compositor
@@ -40,6 +40,8 @@ def main() -> None:
     ap.add_argument("--resolution",  default="854x480", help="WxH pixels")
     ap.add_argument("--output",      default=None,   help="Output MP4 path")
     ap.add_argument("--midi-offset", type=float, default=0.0)
+    ap.add_argument("--meter", default=None, metavar="BAR:N/D,...",
+                    help="Meter changes the MIDI file does not carry, by DAW bar number, e.g. 22:6/4,27:5/4")
     ap.add_argument("--gravity-peak",   type=float, default=None,
                     help="Override gravity peak speed for all triggers in the scene")
     ap.add_argument("--gravity-floor",  type=float, default=None,
@@ -62,7 +64,9 @@ def main() -> None:
     midi_notes = []
     if args.midi:
         print(f"Reading MIDI: {args.midi}")
-        grid, midi_notes = read_midi(args.midi, fps=fps)
+        grid, midi_notes = read_midi(
+            args.midi, fps=fps,
+            meter_changes=parse_meter_changes(args.meter) if args.meter else None)
         if args.midi_offset != 0.0:
             shift = args.midi_offset
             if grid.beats is not None:
@@ -127,7 +131,9 @@ def main() -> None:
         composer.seek(start_sec)
 
     if args.bars > 0:
-        total_dur = args.bars * grid.bar_duration
+        # N bars from where we start; bars are not all the same length when the meter changes
+        first_bar = grid.bar_index(start_sec)
+        total_dur = grid.bar_start(first_bar + args.bars) - start_sec
     else:
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
