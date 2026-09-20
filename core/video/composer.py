@@ -30,10 +30,28 @@ Configured by the ``video:`` section of the scene YAML:
             trigger: kick         #   (kills mic bleed: kick thump in the
             window: 0.04          #    snare mic lands exactly on MIDI kicks)
           actions: [next_clip]
+        harmony:
+          score: input/song/sheetsage  # …or what a transcription says is written
+          events: chord_changes   # chord_changes | section_changes | melody
+          snap: auto              # auto | bar | beat | off  (see below)
+          notes: [8]              # optional: only changes INTO these roots (8 = G#)
+          actions: [next_clip]
 
-    A trigger sources its hits from MIDI (``notes``) or from audio
-    transients (``audio``); everything downstream (actions, min_velocity,
-    gravity, ``until``) treats both identically. ``until: <other>``
+    A trigger sources its hits from MIDI (``notes``), from audio transients
+    (``audio``) or from a SheetSage2 transcription (``score``, see core/score):
+    for music with no attacks to follow, "the chord changed" is the event.
+    Everything downstream (actions, min_velocity, gravity, ``until``,
+    ``exclude``) treats all three identically.
+
+    A transcription knows *what* happens far better than *when*, so score
+    events are snapped onto this composer's grid. ``snap: auto`` (default)
+    snaps to bars when the grid carries real markers — it came from a MIDI
+    file — and leaves times alone otherwise, since a placeholder grid would
+    only make them worse. With ``score``, ``notes`` filters by the event's
+    pitch: the new root's pitch class for chord changes (0 = C … 11 = B),
+    the section's index for section changes, the MIDI pitch for melody.
+
+    ``until: <other>``
     deactivates the trigger — events AND gravity — from the first hit of
     ``<other>`` onward (hand-over, e.g. kick drives clip changes only
     until the snare comes in).
@@ -107,6 +125,39 @@ def _default_onset_loader(spec: dict):
     )
 
 
+SCORE_EVENTS = {"chord_changes", "section_changes", "melody"}
+SCORE_SNAPS = {"auto", "bar", "beat", "off"}
+
+
+def _grid_is_real(grid) -> bool:
+    """True when the grid carries bar markers, i.e. it was read from something
+    (a MIDI file) rather than being a bare placeholder tempo."""
+    downbeats = getattr(grid, "downbeats", None)
+    return downbeats is not None and len(downbeats) >= 2
+
+
+def _default_score_loader(spec: dict, grid):
+    from core.score import read_score  # lazy: keeps the composer import light
+
+    events = spec.get("events", "chord_changes")
+    if events not in SCORE_EVENTS:
+        raise ValueError(f"score trigger: unknown events {events!r}; expected {sorted(SCORE_EVENTS)}")
+    snap = spec.get("snap", "auto")
+    if snap not in SCORE_SNAPS:
+        raise ValueError(f"score trigger: unknown snap {snap!r}; expected {sorted(SCORE_SNAPS)}")
+    if snap == "auto":
+        snap = "bar" if _grid_is_real(grid) else "off"
+
+    score = read_score(spec["score"])
+    if snap != "off":
+        # melody is rhythm: snapping it to bars would flatten it, so it follows
+        # sixteenths of the grid while chords and sections follow ``snap``
+        score = score.snap_to(grid, unit=snap, melody_division=4 if events == "melody" else None)
+    if events == "melody":
+        return score.melody(spec.get("voice", "instrumental"))
+    return getattr(score, events)()
+
+
 class ClipComposer:
     def __init__(
         self,
@@ -115,12 +166,14 @@ class ClipComposer:
         notes: Sequence,
         video_cfg: Optional[dict] = None,
         onset_loader: Optional[Callable] = None,
+        score_loader: Optional[Callable] = None,
     ):
         """``library`` needs ``__len__`` and ``get(idx) -> ClipFrames``-like.
 
         ``notes`` is the MidiNote list from ``read_midi`` (may be empty).
         ``onset_loader(spec) -> List[MidiNote]`` resolves ``audio:`` trigger
-        sources; injectable for tests.
+        sources and ``score_loader(spec, grid) -> List[MidiNote]`` resolves
+        ``score:`` ones; both injectable for tests.
         """
         cfg = video_cfg or {}
         self.library = library
@@ -131,6 +184,7 @@ class ClipComposer:
         self._rng = random.Random(cfg.get("seed"))
         self.frame_ops: List[Callable] = []
         self._onset_loader = onset_loader or _default_onset_loader
+        self._score_loader = score_loader or _default_score_loader
 
         # manual pins: {bar_index: clip name (path stem) or clip index}
         self.overrides = {int(k): v for k, v in (cfg.get("overrides") or {}).items()}
@@ -160,6 +214,11 @@ class ClipComposer:
         for name, spec in triggers.items():
             if "audio" in spec:
                 src = self._onset_loader(spec)
+            elif "score" in spec:
+                src = self._score_loader(spec, self.grid)
+                if "notes" in spec:          # e.g. only changes into G#
+                    wanted = set(spec["notes"])
+                    src = [n for n in src if n.pitch in wanted]
             else:
                 pitches = set(spec.get("notes", []))
                 src = [n for n in notes if n.pitch in pitches]
