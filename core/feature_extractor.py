@@ -38,7 +38,7 @@ class AudioFeatureExtractor:
     Advanced feature extractor with dynamic AI separation modes.
     """
     def __init__(self, file_path, fps=60, temporal_smoothing=0.7, frequency_smoothing=1.5, separation_mode="demucs",
-                 prebuilt_stems=None, skip_separation=False):
+                 prebuilt_stems=None, skip_separation=False, max_seconds=None):
         self.file_path = Path(file_path)             # Absolute path to the audio file
         self.fps = fps                               # Frames per second for the output animation
         self.sample_rate = 0                         # Audio sample rate (e.g., 44100Hz)
@@ -68,13 +68,14 @@ class AudioFeatureExtractor:
         self.hop_length = 512                        # Samples between analysis windows (time resolution)
         self.stem_service = StemService() if (StemService and not skip_separation) else None
         self.prebuilt_stems = prebuilt_stems or {}  # {name: file_path} — loaded additively after AI
+        self.max_seconds = max_seconds               # Analyse only the first N seconds (None = whole file)
 
         self.load_audio()
         self.precompute_features()
         self.update_num_bands(3) 
 
     def load_audio(self):
-        self.y, self.sample_rate = librosa.load(self.file_path, sr=None)
+        self.y, self.sample_rate = librosa.load(self.file_path, sr=None, duration=self.max_seconds)
         self.duration = librosa.get_duration(y=self.y, sr=self.sample_rate)
         self.hop_length = int(self.sample_rate / self.fps)
 
@@ -158,7 +159,7 @@ class AudioFeatureExtractor:
         n_frames = self.spectrogram.shape[1]
         for name, path in self.prebuilt_stems.items():
             try:
-                sy, _ = librosa.load(path, sr=self.sample_rate)
+                sy, _ = librosa.load(path, sr=self.sample_rate, duration=self.max_seconds)
                 energy = librosa.feature.rms(y=sy, hop_length=self.hop_length)[0]
                 energy = energy[:n_frames] if len(energy) >= n_frames else np.pad(energy, (0, n_frames - len(energy)))
                 e_max = float(energy.max())

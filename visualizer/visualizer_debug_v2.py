@@ -22,7 +22,10 @@ Usage:
     .venv/Scripts/python.exe visualizer/visualizer_debug_v2.py --file audio.mp3
     ... --score path/to/sheetsage_output     explicit transcription folder
     ... --no-stems                           skip AI stem separation (no GPU work)
+    ... --seconds 180                        only the first 3 minutes
+    ... --render out.mp4 [--codec nvenc]     write a video instead of opening a window
     ... --midi drums.mid --midi-offset 0.059 grid + notes + automation lanes
+    ... --meter 22:6/4,27:5/4                meter changes missing from the MIDI file
     ... --stem solo=solo_guitarra.mp3        extra original stem (repeatable)
 
 Keys:
@@ -33,9 +36,12 @@ Keys:
     SPACE    pause / resume
     ESC      quit
 """
+import os
 import sys
+import time
 import argparse
 import colorsys
+import subprocess
 import numpy as np
 import pygame
 from collections import deque
@@ -48,7 +54,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from dataclasses import dataclass, field
 
 from core.feature_extractor import AudioFeatureExtractor
-from core.rhythm import RhythmGrid, read_midi, shift_in_time
+from core.rhythm import RhythmGrid, parse_meter_changes, read_midi, shift_in_time
 from core.rhythm.midi_automation import MidiAutomationReader
 from core.score import Score, has_score, parse_chord, read_score
 
@@ -674,14 +680,15 @@ class Dashboard4K:
         rh    = self.rhythm
         grid  = rh.grid
         inner = self._panel_bg(self.panels["rhythm_grid"], f"RHYTHM GRID  ({rh.source})", GREEN)
-        num, den  = grid.time_signature
+        den       = grid.time_signature[1]
         bar_phase, beat_phase = grid.phase(t), grid.beat_phase(t)
-        started   = t >= grid.start_offset
-        bar       = int((t - grid.start_offset) // grid.bar_duration) + 1 if started else 0
-        beat      = int(bar_phase * num) + 1 if started else 0
+        beat, num = grid.beat_in_bar(t)              # this bar's own length: the meter may change
+        started   = beat > 0
+        bar       = grid.bar_index(t) + 1 if started else 0
+        odd_bar   = num != grid.time_signature[0]    # e.g. a 6/4 bar inside a 5/4 song
 
-        self._txt(f"{grid.bpm:.2f} BPM   {num}/{den}   offset {rh.offset:+.3f}s",
-                  (inner.x, inner.y), WHITE)
+        self._txt(f"{grid.bpm:.2f} BPM   {num}/{den}{'  (meter change)' if odd_bar else ''}"
+                  f"   offset {rh.offset:+.3f}s", (inner.x, inner.y), ORANGE if odd_bar else WHITE)
         big   = self.fx.render(f"{bar}.{beat}", True, GOLD if beat == 1 else WHITE)
         big_y = inner.y + self.fs.get_height() + 4
         self.screen.blit(big, (inner.x, big_y))
@@ -714,9 +721,8 @@ class Dashboard4K:
         pygame.draw.rect(self.screen, (20, 20, 28), area, border_radius=3)
 
         grid = rh.grid                                   # bar lines, numbered
-        first = int(np.floor((t0 - grid.start_offset) / grid.bar_duration))
-        for b in range(max(0, first), int((t1 - grid.start_offset) / grid.bar_duration) + 1):
-            x = area.x + int((grid.start_offset + b * grid.bar_duration - t0) * px_per_s)
+        for b in range(max(0, grid.bar_index(t0)), grid.bar_index(t1) + 1):
+            x = area.x + int((grid.bar_start(b) - t0) * px_per_s)
             if area.x <= x <= area.right:
                 pygame.draw.line(self.screen, (70, 70, 95), (x, area.y), (x, area.bottom), 1)
                 self._txt(str(b + 1), (x + 3, area.bottom + 1), GREY, tiny=True)
@@ -1030,6 +1036,53 @@ class Dashboard4K:
             self._draw_songmap(t)
 
 
+# ── offline render ─────────────────────────────────────────────────────────────
+def render_video(dashboard, extractor, screen, audio_path, output, fps, codec="x264"):
+    """Draw the dashboard for every frame of the analysed audio and mux it with that audio.
+
+    Time advances by exactly 1/fps per frame, so the video is frame-accurate
+    however long each frame takes to draw. Frames go to ffmpeg through a pipe
+    (no temp files), the same way clip_generator encodes.
+    """
+    W, H     = screen.get_size()
+    duration = float(extractor.duration)
+    n_frames = int(duration * fps)
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    enc = subprocess.Popen(
+        [
+            "ffmpeg", "-y", "-v", "error",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(fps), "-i", "-",
+            "-t", f"{duration:.3f}", "-i", str(audio_path),
+            "-map", "0:v", "-map", "1:a",
+            *(["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "19", "-b:v", "0"]
+              if codec == "nvenc" else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]),
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-shortest",
+            str(output),
+        ],
+        stdin=subprocess.PIPE,
+    )
+    print(f"Rendering {n_frames} frames ({duration:.1f}s at {fps} fps, {W}x{H}, {codec}) -> {output}")
+    started = time.time()
+    try:
+        for fi in range(n_frames):
+            t = fi / fps
+            features = extractor.get_features_at_time(t)
+            if not features:
+                break
+            dashboard.render(features, t)
+            enc.stdin.write(pygame.image.tobytes(screen, "RGB"))
+            if fi and fi % (fps * 10) == 0:
+                speed = t / (time.time() - started)
+                print(f"  {t:6.1f}s / {duration:.0f}s   {speed:.2f}x realtime   "
+                      f"~{(duration - t) / max(speed, 1e-6) / 60:.1f} min left", flush=True)
+    finally:
+        enc.stdin.close()
+        enc.wait()
+    if enc.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed with exit code {enc.returncode}")
+    print(f"Done in {(time.time() - started) / 60:.1f} min: {output}")
+
+
 # ── entry point ────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="ARC Debug Dashboard v2")
@@ -1042,6 +1095,9 @@ def main():
                         help="MIDI file: gives the bar/beat grid, the notes and the automation lanes")
     parser.add_argument("--midi-offset", type=float, default=0.0,
                         help="Seconds to move the MIDI later so it lines up with the audio")
+    parser.add_argument("--meter", default=None, metavar="BAR:N/D,...",
+                        help="Meter changes the MIDI file does not carry, by DAW bar number, "
+                             "e.g. 22:6/4,27:5/4")
     parser.add_argument("--bpm", type=float, default=None,
                         help="Fixed-tempo grid when there is no MIDI (bar 1 at t=0, 4/4)")
     parser.add_argument("--stem", action="append", default=[], metavar="NAME=FILE",
@@ -1051,6 +1107,12 @@ def main():
     parser.add_argument("--score-snap", default="bar", choices=["bar", "beat", "off"],
                         help="With --midi: move the score's chord/section changes onto the MIDI grid "
                              "(default: bar; SheetSage2's own timing is 0.25-0.65 s off)")
+    parser.add_argument("--seconds", type=float, default=None,
+                        help="Analyse and play only the first N seconds (faster start on long songs)")
+    parser.add_argument("--render", default=None, metavar="OUT.mp4",
+                        help="Write the dashboard to a video (with the audio) instead of opening a window")
+    parser.add_argument("--codec", choices=["x264", "nvenc"], default="x264",
+                        help="--render encoder: nvenc = NVIDIA GPU encoder (fast at 4K)")
     parser.add_argument("--no-stems", action="store_true",
                         help="Skip AI stem separation (no GPU work; stems panel stays empty)")
     parser.add_argument("--width",  type=int, default=3840,
@@ -1064,8 +1126,21 @@ def main():
         print(f"[ERROR] File not found: {file_path}")
         sys.exit(1)
 
+    if sys.platform == "win32":
+        # On a scaled display (4K at 200%) Windows otherwise treats the window size as
+        # logical pixels and doubles it: a 3840x2160 window would be twice the screen.
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            pass
+
+    if args.render:                    # draw off-screen and stay silent
+        os.environ["SDL_VIDEODRIVER"] = "dummy"
+        os.environ["SDL_AUDIODRIVER"] = "dummy"
     pygame.init()
-    pygame.mixer.init()
+    if not args.render:
+        pygame.mixer.init()
     screen = pygame.display.set_mode((args.width, args.height))
     pygame.display.set_caption(f"ARC Debug Dashboard v2 — {file_path.name}")
     clock  = pygame.time.Clock()
@@ -1082,6 +1157,7 @@ def main():
     extractor = AudioFeatureExtractor(str(file_path), fps=args.fps,
                                       separation_mode=args.mode,
                                       skip_separation=args.no_stems,
+                                      max_seconds=args.seconds,
                                       prebuilt_stems=prebuilt)
 
     score_dir = Path(args.score) if args.score else file_path.parent / "sheetsage"
@@ -1099,7 +1175,8 @@ def main():
     # it helps — declare the tempo with --bpm instead.
     rhythm = None
     if args.midi:
-        grid, notes = read_midi(args.midi, fps=args.fps)
+        grid, notes = read_midi(args.midi, fps=args.fps,
+                                meter_changes=parse_meter_changes(args.meter) if args.meter else None)
         shift_in_time(grid, notes, args.midi_offset)
         automation = MidiAutomationReader(args.midi, fps=args.fps, duration=extractor.duration)
         rhythm = RhythmInput(grid, "MIDI", notes, automation, args.midi_offset)
@@ -1115,6 +1192,11 @@ def main():
     elif args.bpm:
         rhythm = RhythmInput(RhythmGrid(bpm=args.bpm, fps=args.fps), "--bpm")
     dashboard = Dashboard4K(screen, extractor, score, rhythm, score_label=score_label)
+
+    if args.render:
+        render_video(dashboard, extractor, screen, file_path, args.render, args.fps, args.codec)
+        pygame.quit()
+        return
 
     pygame.mixer.music.load(str(file_path))
     pygame.mixer.music.play()
@@ -1164,6 +1246,8 @@ def main():
         if features:
             dashboard.render(features, pos_ms / 1000.0)
             pygame.display.flip()
+        else:                      # past the analysed audio (--seconds, or the end of the file)
+            running = False
 
     pygame.quit()
 
