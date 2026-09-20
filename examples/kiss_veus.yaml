@@ -1,0 +1,35 @@
+# Kiss — "Véus": uma névoa luminosa que respira com a música. Só CPU, sem clipes.
+#
+#   python clip_generator.py --file input/scott/kiss.mp3 \
+#       --midi input/scott/Instrumento.mid --midi-offset 0.059 \
+#       --scene examples/kiss_veus.yaml --bars 0 --resolution 1280x720 \
+#       --output render_output/kiss_veus.mp4
+#
+# Compassos 1–43 (drone): não há ataque nenhum — o brilho segue o volume (em dB) e o
+# campo dilata/contrai com o crescendo/decrescendo (texture.loudness / texture.swell).
+# Do 44 em diante a harmonia dá a cor: A#min (roxo) <-> G#sus4 (azul), de 4 em 4
+# compassos, com um clarão suave a cada troca (transcrição SheetSage2 encaixada no MIDI).
+# Do 71 em diante a bateria entra: cada bumbo solta um anel e empurra o túnel de
+# feedback; a nota 40 dá a aberração cromática. Nos compassos 87–94 os agudos abrem e
+# a névoa solta faíscas (texture.noisiness).
+video:
+  layers:
+    - source: veils
+      seed: 7
+      detail: 0.4
+      hue: 0.83                 # roxo do A#min enquanto a harmonia não muda
+      harmony:
+        score: input/scott/sheetsage
+        snap: auto
+        bloom: 1.8
+      ripples:
+        notes: [36]
+    - source: feedback          # rastro; em repouso não escala (1.0) — abaixo de 1 o quadro
+      decay: 0.80               # anterior encolhe sempre e deixa uma moldura escura nas bordas.
+      base_scale: 1.0           # O bumbo expande até max_scale: o túnel só abre na batida.
+      max_scale: 1.04
+      max_rotate: 0             # o giro preenche de preto o que sai do quadro e escurece as bordas
+      zoom_pulse: {notes: [36], envelope: 0.3}
+    - source: rgb_split
+      amount: 6
+      trigger: {notes: [40], envelope: 0.10}

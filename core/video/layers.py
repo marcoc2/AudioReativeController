@@ -182,19 +182,31 @@ class Compositor:
         return out
 
 
-def _layer_hits(spec: dict, notes: Sequence, onset_loader=None) -> list:
-    """Hit times for a layer trigger: MIDI ``notes`` or audio ``audio``
-    (same spec shape as composer triggers)."""
+def _layer_events(spec: dict, notes: Sequence, onset_loader=None, grid=None) -> list:
+    """The events behind a layer trigger, sorted by time: MIDI ``notes``, audio
+    ``audio`` onsets or a transcription's ``score`` (same spec shape as composer
+    triggers; score events are snapped onto ``grid`` the same way)."""
     if "audio" in spec:
         if onset_loader is None:
             from core.video.composer import _default_onset_loader
             onset_loader = _default_onset_loader
         src = onset_loader(spec)
+    elif "score" in spec:
+        from core.video.composer import _default_score_loader
+        src = _default_score_loader(spec, grid)
+        if "notes" in spec:
+            wanted = set(spec["notes"])
+            src = [n for n in src if n.pitch in wanted]
     else:
         pitches = set(spec.get("notes", []))
         src = [n for n in notes if n.pitch in pitches]
     min_vel = int(spec.get("min_velocity", 0))
-    return [n.time for n in src if n.velocity >= min_vel]
+    return sorted((n for n in src if n.velocity >= min_vel), key=lambda n: n.time)
+
+
+def _layer_hits(spec: dict, notes: Sequence, onset_loader=None, grid=None) -> list:
+    """Hit times for a layer trigger (see ``_layer_events``)."""
+    return [n.time for n in _layer_events(spec, notes, onset_loader, grid)]
 
 
 class CellsLayer:
@@ -317,6 +329,298 @@ class MandelboxLayer:
         self.sys.step(1.0 / self.fps, controls)
         return self.sys.render(phase=(t / self.loop_s) % 1.0,
                                pulse=self._pulse(t) if self._pulse else 0.0)
+
+
+class VeilsLayer:
+    """A luminous mist that breathes with the sound (``core/veils``), for music
+    with no attacks to follow. CPU only.
+
+        - source: veils
+          detail: 0.5            # fraction of the output size the mist is computed at
+          seed: 7
+          hue: 0.8               # colour when there is no harmony to follow (0..1)
+          brightness: 1.0
+          harmony:               # optional: the chord sets the colour
+            score: input/song/sheetsage
+            snap: auto           # as in composer triggers
+            bloom: 1.5           # seconds the glow of a chord change lasts
+          ripples:               # optional: a ring per hit
+            notes: [36]
+
+    Loudness, swell, tremolo, noisiness and percussive come from
+    ``features['texture']``; without it the mist just drifts at half light.
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int,
+                 fps: int, features_at=None, onset_loader=None, grid=None):
+        from core.veils import VeilsSystem
+        self.fps = fps
+        self.features_at = features_at
+        self.sys = VeilsSystem(width, height, seed=int(spec.get("seed", 0)),
+                               detail=float(spec.get("detail", 0.5)),
+                               hue=float(spec.get("hue", 0.8)),
+                               brightness=float(spec.get("brightness", 1.0)))
+        hspec = spec.get("harmony")
+        self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._chord_times = np.array([e.time for e in self._chords], dtype=float)
+        self._bloom = (EnvelopeOpacity(list(self._chord_times), float(hspec.get("bloom", 1.5)))
+                       if hspec else None)
+        rspec = spec.get("ripples")
+        self._ripples = np.array(_layer_hits(rspec, notes, onset_loader, grid), dtype=float) if rspec else np.zeros(0)
+        self._smooth: dict = {}
+        self._last_t: Optional[float] = None
+
+    @staticmethod
+    def hue_of_root(root: int) -> float:
+        """Roots a fifth apart sit next to each other on the wheel, so the usual
+        chord moves are short glides rather than jumps across the spectrum."""
+        return ((int(root) * 7) % 12) / 12.0
+
+    def _lowpass(self, name: str, value: float, dt: float, tau: float) -> float:
+        prev = self._smooth.get(name, value)
+        prev += (value - prev) * (1 - math.exp(-dt / tau)) if dt > 0 else 0.0
+        self._smooth[name] = prev
+        return prev
+
+    def frame_at(self, t: float) -> np.ndarray:
+        dt = 1.0 / self.fps if self._last_t is None else max(0.0, t - self._last_t)
+        self._last_t = t
+        tex = (self.features_at(t) or {}).get("texture", {}) if self.features_at else {}
+        controls = {
+            "loudness":      self._lowpass("loudness", tex.get("loudness", 0.5), dt, 0.20),
+            "swell":         self._lowpass("swell", tex.get("swell", 0.0), dt, 0.30),
+            "tremolo_depth": self._lowpass("tremolo_depth", tex.get("tremolo_depth", 0.0), dt, 0.50),
+            "tremolo_rate":  self._lowpass("tremolo_rate", tex.get("tremolo_rate", 0.0), dt, 0.50),
+            "noisiness":     self._lowpass("noisiness", tex.get("noisiness", 0.0), dt, 0.30),
+            "percussive":    self._lowpass("percussive", tex.get("percussive", 0.0), dt, 0.30),
+        }
+        target_hue = None
+        if len(self._chords):
+            i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
+            if i >= 0:
+                target_hue = self.hue_of_root(self._chords[i].pitch)
+        ages = t - self._ripples[(self._ripples <= t) & (self._ripples > t - 2.0)] if len(self._ripples) else ()
+        return self.sys.render(dt, target_hue=target_hue,
+                               bloom=self._bloom(t) if self._bloom else 0.0,
+                               ripple_ages=ages, **controls)
+
+
+GESTURES = ("punch", "twist", "sizzle", "ring")
+
+
+def _parse_gestures(specs, notes, onset_loader=None, grid=None, who="layer") -> list:
+    """``hits:`` of a layer -> [(gesture, hit times, envelope seconds)]."""
+    out = []
+    for g in specs or []:
+        if g.get("gesture") not in GESTURES:
+            raise ValueError(f"{who}: unknown gesture {g.get('gesture')!r} (use one of {GESTURES})")
+        out.append((g["gesture"], np.array(_layer_hits(g, notes, onset_loader, grid), dtype=float),
+                    max(1e-3, float(g.get("envelope", 0.1)))))
+    return out
+
+
+def _gestures_at(gestures, t: float) -> dict:
+    """Full strength on the frame of the hit, linear decay; a twist alternates sides hit by hit."""
+    out = {"punch": 0.0, "twist": 0.0, "sizzle": 0.0, "ring_ages": []}
+    for gesture, times, dur in gestures:
+        i = int(np.searchsorted(times, t, side="right")) - 1
+        if i < 0:
+            continue
+        if gesture == "ring":
+            out["ring_ages"] += [t - h for h in times[max(0, i - 3):i + 1] if t - h < 1.0]
+            # a wave is born small at the centre: a short punch gives it an attack to see
+            out["punch"] = max(out["punch"], 0.6 * max(0.0, 1.0 - (t - times[i]) / 0.08))
+            continue
+        env = max(0.0, 1.0 - (t - times[i]) / dur)
+        if gesture == "twist":
+            env = env if i % 2 == 0 else -env
+            out["twist"] = env if abs(env) > abs(out["twist"]) else out["twist"]
+        else:
+            out[gesture] = max(out[gesture], env)
+    return out
+
+
+class ChladniLayer:
+    """Sand on a vibrating plate (``core/chladni``): the chord picks the figure,
+    the loudness shakes the sand onto it, a hit throws it off again. CPU only.
+
+        - source: chladni
+          grains: 120000
+          seed: 3
+          root: 10               # chord root before the first change (0 = C … 11 = B)
+          modes: {10: [1, 2]}    # optional: your own figure (n, m) for a root
+          fineness: [0.8, 1.5]   # figure scale from the darkest to the brightest sound
+          pour: 25               # seconds of full-level sound until all the sand is on the plate
+          harmony:               # optional: chord changes (as in composer triggers)
+            score: input/song/sheetsage
+            snap: auto
+            bloom: 1.5
+          jolt: {notes: [36], envelope: 0.25}    # optional: hits that really scatter the sand (slow)
+          hits:                  # optional: one instant gesture per drum voice
+            - {notes: [36], gesture: punch, envelope: 0.10}     # punch | twist | sizzle | ring
+            - {notes: [40], gesture: sizzle, envelope: 0.09}
+
+    Reads ``features['texture']`` (loudness, swell, harmonic_change, noisiness,
+    tremolo, percussive) and ``features['centroid']``.
+    """
+
+    CENTROID_RANGE = (0.02, 0.25)     # fraction of Nyquist mapped onto ``fineness`` (log scale)
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int,
+                 fps: int, features_at=None, onset_loader=None, grid=None):
+        from core.chladni import MODES, ChladniSystem
+        self.fps = fps
+        self.features_at = features_at
+        self._table = {r: MODES[(r * 7) % 12] for r in range(12)}
+        self._table.update({int(k) % 12: (float(v[0]), float(v[1]))
+                            for k, v in (spec.get("modes") or {}).items()})
+        self._root = int(spec.get("root", 0)) % 12
+        self._follow_hue = "hue" not in spec
+        self.sys = ChladniSystem(width, height, seed=int(spec.get("seed", 0)),
+                                 grains=int(spec.get("grains", 120_000)),
+                                 modes=self._table[self._root],
+                                 hue=float(spec.get("hue", VeilsLayer.hue_of_root(self._root))),
+                                 brightness=float(spec.get("brightness", 1.0)))
+        lo, hi = spec.get("fineness", (1.0, 1.0))
+        self._fineness = (float(lo), float(hi))
+        self._pour_s = float(spec.get("pour", 0.0))
+        self._poured = 0.0 if self._pour_s > 0 else 1.0
+        hspec = spec.get("harmony")
+        self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._chord_times = np.array([e.time for e in self._chords], dtype=float)
+        self._bloom = (EnvelopeOpacity(list(self._chord_times), float(hspec.get("bloom", 1.5)))
+                       if hspec else None)
+        jspec = spec.get("jolt")
+        self._jolt = (EnvelopeOpacity(_layer_hits(jspec, notes, onset_loader, grid),
+                                      float(jspec.get("envelope", 0.25))) if jspec else None)
+        self._gestures = _parse_gestures(spec.get("hits"), notes, onset_loader, grid, who="chladni")
+        self._smooth: dict = {}
+        self._last_t: Optional[float] = None
+
+    def _lowpass(self, name: str, value: float, dt: float, tau: float) -> float:
+        prev = self._smooth.get(name, value)
+        prev += (value - prev) * (1 - math.exp(-dt / tau)) if dt > 0 else 0.0
+        self._smooth[name] = prev
+        return prev
+
+    def frame_at(self, t: float) -> np.ndarray:
+        dt = 1.0 / self.fps if self._last_t is None else max(0.0, t - self._last_t)
+        self._last_t = t
+        feats = (self.features_at(t) or {}) if self.features_at else {}
+        tex = feats.get("texture", {})
+        loud = self._lowpass("loudness", tex.get("loudness", 0.5), dt, 0.20)
+        perc = self._lowpass("percussive", tex.get("percussive", 0.0), dt, 0.15)
+        # loudness arrives on a dB scale; the useful part of it is the top two thirds
+        level = float(np.clip((loud - 0.25) / 0.65, 0.0, 1.0)) ** 1.3
+        self._poured = min(1.0, self._poured + dt * level / self._pour_s) if self._pour_s > 0 else 1.0
+
+        c_lo, c_hi = self.CENTROID_RANGE
+        cen = float(np.clip(feats.get("centroid", c_lo) or c_lo, c_lo, c_hi))
+        bright = self._lowpass("bright", math.log(cen / c_lo) / math.log(c_hi / c_lo), dt, 2.5)
+        fineness = self._fineness[0] + (self._fineness[1] - self._fineness[0]) * bright
+
+        root = self._root
+        if len(self._chords):
+            i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
+            if i >= 0:
+                root = int(self._chords[i].pitch) % 12
+        return self.sys.render(
+            dt, level=min(1.0, level + 0.3 * perc), modes=self._table[root], fineness=fineness,
+            harmonic_change=self._lowpass("harmonic_change", tex.get("harmonic_change", 0.0), dt, 0.5),
+            swell=self._lowpass("swell", tex.get("swell", 0.0), dt, 0.30),
+            jolt=self._jolt(t) if self._jolt else 0.0,
+            noisiness=self._lowpass("noisiness", tex.get("noisiness", 0.0), dt, 0.30),
+            tremolo_depth=self._lowpass("tremolo_depth", tex.get("tremolo_depth", 0.0), dt, 0.50),
+            tremolo_rate=self._lowpass("tremolo_rate", tex.get("tremolo_rate", 0.0), dt, 0.50),
+            target_hue=VeilsLayer.hue_of_root(root) if self._follow_hue else None,
+            bloom=self._bloom(t) if self._bloom else 0.0, pour=self._poured,
+            **_gestures_at(self._gestures, t))
+
+
+class FlameLayer:
+    """A fractal flame (``core/flame``) turned by the music. GPU (moderngl compute);
+    falls back to a grainier CPU render when no 4.3 context can be had.
+
+        - source: flame
+          genome: {random: 5}    # or {xforms: [{affine: [a,b,c,d,e,f], variations: {swirl: 1}, ...}]}
+          symmetry: 1            # rotational symmetry order
+          samples: 6             # millions of points per frame
+          supersample: 2
+          backend: auto          # auto | gpu | cpu
+          spin: 0.02             # turns per second the xforms rotate at full level
+          pose: 0.25             # how far a chord change re-poses the figure (0 = colour only)
+          root: 10               # chord root before the first change
+          harmony: {score: input/song/sheetsage, snap: auto, bloom: 1.5}
+          hits:                  # instant gestures, as in ``chladni``
+            - {notes: [36], gesture: punch, envelope: 0.10}
+
+    Loudness drives the light and the speed, swell the zoom, harmonic change makes
+    the figure wander; the chord sets the palette and the pose.
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int,
+                 fps: int, features_at=None, onset_loader=None, grid=None):
+        from core.flame import FlameSystem, Genome
+        self.fps = fps
+        self.features_at = features_at
+        genome = Genome.from_spec(spec.get("genome") or {"random": 5}).with_symmetry(int(spec.get("symmetry", 1)))
+        self.sys = FlameSystem(width, height, genome, seed=int(spec.get("seed", 0)),
+                               samples=float(spec.get("samples", 6.0)),
+                               supersample=int(spec.get("supersample", 2)),
+                               backend=str(spec.get("backend", "auto")),
+                               exposure=float(spec.get("exposure", 3.0)),
+                               white=float(spec.get("white", 40.0)), gamma=float(spec.get("gamma", 2.4)))
+        self._spin = float(spec.get("spin", 0.02))
+        self._pose_amount = float(spec.get("pose", 0.25))
+        self._root = int(spec.get("root", 0)) % 12
+        hspec = spec.get("harmony")
+        self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._chord_times = np.array([e.time for e in self._chords], dtype=float)
+        self._bloom = (EnvelopeOpacity(list(self._chord_times), float(hspec.get("bloom", 1.5)))
+                       if hspec else None)
+        self._gestures = _parse_gestures(spec.get("hits"), notes, onset_loader, grid, who="flame")
+        self._smooth: dict = {}
+        self._last_t: Optional[float] = None
+        self.phase = 0.0
+        self.breath = 0.0
+        self.hue = float(spec.get("hue", VeilsLayer.hue_of_root(self._root)))
+        self._follow_hue = "hue" not in spec
+        self.pose = self._pose_of(self._root)
+
+    def _pose_of(self, root: int) -> float:
+        return 2 * math.pi * self._pose_amount * VeilsLayer.hue_of_root(root)
+
+    def _lowpass(self, name: str, value: float, dt: float, tau: float) -> float:
+        prev = self._smooth.get(name, value)
+        prev += (value - prev) * (1 - math.exp(-dt / tau)) if dt > 0 else 0.0
+        self._smooth[name] = prev
+        return prev
+
+    def frame_at(self, t: float) -> np.ndarray:
+        dt = 1.0 / self.fps if self._last_t is None else max(0.0, t - self._last_t)
+        self._last_t = t
+        tex = ((self.features_at(t) or {}) if self.features_at else {}).get("texture", {})
+        loud = self._lowpass("loudness", tex.get("loudness", 0.5), dt, 0.20)
+        level = float(np.clip((loud - 0.25) / 0.65, 0.0, 1.0)) ** 1.3
+        change = self._lowpass("harmonic_change", tex.get("harmonic_change", 0.0), dt, 0.5)
+        swell = self._lowpass("swell", tex.get("swell", 0.0), dt, 0.30)
+        self.phase += dt * (2 * math.pi * self._spin * (0.25 + 0.75 * level) + 0.35 * change)
+        self.breath += dt * (0.35 * swell - self.breath / 6.0)
+        self.breath = float(np.clip(self.breath, -0.4, 0.4))
+
+        root = self._root
+        if len(self._chords):
+            i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
+            if i >= 0:
+                root = int(self._chords[i].pitch) % 12
+        glide = 1 - math.exp(-dt / 1.2)
+        self.pose += (self._pose_of(root) - self.pose) * glide
+        if self._follow_hue:
+            gap = ((VeilsLayer.hue_of_root(root) - self.hue + 0.5) % 1.0) - 0.5
+            self.hue = (self.hue + gap * glide) % 1.0
+        return self.sys.render(dt, phase=self.phase, pose=self.pose, hue=self.hue, level=level,
+                               zoom=math.exp(self.breath), bloom=self._bloom(t) if self._bloom else 0.0,
+                               **_gestures_at(self._gestures, t))
 
 
 class OrbitersLayer:
@@ -862,6 +1166,24 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
                                 features_at=features_at,
                                 onset_loader=onset_loader),
                      blend, op_fn)
+            continue
+        if src_name == "veils":
+            comp.add(VeilsLayer(spec, notes, width, height, fps,
+                                features_at=features_at,
+                                onset_loader=onset_loader, grid=grid),
+                     blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "flame":
+            comp.add(FlameLayer(spec, notes, width, height, fps,
+                                features_at=features_at,
+                                onset_loader=onset_loader, grid=grid),
+                     blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "chladni":
+            comp.add(ChladniLayer(spec, notes, width, height, fps,
+                                  features_at=features_at,
+                                  onset_loader=onset_loader, grid=grid),
+                     blend if len(comp) else "normal", op_fn)
             continue
         if src_name == "orbiters":
             comp.add(OrbitersLayer(spec, notes, width, height, fps,
