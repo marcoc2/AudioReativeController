@@ -216,12 +216,16 @@ def iterate_cpu(pk: Packed, threads: int, keep: int, seed: int = 0):
     return np.concatenate(pts), np.concatenate(cols), np.concatenate(oks)
 
 
-def fit_camera(pk: Packed, aspect: float, seed: int = 0) -> tuple:
-    """(cx, cy, scale) that frames the bulk of the attractor (2nd–98th percentile)."""
+def fit_camera(pk: Packed, aspect: float, seed: int = 0, centered: bool = False) -> tuple:
+    """(cx, cy, scale) that frames the bulk of the attractor (2nd–98th percentile).
+    ``centered``: a figure with rotational symmetry sits on the origin — keep it
+    there and fit its radius to the frame height."""
     pts, _, ok = iterate_cpu(pk, 3000, 8, seed)
     pts = pts[ok]
     if len(pts) < 50:
         return 0.0, 0.0, 1.0
+    if centered:
+        return 0.0, 0.0, float(0.92 / max(1e-3, np.percentile(np.sqrt((pts * pts).sum(axis=1)), 90)))
     lo, hi = np.percentile(pts, 2, axis=0), np.percentile(pts, 98, axis=0)
     half = np.maximum((hi - lo) / 2, 1e-3)
     scale = 0.82 / max(half[0] / aspect, half[1])
@@ -356,12 +360,17 @@ void main() {
 _DRAW_FS = """
 #version 430
 uniform sampler2D u_pal;
+uniform sampler2D u_paint;     // the picture below the layer, when the flame is painted with it
+uniform vec2 u_size;           // accumulation buffer size in pixels
+uniform float u_paint_mix;
+uniform float u_paint_gain;    // the layers below may have been dimmed on purpose: brighten what is sampled
 uniform vec3 u_accent;
 in float v_c;
 in float v_heat;
 out vec4 f_acc;
 void main() {
     vec3 col = texture(u_pal, vec2(clamp(v_c, 0.002, 0.998), 0.5)).rgb;
+    if (u_paint_mix > 0.0) col = mix(col, texture(u_paint, gl_FragCoord.xy / u_size).rgb * u_paint_gain, u_paint_mix);
     f_acc = vec4(mix(col, u_accent, v_heat), 1.0);
 }
 """
@@ -411,6 +420,7 @@ class _GpuBackend:
         self.acc_fbo = ctx.framebuffer([self.acc])
         self.pal = ctx.texture((256, 1), 3, dtype="f4")
         self.pal.repeat_x = False
+        self.paint = ctx.texture((self.W, self.H), 3)        # uint8 picture from the layers below
         self.tone = ctx.program(vertex_shader=_QUAD_VS, fragment_shader=_TONE_FS)
         quad = np.array([-1, -1, 1, -1, -1, 1, 1, 1], dtype="f4")
         self._quad = ctx.buffer(quad.tobytes())
@@ -427,7 +437,8 @@ class _GpuBackend:
         if name in prog:
             prog[name].write(np.ascontiguousarray(array, dtype="f4").tobytes())
 
-    def render(self, pk, cam, palette, accent, gest, rings, exposure, white, gamma, gain):
+    def render(self, pk, cam, palette, accent, gest, rings, exposure, white, gamma, gain,
+               paint=None, paint_mix=0.0, paint_gain=1.0):
         ctx, mgl = self.ctx, self._mgl
         cs = self.cs
         self._set(cs, "u_nx", pk.n); self._set(cs, "u_keep", self.keep); self._set(cs, "u_warm", WARMUP)
@@ -445,6 +456,13 @@ class _GpuBackend:
         ctx.blend_func = mgl.ONE, mgl.ONE
         self.pal.use(0)
         self._set(self.draw, "u_pal", 0)
+        if paint is not None and paint_mix > 0:
+            self.paint.write(np.ascontiguousarray(paint[::-1]).tobytes())   # GL rows run bottom-up
+        self.paint.use(1)
+        self._set(self.draw, "u_paint", 1)
+        self._set(self.draw, "u_size", (float(self.W * self.ss), float(self.H * self.ss)))
+        self._set(self.draw, "u_paint_mix", float(paint_mix) if paint is not None else 0.0)
+        self._set(self.draw, "u_paint_gain", float(paint_gain))
         self._set(self.draw, "u_cam", tuple(cam))
         self._set(self.draw, "u_aspect", self.W / self.H)
         self._set(self.draw, "u_gest", tuple(gest))
@@ -470,7 +488,8 @@ class _CpuBackend:
         self.W, self.H = width, height
         self.threads, self.keep, self.seed = int(threads), int(keep), int(seed)
 
-    def render(self, pk, cam, palette, accent, gest, rings, exposure, white, gamma, gain):
+    def render(self, pk, cam, palette, accent, gest, rings, exposure, white, gamma, gain,
+               paint=None, paint_mix=0.0, paint_gain=1.0):
         W, H, aspect = self.W, self.H, self.W / self.H
         pts, col, ok = iterate_cpu(pk, self.threads, self.keep, self.seed)
         punch, twist, sizzle = gest
@@ -490,7 +509,10 @@ class _CpuBackend:
         iy = np.floor((1 - (q[:, 1] + 1) * 0.5) * H).astype(np.int64)
         ok = ok & (ix >= 0) & (ix < W) & (iy >= 0) & (iy < H)
         idx, heat = (iy * W + ix)[ok], np.clip(heat[ok], 0, 1)[:, None]
-        rgb = palette[np.clip((col[ok] * 255).astype(int), 0, 255)] * (1 - heat) + np.asarray(accent) * heat
+        rgb = palette[np.clip((col[ok] * 255).astype(int), 0, 255)]
+        if paint is not None and paint_mix > 0:
+            rgb = rgb * (1 - paint_mix) + paint[iy[ok], ix[ok]].astype("f4") / 255.0 * paint_gain * paint_mix
+        rgb = rgb * (1 - heat) + np.asarray(accent) * heat
         count = np.bincount(idx, minlength=W * H).astype("f4")
         rgb_sum = np.stack([np.bincount(idx, weights=rgb[:, ch], minlength=W * H) for ch in range(3)], axis=1)
         img = _tone(count, rgb_sum.astype("f4"), (W * H) / (self.threads * self.keep), exposure, white, gamma,
@@ -507,10 +529,11 @@ class FlameSystem:
 
     def __init__(self, width: int, height: int, genome: Genome, seed: int = 0, samples: float = 6.0,
                  supersample: int = 2, backend: str = "auto", exposure: float = 3.0,
-                 white: float = 40.0, gamma: float = 2.4):
+                 white: float = 40.0, gamma: float = 2.4, centered: bool = False):
         self.width, self.height = int(width), int(height)
         self.genome, self.seed = genome, int(seed)
         self.exposure, self.white, self.gamma = float(exposure), float(white), float(gamma)
+        self.centered = bool(centered)
         self.backend_name, self._backend = self._open(backend, samples, supersample)
         self._cam: Optional[np.ndarray] = None
         self._frame = 0
@@ -530,12 +553,15 @@ class FlameSystem:
 
     def render(self, dt: float, phase: float = 0.0, pose: float = 0.0, hue: float = 0.8,
                level: float = 1.0, zoom: float = 1.0, bloom: float = 0.0, punch: float = 0.0,
-               twist: float = 0.0, sizzle: float = 0.0, ring_ages=()) -> np.ndarray:
+               twist: float = 0.0, sizzle: float = 0.0, ring_ages=(),
+               paint: Optional[np.ndarray] = None, paint_mix: float = 0.0,
+               paint_gain: float = 1.0) -> np.ndarray:
         """Draw the genome turned to ``phase``/``pose`` (uint8, H x W x 3). The camera
-        follows the attractor with a lag, so a pose change reframes without a cut."""
+        follows the attractor with a lag, so a pose change reframes without a cut.
+        ``paint`` (H x W x 3 uint8) colours each point with the picture under it."""
         pk = pack(self.genome, phase, pose)
         if self._frame % self.FIT_EVERY == 0:             # the fit runs on the CPU; the camera lags anyway
-            self._target = np.array(fit_camera(pk, self.width / self.height, self.seed))
+            self._target = np.array(fit_camera(pk, self.width / self.height, self.seed, self.centered))
         self._frame += 1
         if self._cam is None:
             self._cam = self._target.copy()
@@ -546,4 +572,5 @@ class FlameSystem:
         gain = (0.30 + 0.70 * float(np.clip(level, 0, 1))) * (1 + 0.4 * punch + 0.5 * bloom)
         return self._backend.render(pk, cam, make_palette(hue), accent, (float(punch), float(twist), float(sizzle)),
                                     [float(a) for a in ring_ages][-MAX_RINGS:], self.exposure, self.white,
-                                    self.gamma, gain)
+                                    self.gamma, gain, paint=paint, paint_mix=float(paint_mix),
+                                    paint_gain=float(paint_gain))

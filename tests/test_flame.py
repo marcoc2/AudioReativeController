@@ -104,3 +104,22 @@ def test_gpu_backend_draws_the_same_figure_as_the_cpu():
     assert a.shape == b.shape and a.max() > 60
     blur = lambda m: m.reshape(9, 10, 16, 10).mean(axis=(1, 3))          # compare where the light falls, not the grain
     assert np.corrcoef(blur(a).ravel(), blur(b).ravel())[0, 1] > 0.9
+
+
+def test_flame_can_be_painted_with_the_picture_below():
+    from core.video.layers import Compositor, SolidLayer
+    under = np.zeros((H, W, 3), np.uint8)
+    under[:, : W // 2, 2] = 255                                          # left half blue, right half black
+    spec = {"source": "flame", "backend": "cpu", "samples": 0.2, "genome": {"random": 5}, "spin": 0.0,
+            "paint": "under", "paint_mix": 1.0}
+    layer = FlameLayer(spec, [], W, H, 24)
+    frame = layer.frame_at_over(under, 0.0)
+    left, right = frame[:, : W // 2], frame[:, W // 2:]
+    assert left[..., 2].sum() > 0 and left[..., :2].sum() == 0            # only blue where the picture is blue
+    assert right.sum() == 0                                              # nothing where the picture is black
+    comp = Compositor()
+    comp.add(SolidLayer(W, H, (0, 0, 255)))
+    comp.add(layer, "add")
+    assert comp.frame_at(1 / 24).shape == (H, W, 3)
+    with pytest.raises(ValueError):
+        FlameLayer({**spec, "paint": "above"}, [], W, H, 24)

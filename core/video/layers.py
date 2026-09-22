@@ -170,13 +170,18 @@ class Compositor:
         out = src0.frame_at(t)
         for src, blend, opacity in self._layers[1:]:
             if hasattr(src, "process"):
-                # post-op: transforms the composite built so far
-                out = src.process(out, t)
+                # post-op: transforms the composite built so far (a ``bars:`` window gates it)
+                op = 1.0 if opacity is None else float(opacity(t))
+                if op <= 0.0:
+                    continue
+                done = src.process(out, t)
+                out = done if op >= 1.0 else blend_frames(out, done, "normal", op)
                 continue
             op = 1.0 if opacity is None else float(opacity(t))
             if op <= 0.0:
                 continue
-            top = src.frame_at(t)
+            # a source that paints itself with what lies below (``frame_at_over``) sees the composite so far
+            top = src.frame_at_over(out, t) if hasattr(src, "frame_at_over") else src.frame_at(t)
             if top is not None:
                 out = blend_frames(out, top, blend, op)
         return out
@@ -198,10 +203,71 @@ def _layer_events(spec: dict, notes: Sequence, onset_loader=None, grid=None) -> 
             wanted = set(spec["notes"])
             src = [n for n in src if n.pitch in wanted]
     else:
-        pitches = set(spec.get("notes", []))
-        src = [n for n in notes if n.pitch in pitches]
+        from core.rhythm import select_notes
+        src = select_notes(notes, spec)
     min_vel = int(spec.get("min_velocity", 0))
     return sorted((n for n in src if n.velocity >= min_vel), key=lambda n: n.time)
+
+
+class BarWindow:
+    """Opacity from the song's form: 1 inside the listed bars, 0 outside.
+
+        bars: [[2, 21], [36, 51]]     # DAW bar numbers, inclusive
+        fade_in: 1                    # bars the layer takes to come up (inside the window)
+        fade_out: 2                   # bars it takes to go down (inside the window)
+
+    Works on every layer, post-ops included; the grid answers where the bars are,
+    so meter changes are honoured.
+    """
+
+    def __init__(self, spec: dict, grid):
+        if grid is None:
+            raise ValueError("bars: needs a rhythm grid (render with --midi)")
+        bars = spec["bars"]
+        bars = [bars] if bars and not isinstance(bars[0], (list, tuple)) else bars
+        self.spans = []
+        for first, last in bars:
+            t0, t1 = grid.bar_start(int(first) - 1), grid.bar_start(int(last))
+            up = float(spec.get("fade_in", 0)) * (grid.bar_start(int(first)) - t0)
+            down = float(spec.get("fade_out", 0)) * (t1 - grid.bar_start(int(last) - 1))
+            self.spans.append((t0, t1, up, down))
+
+    def __call__(self, t: float) -> float:
+        for t0, t1, up, down in self.spans:
+            if t0 <= t < t1:
+                k = 1.0
+                if up > 0:
+                    k = min(k, (t - t0) / up)
+                if down > 0:
+                    k = min(k, (t1 - t) / down)
+                return max(0.0, min(1.0, k))
+        return 0.0
+
+
+def _feature(feats: dict, path: str, default: float = 0.0) -> float:
+    """``"stems.piano"`` -> ``feats["stems"]["piano"]`` (a number, or ``default``)."""
+    node = feats
+    for key in path.split("."):
+        if not isinstance(node, dict) or key not in node:
+            return default
+        node = node[key]
+    try:
+        return float(node)
+    except (TypeError, ValueError):
+        return default
+
+
+class _PitchFollower:
+    """The pitch class of the latest note of a trigger spec (``None`` before the first)."""
+
+    def __init__(self, spec, notes, onset_loader=None, grid=None):
+        events = _layer_events(spec, notes, onset_loader, grid) if spec else []
+        self.times = np.array([e.time for e in events], dtype=float)
+        self.pitches = [int(e.pitch) % 12 for e in events]
+
+    def __call__(self, t: float):
+        i = int(np.searchsorted(self.times, t, side="right")) - 1
+        return self.pitches[i] if i >= 0 else None
 
 
 def _layer_hits(spec: dict, notes: Sequence, onset_loader=None, grid=None) -> list:
@@ -383,7 +449,7 @@ class VeilsLayer:
         return prev
 
     def frame_at(self, t: float) -> np.ndarray:
-        dt = 1.0 / self.fps if self._last_t is None else max(0.0, t - self._last_t)
+        dt = 1.0 / self.fps if self._last_t is None else min(0.1, max(0.0, t - self._last_t))
         self._last_t = t
         tex = (self.features_at(t) or {}).get("texture", {}) if self.features_at else {}
         controls = {
@@ -494,6 +560,8 @@ class ChladniLayer:
         self._jolt = (EnvelopeOpacity(_layer_hits(jspec, notes, onset_loader, grid),
                                       float(jspec.get("envelope", 0.25))) if jspec else None)
         self._gestures = _parse_gestures(spec.get("hits"), notes, onset_loader, grid, who="chladni")
+        self._level_from = spec.get("level_from")          # e.g. "stems.piano" instead of the mix loudness
+        self._level_gain = float(spec.get("level_gain", 1.0))
         self._smooth: dict = {}
         self._last_t: Optional[float] = None
 
@@ -504,7 +572,7 @@ class ChladniLayer:
         return prev
 
     def frame_at(self, t: float) -> np.ndarray:
-        dt = 1.0 / self.fps if self._last_t is None else max(0.0, t - self._last_t)
+        dt = 1.0 / self.fps if self._last_t is None else min(0.1, max(0.0, t - self._last_t))
         self._last_t = t
         feats = (self.features_at(t) or {}) if self.features_at else {}
         tex = feats.get("texture", {})
@@ -512,6 +580,9 @@ class ChladniLayer:
         perc = self._lowpass("percussive", tex.get("percussive", 0.0), dt, 0.15)
         # loudness arrives on a dB scale; the useful part of it is the top two thirds
         level = float(np.clip((loud - 0.25) / 0.65, 0.0, 1.0)) ** 1.3
+        if self._level_from:
+            level = float(np.clip(self._level_gain * self._lowpass(
+                "level_from", _feature(feats, self._level_from), dt, 0.25), 0.0, 1.0))
         self._poured = min(1.0, self._poured + dt * level / self._pour_s) if self._pour_s > 0 else 1.0
 
         c_lo, c_hi = self.CENTROID_RANGE
@@ -553,6 +624,9 @@ class FlameLayer:
           harmony: {score: input/song/sheetsage, snap: auto, bloom: 1.5}
           hits:                  # instant gestures, as in ``chladni``
             - {notes: [36], gesture: punch, envelope: 0.10}
+          paint: under           # colour every point with the layers below it (a video):
+          paint_mix: 0.9         # the figure becomes a kaleidoscope of that picture
+          paint_gain: 5          # undo a dimming solid below: the mandala shows the video at full colour
 
     Loudness drives the light and the speed, swell the zoom, harmonic change makes
     the figure wander; the chord sets the palette and the pose.
@@ -569,7 +643,8 @@ class FlameLayer:
                                supersample=int(spec.get("supersample", 2)),
                                backend=str(spec.get("backend", "auto")),
                                exposure=float(spec.get("exposure", 3.0)),
-                               white=float(spec.get("white", 40.0)), gamma=float(spec.get("gamma", 2.4)))
+                               white=float(spec.get("white", 40.0)), gamma=float(spec.get("gamma", 2.4)),
+                               centered=int(spec.get("symmetry", 1)) > 1)
         self._spin = float(spec.get("spin", 0.02))
         self._pose_amount = float(spec.get("pose", 0.25))
         self._root = int(spec.get("root", 0)) % 12
@@ -579,6 +654,16 @@ class FlameLayer:
         self._bloom = (EnvelopeOpacity(list(self._chord_times), float(hspec.get("bloom", 1.5)))
                        if hspec else None)
         self._gestures = _parse_gestures(spec.get("hits"), notes, onset_loader, grid, who="flame")
+        self._hue_notes = _PitchFollower(spec.get("hue_notes"), notes, onset_loader, grid)
+        if spec.get("paint") not in (None, "under"):
+            raise ValueError(f"flame: paint must be 'under', got {spec.get('paint')!r}")
+        self._paint_mix = float(spec.get("paint_mix", 1.0)) if spec.get("paint") == "under" else 0.0
+        self._paint_gain = float(spec.get("paint_gain", 1.0))
+        self._under = None
+        self._pose_notes = _PitchFollower(spec.get("pose_notes"), notes, onset_loader, grid)
+        self._glide = float(spec.get("glide", 1.2))
+        self._level_from = spec.get("level_from")
+        self._level_gain = float(spec.get("level_gain", 1.0))
         self._smooth: dict = {}
         self._last_t: Optional[float] = None
         self.phase = 0.0
@@ -596,12 +681,20 @@ class FlameLayer:
         self._smooth[name] = prev
         return prev
 
+    def frame_at_over(self, under: np.ndarray, t: float) -> np.ndarray:
+        self._under = under if self._paint_mix > 0 else None
+        return self.frame_at(t)
+
     def frame_at(self, t: float) -> np.ndarray:
-        dt = 1.0 / self.fps if self._last_t is None else max(0.0, t - self._last_t)
+        dt = 1.0 / self.fps if self._last_t is None else min(0.1, max(0.0, t - self._last_t))
         self._last_t = t
-        tex = ((self.features_at(t) or {}) if self.features_at else {}).get("texture", {})
+        feats = (self.features_at(t) or {}) if self.features_at else {}
+        tex = feats.get("texture", {})
         loud = self._lowpass("loudness", tex.get("loudness", 0.5), dt, 0.20)
         level = float(np.clip((loud - 0.25) / 0.65, 0.0, 1.0)) ** 1.3
+        if self._level_from:
+            level = float(np.clip(self._level_gain * self._lowpass(
+                "level_from", _feature(feats, self._level_from), dt, 0.25), 0.0, 1.0))
         change = self._lowpass("harmonic_change", tex.get("harmonic_change", 0.0), dt, 0.5)
         swell = self._lowpass("swell", tex.get("swell", 0.0), dt, 0.30)
         self.phase += dt * (2 * math.pi * self._spin * (0.25 + 0.75 * level) + 0.35 * change)
@@ -613,14 +706,107 @@ class FlameLayer:
             i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
             if i >= 0:
                 root = int(self._chords[i].pitch) % 12
-        glide = 1 - math.exp(-dt / 1.2)
-        self.pose += (self._pose_of(root) - self.pose) * glide
-        if self._follow_hue:
+        glide = 1 - math.exp(-dt / self._glide)
+        pose_root = self._pose_notes(t)                    # a track's notes beat the chord
+        hue_root = self._hue_notes(t)
+        self.pose += (self._pose_of(root if pose_root is None else pose_root) - self.pose) * glide
+        if self._follow_hue or hue_root is not None:
+            root = root if hue_root is None else hue_root
             gap = ((VeilsLayer.hue_of_root(root) - self.hue + 0.5) % 1.0) - 0.5
             self.hue = (self.hue + gap * glide) % 1.0
         return self.sys.render(dt, phase=self.phase, pose=self.pose, hue=self.hue, level=level,
                                zoom=math.exp(self.breath), bloom=self._bloom(t) if self._bloom else 0.0,
+                               paint=self._under, paint_mix=self._paint_mix, paint_gain=self._paint_gain,
                                **_gestures_at(self._gestures, t))
+
+
+class EyesLayer:
+    """A Voronoi wall of eyeballs (``core/eyes``, GPU) that follows a gaze.
+
+        - source: eyes
+          rows: 5                # eyes down the height (about 9 across at 16:9)
+          seed: 3
+          supersample: 2
+          depth: 0.9             # how far in front of the wall the gaze point floats (bigger = eyes look straighter)
+          hue: 0.55              # iris colour; a ``harmony:`` block lets the chord choose it,
+          iris_hues: [0.08, 0.6] # ... mapped onto real iris colours: amber -> green -> blue
+          pupil_from: texture.loudness   # feature that dilates the pupils (0..1)
+          wander: 0.15           # how far the gaze drifts on its own (frame height units)
+          hits:                  # gestures: saccade (gaze jumps) | dilate | blink
+            - {track: snare, gesture: saccade}
+            - {track: kick, gesture: dilate, envelope: 0.25}
+            - {track: lead, gesture: blink, envelope: 0.20}
+    """
+
+    GESTURES = ("saccade", "dilate", "blink")
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int,
+                 fps: int, features_at=None, onset_loader=None, grid=None):
+        from core.eyes import EyesSystem
+        self.fps = fps
+        self.features_at = features_at
+        self.sys = EyesSystem(width, height, rows=float(spec.get("rows", 5)), seed=int(spec.get("seed", 0)),
+                              supersample=int(spec.get("supersample", 2)), depth=float(spec.get("depth", 0.9)))
+        self.aspect = width / height
+        self._pupil_from = spec.get("pupil_from", "texture.loudness")
+        lo, hi = spec.get("iris_hues", (0.08, 0.6))
+        self._iris_hues = (float(lo), float(hi))
+        self._wander = float(spec.get("wander", 0.15))
+        self._rng = np.random.default_rng(int(spec.get("seed", 0)))
+        hspec = spec.get("harmony")
+        self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._chord_times = np.array([e.time for e in self._chords], dtype=float)
+        self._gestures = []
+        for g in spec.get("hits") or []:
+            if g.get("gesture") not in self.GESTURES:
+                raise ValueError(f"eyes: unknown gesture {g.get('gesture')!r} (use one of {self.GESTURES})")
+            self._gestures.append((g["gesture"], np.array(_layer_hits(g, notes, onset_loader, grid), dtype=float),
+                                   max(1e-3, float(g.get("envelope", 0.2)))))
+        sacc = [t for g, t, _ in self._gestures if g == "saccade"]
+        self._saccades = np.sort(np.concatenate(sacc)) if sacc else np.zeros(0)
+        self._n_sacc = 0
+        self._target = np.zeros(2)
+        self._gaze = np.zeros(2)
+        self._smooth: dict = {}
+        self._last_t: Optional[float] = None
+        self.hue = float(spec.get("hue", 0.55))
+
+    def _lowpass(self, name, value, dt, tau):
+        prev = self._smooth.get(name, value)
+        prev += (value - prev) * (1 - math.exp(-dt / tau)) if dt > 0 else 0.0
+        self._smooth[name] = prev
+        return prev
+
+    def frame_at(self, t: float) -> np.ndarray:
+        dt = 1.0 / self.fps if self._last_t is None else min(0.1, max(0.0, t - self._last_t))
+        self._last_t = t
+        feats = (self.features_at(t) or {}) if self.features_at else {}
+        pupil = self._lowpass("pupil", _feature(feats, self._pupil_from, 0.3), dt, 0.15)
+        dilate = blink = 0.0
+        for gesture, times, dur in self._gestures:
+            i = int(np.searchsorted(times, t, side="right")) - 1
+            if i < 0:
+                continue
+            age = t - times[i]
+            if gesture == "dilate":
+                dilate = max(dilate, max(0.0, 1.0 - age / dur))
+            elif gesture == "blink" and age < dur:
+                blink = max(blink, math.sin(math.pi * age / dur))
+        n_sacc = int(np.searchsorted(self._saccades, t, side="right"))
+        if n_sacc != self._n_sacc:                                        # the gaze jumps somewhere new
+            self._n_sacc = n_sacc
+            self._target = self._rng.uniform(-1, 1, 2) * np.array([self.aspect * 0.8, 0.7])
+        # slow drift around the target
+        drift = self._wander * np.array([math.sin(0.37 * t), math.sin(0.23 * t + 1.0)])
+        self._gaze += (self._target + drift - self._gaze) * (1 - math.exp(-dt / 0.06))
+        if len(self._chords):
+            i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
+            if i >= 0:
+                lo, hi = self._iris_hues
+                target_hue = lo + (hi - lo) * VeilsLayer.hue_of_root(self._chords[i].pitch)
+                self.hue += (target_hue - self.hue) * (1 - math.exp(-dt / 1.2))
+        return self.sys.render(t, gaze=tuple(self._gaze), saccade=n_sacc,
+                               pupil=min(1.0, 0.15 + 0.5 * pupil + 0.6 * dilate), blink=blink, hue=self.hue)
 
 
 class OrbitersLayer:
@@ -890,6 +1076,7 @@ class FeedbackLayer:
         self.max_scale = float(spec.get("max_scale", 1.05))
         self.base_scale = float(spec.get("base_scale", 0.96))
         self.max_rotate = float(spec.get("max_rotate", 0.1)) # rad
+        self.hue_shift = float(spec.get("hue_shift", 0.0))   # 0..1 per pass: the trail walks round the colour wheel
         
         # Trigger for zoom (e.g. kick)
         zspec = spec.get("zoom_pulse")
@@ -929,6 +1116,8 @@ class FeedbackLayer:
         
         # Scale and rotate self._prev
         warped = scale_rotate_image(self._prev, scale, angle)
+        if self.hue_shift > 0.0:
+            warped = hue_shift_channels(warped, self.hue_shift)
         
         # Blend: current frame composed over warped history using screen mode
         out = blend_frames(frame, warped, "screen", self.decay)
@@ -936,6 +1125,142 @@ class FeedbackLayer:
         # Save output for next iteration
         self._prev = out.copy()
         return out
+
+
+class GrainLayer:
+    """Post-op: film grain, to take the synthetic edge off a render.
+
+        - source: grain
+          amount: 0.06           # strength (0..1): standard deviation of the noise, in units of full white
+          size: 1.2              # grain radius in output pixels (soft-edged, never square)
+          oversample: 2          # the grain is made at this multiple of the output size and averaged down
+          color: 0.25            # 0 = monochrome grain, 1 = independent per channel
+          seed: 1
+          trigger: {track: kick, envelope: 0.2}   # optional: an extra burst on hits
+          burst: 0.15            # how much a hit adds
+          bars: [[6, 14]]        # optional: only inside these bars (works on every layer)
+
+    The noise is drawn at ``oversample`` times the frame, blurred to the grain size
+    and area-averaged down, so each grain is a soft blob rather than a block. It is
+    strongest in the mid-tones and fades in the blacks and the whites, as on film.
+    Each frame's noise is seeded by (seed, frame), so a render replays.
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, fps: int, features_at=None, onset_loader=None, grid=None):
+        self.fps = fps
+        self.amount = float(spec.get("amount", 0.06))
+        self.size = max(0.3, float(spec.get("size", 1.2)))
+        self.over = max(1, int(spec.get("oversample", 2)))
+        self.color = float(np.clip(spec.get("color", 0.25), 0.0, 1.0))
+        self.seed = int(spec.get("seed", 1))
+        self.burst = float(spec.get("burst", 0.15))
+        tspec = spec.get("trigger")
+        self._burst = (EnvelopeOpacity(_layer_hits(tspec, notes, onset_loader, grid), float(tspec.get("envelope", 0.2)))
+                       if tspec else None)
+
+    BANK = 12                # grain planes made once; a frame draws one at a random offset
+
+    def _plane(self, H: int, W: int, rng) -> np.ndarray:
+        """One unit-variance grain plane, (H, W, 3) float32: oversampled, softened, averaged down."""
+        h, w = H * self.over, W * self.over
+        planes = 3 if self.color > 0 else 1
+        raw = rng.standard_normal((h, w, planes), dtype=np.float32)
+        sigma = 0.5 * self.size * self.over
+        try:
+            import cv2
+            soft = cv2.GaussianBlur(raw, (0, 0), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_REFLECT)
+            soft = soft.reshape(h, w, planes)
+        except ImportError:
+            from scipy.ndimage import gaussian_filter
+            soft = np.stack([gaussian_filter(raw[..., i], sigma, mode="wrap") for i in range(planes)], axis=2)
+        if self.over > 1:                                                   # area average down
+            soft = soft.reshape(H, self.over, W, self.over, planes).mean(axis=(1, 3))
+        soft /= max(1e-6, float(soft.std()))
+        if planes == 3:
+            mono = soft.mean(axis=2, keepdims=True)
+            soft = mono * (1 - self.color) + soft * self.color
+            soft /= max(1e-6, float(soft.std()))
+            return np.ascontiguousarray(soft)
+        return np.ascontiguousarray(np.repeat(soft, 3, axis=2))
+
+    def _noise(self, H: int, W: int, t: float) -> np.ndarray:
+        if getattr(self, "_bank_shape", None) != (H, W):
+            rng = np.random.default_rng([self.seed, 0xB4A8])
+            self._bank = [self._plane(H, W, rng) for _ in range(self.BANK)]
+            self._bank_shape = (H, W)
+        rng = np.random.default_rng([self.seed, int(round(t * self.fps))])
+        plane = self._bank[int(rng.integers(self.BANK))]
+        return np.roll(plane, (int(rng.integers(H)), int(rng.integers(W))), axis=(0, 1))
+
+    def process(self, frame: np.ndarray, t: float) -> np.ndarray:
+        amount = self.amount + (self.burst * self._burst(t) if self._burst else 0.0)
+        if amount <= 0.0:
+            return frame
+        H, W = frame.shape[:2]
+        f = frame.astype(np.float32)
+        lum = f.mean(axis=2, keepdims=True) / 255.0
+        weight = 1.0 - (2.0 * lum - 1.0) ** 2                              # mid-tones grain most
+        out = f + self._noise(H, W, t) * (amount * 255.0) * (0.25 + 0.75 * weight)
+        return np.clip(out, 0.0, 255.0).astype(np.uint8)
+
+
+class RgbNoiseLayer:
+    """Post-op: RGB noise the way GIMP/GEGL's ``noise-rgb`` does it — per pixel, no blur.
+
+        - source: rgb_noise
+          amount: 0.2            # 0..1; or per channel: red / green / blue
+          correlated: true       # true: multiplicative (out = in * (1 + amount * n)) — noise scales
+                                 #       with the pixel's light, blacks stay clean; false: additive
+          independent: true      # a different draw per channel (colour noise) or one for all three
+          linear: true           # work in linear light (sRGB decoded), as GEGL does
+          gaussian: true         # gaussian or uniform draws
+          seed: 0
+          trigger: {track: kick, envelope: 0.2}   # optional: an extra burst on hits
+          burst: 0.2
+          bars: [[6, 14]]        # optional window
+
+    Each frame's noise is seeded by (seed, frame), so a render replays.
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, fps: int, features_at=None, onset_loader=None, grid=None):
+        self.fps = fps
+        amount = float(spec.get("amount", 0.2))
+        self.amount = np.array([float(spec.get(k, amount)) for k in ("red", "green", "blue")], dtype=np.float32)
+        self.correlated = bool(spec.get("correlated", True))
+        self.independent = bool(spec.get("independent", True))
+        self.linear = bool(spec.get("linear", True))
+        self.gaussian = bool(spec.get("gaussian", True))
+        self.seed = int(spec.get("seed", 0))
+        self.burst = float(spec.get("burst", 0.2))
+        tspec = spec.get("trigger")
+        self._burst = (EnvelopeOpacity(_layer_hits(tspec, notes, onset_loader, grid), float(tspec.get("envelope", 0.2)))
+                       if tspec else None)
+        x = np.arange(256, dtype=np.float32) / 255.0                        # sRGB -> linear, as a table
+        self._to_lin = np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4).astype(np.float32)
+
+    @staticmethod
+    def _to_srgb(x: np.ndarray) -> np.ndarray:
+        x = np.clip(x, 0.0, 1.0)
+        return np.where(x <= 0.0031308, 12.92 * x, 1.055 * np.power(x, 1 / 2.4) - 0.055)
+
+    def process(self, frame: np.ndarray, t: float) -> np.ndarray:
+        gain = 1.0 + (self.burst / max(1e-6, float(self.amount.max())) * self._burst(t) if self._burst else 0.0)
+        amt = self.amount * gain
+        if amt.max() <= 0.0:
+            return frame
+        H, W = frame.shape[:2]
+        rng = np.random.default_rng([self.seed, int(round(t * self.fps))])
+        shape = (H, W, 3) if self.independent else (H, W, 1)
+        n = rng.standard_normal(shape, dtype=np.float32) if self.gaussian             else rng.random(shape, dtype=np.float32) * 2.0 - 1.0
+        work = self._to_lin[frame] if self.linear else frame.astype(np.float32) / 255.0
+        if self.correlated:
+            out = work * (1.0 + amt * n)
+        else:
+            out = work + 0.5 * amt * n                                      # the 0.5 matches GEGL
+        out = np.clip(out, 0.0, 1.0)
+        if self.linear:
+            out = self._to_srgb(out)
+        return (out * 255.0 + 0.5).astype(np.uint8)
 
 
 class EchoesLayer:
@@ -1144,11 +1469,17 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
     # no layers: section -> legacy single clips base; a layers: list is
     # used as-is (first layer = canvas), so pure-generative scenes work
     layers_cfg = video_cfg.get("layers") or [{"source": "clips"}]
+    windows: list = []
     for spec in layers_cfg:
         src_name = spec.get("source", "clips")
         blend = spec.get("blend", "normal")
         static_op = spec.get("opacity")
         op_fn = (lambda t, v=float(static_op): v) if isinstance(static_op, (int, float)) else None
+        window = BarWindow(spec, grid) if "bars" in spec else None
+        windows.append(window)
+        if window is not None:
+            op_fn = (lambda t, w=window, v=float(static_op) if isinstance(static_op, (int, float)) else 1.0:
+                     w(t) * v)
         if src_name == "clips":
             comp.add(base, blend if len(comp) else "normal", op_fn)
             continue
@@ -1179,6 +1510,12 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
                                 onset_loader=onset_loader, grid=grid),
                      blend if len(comp) else "normal", op_fn)
             continue
+        if src_name == "eyes":
+            comp.add(EyesLayer(spec, notes, width, height, fps,
+                               features_at=features_at,
+                               onset_loader=onset_loader, grid=grid),
+                     blend if len(comp) else "normal", op_fn)
+            continue
         if src_name == "chladni":
             comp.add(ChladniLayer(spec, notes, width, height, fps,
                                   features_at=features_at,
@@ -1202,6 +1539,14 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
                                    features_at=features_at,
                                    onset_loader=onset_loader),
                      "normal", None)
+            continue
+        if src_name == "rgb_noise":
+            comp.add(RgbNoiseLayer(spec, notes, fps, features_at=features_at,
+                                   onset_loader=onset_loader, grid=grid), "normal", None)
+            continue
+        if src_name == "grain":
+            comp.add(GrainLayer(spec, notes, fps, features_at=features_at,
+                                onset_loader=onset_loader, grid=grid), "normal", None)
             continue
         if src_name == "echoes":
             comp.add(EchoesLayer(spec, notes, fps,
@@ -1238,4 +1583,8 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
                      blend if len(comp) else "normal", op_fn)
             continue
         raise ValueError(f"unknown layer source {src_name!r}")
+    for i, window in enumerate(windows):               # post-ops are added without opacity: gate them here
+        src, blend, opacity = comp._layers[i]
+        if window is not None and hasattr(src, "process"):
+            comp._layers[i] = (src, blend, window)
     return comp
