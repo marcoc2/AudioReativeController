@@ -35,6 +35,39 @@ class MidiNote:
     velocity: int     # 1..127
     channel: int      # 0..15
     duration: float   # seconds; 0.0 if note_off not seen
+    track: str = ""   # the track's name in the file ("kick", "bass", ...)
+    track_index: int = -1
+
+
+def select_notes(notes: Sequence["MidiNote"], spec: dict) -> List["MidiNote"]:
+    """The notes a trigger spec asks for: ``notes: [36]`` (pitches), ``track: kick``
+    (a name, an index or a list of them) or both.
+
+    A DAW export puts every instrument on its own track, often all on channel 0
+    and with the same pitches (three tracks playing note 36), so the pitch alone
+    does not say who played. Tracks that share a name are taken together; a note
+    doubled on two tracks (one part feeding two synths) counts once.
+    """
+    out = list(notes)
+    if "track" in spec:
+        wanted = spec["track"] if isinstance(spec["track"], (list, tuple)) else [spec["track"]]
+        names = {str(w).strip().lower() for w in wanted if not isinstance(w, int)}
+        indexes = {w for w in wanted if isinstance(w, int)}
+        out = [n for n in out if n.track.lower() in names or n.track_index in indexes]
+        if not out:
+            known = sorted({f"{n.track_index}:{n.track}" for n in notes})
+            raise ValueError(f"track {spec['track']!r} matches no note; tracks in the file: {known}")
+        seen, unique = set(), []
+        for n in out:
+            key = (round(n.time, 4), n.pitch)
+            if key not in seen:
+                seen.add(key)
+                unique.append(n)
+        out = unique
+    if "notes" in spec or "track" not in spec:
+        pitches = set(spec.get("notes", []))
+        out = [n for n in out if n.pitch in pitches]
+    return out
 
 
 MeterChanges = Sequence[Tuple[int, Tuple[int, int]]]   # (bar number, 1-based) -> (num, den)
@@ -99,33 +132,48 @@ def read_midi(
     mid = mido.MidiFile(str(p))
 
     notes: List[MidiNote] = []
-    starts: Dict[Tuple[int, int], Tuple[float, int]] = {}
+    starts: Dict[Tuple[int, int, int], Tuple[float, int]] = {}
     bpm: Optional[float] = None
     ts_meta: Optional[Tuple[int, int]] = None
     ts_events: List[Tuple[float, Tuple[int, int]]] = []    # (seconds, signature), every one
 
-    t = 0.0
-    for msg in mid:
-        t += msg.time  # mido cumulative iteration yields seconds
+    # Merge the tracks ourselves (as mido does: by tick, stable) so every note
+    # remembers the track it came from.
+    events = []
+    names = []
+    for ti, track in enumerate(mid.tracks):
+        names.append(next((m.name.strip() for m in track if m.type == "track_name"), ""))
+        tick = 0
+        for msg in track:
+            tick += msg.time
+            events.append((tick, ti, msg))
+    events.sort(key=lambda e: e[0])
+
+    t, last_tick, tempo = 0.0, 0, 500000
+    for tick, ti, msg in events:
+        t += mido.tick2second(tick - last_tick, mid.ticks_per_beat, tempo)
+        last_tick = tick
         if msg.type == "set_tempo":
+            tempo = msg.tempo
             bpm = float(mido.tempo2bpm(msg.tempo))
         elif msg.type == "time_signature":
             ts_events.append((t, (int(msg.numerator), int(msg.denominator))))
             if ts_meta is None:
                 ts_meta = ts_events[-1][1]
         elif msg.type == "note_on" and msg.velocity > 0:
-            starts[(msg.channel, msg.note)] = (t, msg.velocity)
+            starts[(ti, msg.channel, msg.note)] = (t, msg.velocity)
         elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
-            key = (msg.channel, msg.note)
+            key = (ti, msg.channel, msg.note)
             if key in starts:
                 start_t, vel = starts.pop(key)
                 notes.append(MidiNote(time=start_t, pitch=msg.note, velocity=vel,
-                                      channel=msg.channel, duration=t - start_t))
+                                      channel=msg.channel, duration=t - start_t,
+                                      track=names[ti], track_index=ti))
 
     # flush unterminated notes (file truncated before note_off)
-    for (ch, pitch), (start_t, vel) in starts.items():
+    for (ti, ch, pitch), (start_t, vel) in starts.items():
         notes.append(MidiNote(time=start_t, pitch=pitch, velocity=vel,
-                              channel=ch, duration=0.0))
+                              channel=ch, duration=0.0, track=names[ti], track_index=ti))
     notes.sort(key=lambda n: n.time)
 
     if time_signature is None:

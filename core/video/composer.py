@@ -220,8 +220,8 @@ class ClipComposer:
                     wanted = set(spec["notes"])
                     src = [n for n in src if n.pitch in wanted]
             else:
-                pitches = set(spec.get("notes", []))
-                src = [n for n in notes if n.pitch in pitches]
+                from core.rhythm.midi_reader import select_notes
+                src = select_notes(notes, spec)
             min_vel = int(spec.get("min_velocity", 0))
             hits[name] = sorted(
                 (n for n in src if n.velocity >= min_vel), key=lambda n: n.time
