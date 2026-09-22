@@ -173,6 +173,8 @@ class Compositor:
                 # post-op: transforms the composite built so far (a ``bars:`` window gates it)
                 op = 1.0 if opacity is None else float(opacity(t))
                 if op <= 0.0:
+                    if hasattr(src, "observe"):         # a post-op with memory keeps watching while gated
+                        src.observe(out, t)
                     continue
                 done = src.process(out, t)
                 out = done if op >= 1.0 else blend_frames(out, done, "normal", op)
@@ -1436,6 +1438,55 @@ class RgbNoiseLayer:
         return (out * 255.0 + 0.5).astype(np.uint8)
 
 
+class SlitScanLayer:
+    """Post-op: slit-scan (``core/slitscan``, GPU): each line of the frame is a different moment.
+
+        - source: slitscan
+          mode: down                # down | up | right | left | radial | center: where the oldest moment is
+          depth: 60                 # frames kept (the longest delay); 60 at 720p is ~170 MB of VRAM
+          delay: 4                  # delay (frames) at the far end that is always there
+          amount: 30                # extra delay at full ``amount_from``
+          amount_from: texture.loudness   # the louder, the deeper the smear
+          wave: {track: kick, envelope: 0.5, depth: 25}   # each hit sends a band of the past across
+          bars: [[6, 14]]           # optional window; the buffer keeps filling outside it
+
+    Put it after the layers it should bend; it bends everything composited so far.
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int, fps: int,
+                 features_at=None, onset_loader=None, grid=None):
+        from core.slitscan import SlitScan
+        self.fps = fps
+        self.features_at = features_at
+        self.scan = SlitScan(width, height, depth=int(spec.get("depth", 60)), mode=spec.get("mode", "down"))
+        self._delay = float(spec.get("delay", 4.0))
+        self._amount = float(spec.get("amount", 30.0))
+        self._amount_from = spec.get("amount_from", "texture.loudness")
+        wspec = spec.get("wave")
+        self._wave_times = np.array(_layer_hits(wspec, notes, onset_loader, grid), dtype=float) if wspec else np.zeros(0)
+        self._wave_dur = max(1e-3, float(wspec.get("envelope", 0.5))) if wspec else 1.0
+        self._wave_depth = float(wspec.get("depth", 25.0)) if wspec else 0.0
+        self._level: Optional[float] = None
+        self._last_t: Optional[float] = None
+
+    def observe(self, frame: np.ndarray, t: float) -> None:
+        self.scan.push(frame)
+        self._last_t = t
+
+    def process(self, frame: np.ndarray, t: float) -> np.ndarray:
+        dt = 1.0 / self.fps if self._last_t is None else min(0.1, max(0.0, t - self._last_t))
+        self._last_t = t
+        feats = (self.features_at(t) or {}) if self.features_at else {}
+        level = _feature(feats, self._amount_from, 0.0)
+        self._level = level if self._level is None else self._level + (level - self._level) * (1 - math.exp(-dt / 0.2))
+        front, depth = -1.0, 0.0
+        i = int(np.searchsorted(self._wave_times, t, side="right")) - 1
+        if i >= 0 and t - self._wave_times[i] < self._wave_dur:
+            age = (t - self._wave_times[i]) / self._wave_dur
+            front, depth = age, self._wave_depth * (1.0 - age)
+        return self.scan.render(frame, self._delay + self._amount * self._level, front, depth)
+
+
 class EchoesLayer:
     """Post-op: dynamically blends previous frames to create temporal echoes
 
@@ -1727,6 +1778,10 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             continue
         if src_name == "rgb_noise":
             comp.add(RgbNoiseLayer(spec, notes, fps, features_at=features_at,
+                                   onset_loader=onset_loader, grid=grid), "normal", None)
+            continue
+        if src_name == "slitscan":
+            comp.add(SlitScanLayer(spec, notes, width, height, fps, features_at=features_at,
                                    onset_loader=onset_loader, grid=grid), "normal", None)
             continue
         if src_name == "grain":

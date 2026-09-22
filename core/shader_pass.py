@@ -45,19 +45,24 @@ class ShaderPass:
         self._out = self.ctx.simple_framebuffer((self.W, self.H), 3)
         self._mgl = moderngl
 
-    def draw(self, **uniforms) -> np.ndarray:
-        u = self.prog
-        uniforms.setdefault("u_aspect", self.W / self.H)
-        for name, value in uniforms.items():
-            if name in u:
-                u[name].value = value
-        self._fbo.use()
-        self._fbo.clear(0.0, 0.0, 0.0)
-        self._vao.render(self._mgl.TRIANGLE_STRIP)
-        self._out.use()
-        self._tex.use(0)
-        self._down["u_tex"].value = 0
-        self._down["u_ss"].value = self.ss
-        self._down_vao.render(self._mgl.TRIANGLE_STRIP)
-        img = np.frombuffer(self._out.read(components=3), dtype=np.uint8).reshape(self.H, self.W, 3)[::-1]
+    def draw(self, textures=None, **uniforms) -> np.ndarray:
+        """Render; ``textures`` maps texture units (1, 2, ...) to textures of this context."""
+        # several GPU layers each own a context: make this one current, or its calls land in another's
+        with self.ctx:
+            u = self.prog
+            uniforms.setdefault("u_aspect", self.W / self.H)
+            for name, value in uniforms.items():
+                if name in u:
+                    u[name].value = value
+            for unit, tex in (textures or {}).items():
+                tex.use(unit)
+            self._fbo.use()
+            self._fbo.clear(0.0, 0.0, 0.0)
+            self._vao.render(self._mgl.TRIANGLE_STRIP)
+            self._out.use()
+            self._tex.use(0)
+            self._down["u_tex"].value = 0
+            self._down["u_ss"].value = self.ss
+            self._down_vao.render(self._mgl.TRIANGLE_STRIP)
+            img = np.frombuffer(self._out.read(components=3), dtype=np.uint8).reshape(self.H, self.W, 3)[::-1]
         return img.copy()

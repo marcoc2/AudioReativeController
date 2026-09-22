@@ -135,13 +135,13 @@ Um instrumento imaginário com uma corda física para cada nota tocada.
 - Tarefas: onda 1D por corda com harmônicos e decaimento (analítico, sem simulação) · render 3D com reflexo metálico e desfoque de movimento na parte que vibra
 - Deps: —
 
-### 9. [ ] `slitscan` (post-op): atraso de tempo por linha
+### 9. [x] `slitscan` (post-op): atraso de tempo por linha → `core/slitscan.py`, `examples/esfolado_olhos_slitscan.yaml`
 Cada linha da tela mostra um instante diferente do passado.
 | Papel musical | Gesto |
 |---|---|
 | volume | quanto atraso (0 = imagem normal) |
 | bumbo | onda de atraso atravessa a tela |
-| forma da música | direção (vertical, horizontal, radial) |
+| forma da música | direção (vertical, horizontal, radial) — *hoje: uma camada `slitscan` por direção, cada uma com seu `bars:`* |
 - Tarefas: ring buffer de frames na GPU (textura 3D ou array) · `process(frame, t)` lê cada linha no frame certo
 - Deps: — (funciona sobre qualquer camada, inclusive `eyes`)
 

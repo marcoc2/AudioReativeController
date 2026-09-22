@@ -1,0 +1,37 @@
+# Esfolado — "Olhos no tempo": a parede de olhos passada por um slit-scan (GPU).
+# Cada linha da tela mostra um instante diferente: em cima é agora, embaixo é até ~1 s atrás,
+# então as sacadas da CAIXA e as piscadas descem pela tela como uma cortina; quanto mais alto
+# o volume, mais fundo o atraso; cada BUMBO manda uma faixa do passado atravessando o quadro.
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 #       --midi input/esfolado/esfolado.mid --midi-offset 0.018 #       --scene examples/esfolado_olhos_slitscan.yaml --start-time 13.351 --bars 9 #       --resolution 1280x720 --fps 30 --output render_output/esfolado_olhos_slitscan_c6-14.mp4
+video:
+  layers:
+    - source: eyes
+      rows: 5
+      seed: 3
+      supersample: 2
+      depth: 0.9
+      hue: 0.55
+      pupil_from: texture.loudness
+      wander: 0.15
+      harmony: {score: input/esfolado/sheetsage, snap: auto}
+      hits:
+        - {track: snare, gesture: saccade}
+        - {track: kick, gesture: dilate, envelope: 0.25}
+        - {track: [lead-legacy, synth-voice], gesture: blink, envelope: 0.22}
+    - source: slitscan                   # dobra no tempo tudo o que está acima (olhos)
+      mode: down
+      depth: 45
+      delay: 6
+      amount: 30
+      amount_from: texture.loudness
+      wave: {track: kick, envelope: 0.45, depth: 14}
+    - source: rgb_noise                  # pós-processamento: ruído RGB como o gegl:noise-rgb do GIMP
+      bars: [[6, 14]]
+      amount: 0.2
+      correlated: true
+      independent: true
+      linear: true
+      gaussian: true
+      burst: 0.15
+      trigger: {track: kick, envelope: 0.18}
