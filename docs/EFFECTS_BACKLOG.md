@@ -147,6 +147,95 @@ Cada linha da tela mostra um instante diferente do passado.
 
 ---
 
+## Família "o vídeo como matéria" (lê os frames dos `--clips`)
+
+Efeitos que analisam o quadro composto até ali (os clipes, ou qualquer camada
+abaixo) e extraem dele algo para brincar: os **contornos** ou um **mapa de alturas**
+(brilho do pixel = altura). Entram como post-op (`process`) ou como camada que se
+pinta com o que está embaixo (`frame_at_over`, como a chama com `paint: under`).
+Pensados primeiro para clipes cartoon, cujo traço limpo dá contornos fechados.
+
+### 10. [ ] Base compartilhada "leitura do quadro"
+Um passe de GPU que recebe o frame e devolve, em texturas: contornos (Sobel ou
+diferença de gaussianas, com limiar e engrossamento opcional), máscara de regiões
+fechadas, e altura suavizada (luminância com blur). Os itens abaixo leem daqui.
+- Tarefas: `core/frame_read.py` sobre o `ShaderPass` (upload do frame, passes em ping-pong) · parâmetros de limiar/espessura no YAML · testes com imagens sintéticas (quadrado desenhado, gradiente)
+- Deps: —
+- Pronto quando: um desenho sintético dá contornos fechados, e um gradiente dá uma rampa de altura
+
+### 11. [ ] `drops`: gota que se espalha até os contornos  ⭐ ideia do Marco
+A cada ataque cai uma gota num ponto; ela pega a cor do pixel onde caiu e se
+espalha, como um balde de tinta lento, até bater nos contornos do desenho.
+| Papel musical | Gesto |
+|---|---|
+| caixa (ou trilha escolhida) | solta uma gota (posição por hash, ou no ponto mais claro/escuro) |
+| velocity | velocidade de espalhamento |
+| duração da nota / envelope | quanto tempo a mancha fica antes de secar e sumir |
+| acorde | cor da gota: a do pixel onde caiu, ou a da paleta do acorde |
+- Tarefas: crescimento de região na GPU (a mancha dilata alguns pixels por frame e para na máscara de contornos) · várias manchas vivas ao mesmo tempo, cada uma com cor e idade · borda da mancha com leve brilho/umidade · o contorno pode deixar vazar um pouco (limiar), para gotas atravessarem traços finos
+- Deps: 10
+
+### 12. [ ] `neon_lines`: só os contornos, em neon
+| Papel musical | Gesto |
+|---|---|
+| acorde | cor do neon |
+| compasso (fase) | o traço vai sendo desenhado ao longo do compasso |
+| bumbo | pulso de brilho (glow) |
+- Deps: 10
+
+### 13. [ ] `recolor`: recolorir o cartoon por regiões
+Cada região fechada pelos contornos ganha uma cor chapada; a paleta troca a cada acorde.
+| Papel musical | Gesto |
+|---|---|
+| acorde | paleta (a região mantém o "índice" de cor, a paleta muda) |
+| caixa | embaralha quais regiões ficam com qual cor |
+- Tarefas: rotular regiões (componentes conexos na GPU por propagação de rótulo, ou na CPU em baixa resolução) · manter o rótulo estável entre frames (casar regiões pelo centroide)
+- Deps: 10
+
+### 14. [ ] `disintegrate`: o desenho vira poeira
+Partículas nascem sobre os contornos, com a cor do traço; o bumbo as sopra para longe e o desenho se refaz.
+- Deps: 10 (as partículas na GPU; não estender `core/particles*.py`, legado congelado)
+
+### 15. [ ] `relief`: o vídeo esculpido
+O frame vira superfície 3D (barro, metal batido); a luz gira no ritmo; a câmera inclina com o grave.
+- Deps: 10 (altura)
+
+### 16. [ ] `pinscreen`: brinquedo de pinos
+Uma grade de pinos empurrados pelo brilho do vídeo; o bumbo empurra todos de uma vez.
+- Deps: 10 (altura)
+
+### 17. [ ] `ferrofluid` pintado pelo vídeo
+Extensão do item 4: o campo magnético vem do brilho do vídeo (os espinhos crescem onde é claro) e o reflexo usa as cores do quadro.
+- Deps: 4, 10 · o que menos dá trabalho: o motor já existe
+
+### 18. [ ] `ripples`: superfície de água sobre o vídeo
+Cada batida cai uma gota; as ondulações (equação de onda de verdade, ping-pong na GPU) entortam o vídeo por refração e dão brilho especular.
+- Deps: — (combina com 11: a mesma gota pode espalhar cor e ondular)
+
+### 19. [ ] `topo`: mapa topográfico
+Curvas de nível do brilho do vídeo; as linhas sobem e descem com o grave.
+- Deps: 10 (altura)
+
+### 20. [ ] `shockwave` (post-op): onda de choque nos contornos  ⭐ ideia do Marco
+Vem do gesto `ring` da areia (`core/chladni.py`, `_gesture`), que ficou ótimo no trecho
+de piano do `esfolado.mp4` (compassos 22–35): a cada nota um anel nasce e se expande
+(~0,6 s), dobra a imagem por onde passa como uma lente e tinge **só as linhas** da
+figura (a areia branca vira rosa), deixando o fundo escuro como está. Aqui o mesmo,
+sobre qualquer imagem, pensado para cartoons: as cores do cartoon são **invertidas**,
+então o traço preto vira linha branca sobre fundo escuro, como a areia, e a onda
+atravessa o desenho.
+| Papel musical | Gesto |
+|---|---|
+| trilha escolhida (no esfolado era o piano, `track: 7`) | cada nota solta um anel; acordes soltam anéis sobrepostos |
+| velocity | força do empurrão e do brilho do anel |
+| acorde | cor que a onda dá às linhas |
+| bumbo (opcional, como o `punch` do `kick-2`) | a imagem toda incha um pouco e dá um flash |
+- Tarefas: inversão opcional (`invert: true`) antes de tudo · anel gaussiano como na areia (velocidade, largura, vida, empurrão radial) virando deslocamento de pixels (lente) na GPU · tingir só onde há linha: máscara pelo brilho (linhas claras depois da inversão) ou pelos contornos do item 10 · vários anéis vivos ao mesmo tempo · centro do anel: meio da tela (como na areia), ponto por hash, ou onde caiu a gota do item 11
+- Referência dos números da areia: `RING_SPEED = 3.2`, `RING_WIDTH = 0.12`, `RING_PUSH = 0.06`, `RING_LIFE = 0.6` (unidades de campo: a tela tem 2 de altura)
+- Deps: — (máscara por brilho); 10 melhora a máscara em vídeos que não são cartoon
+
+---
+
 ## Ordem sugerida
 
 ```
@@ -156,6 +245,13 @@ Cada linha da tela mostra um instante diferente do passado.
 9 slitscan                   (post-op barato, multiplica tudo o que já existe)
 5 ink, 6 mud, 7 murmuration  (conforme a próxima música pedir)
 3 hive, 8 strings
+
+10 leitura do quadro → 11 drops   (vídeo como matéria: a gota primeiro)
+                    → 12 neon_lines, 13 recolor, 14 disintegrate
+                    → 15 relief, 16 pinscreen, 19 topo
+4 + 10 → 17 ferrofluid pintado  (resultado rápido: o motor já existe)
+18 ripples                      (independente; par natural da 11)
+20 shockwave                    (independente; cartoon invertido + a onda da areia)
 ```
 
 A ordem cede à próxima música: se o clipe da vez for **Deserto de lama**,
