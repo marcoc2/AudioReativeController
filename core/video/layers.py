@@ -1500,6 +1500,10 @@ class ShockwaveLayer:
           width: 0.12
           push: 0.06                # how far the ring pushes the picture
           life: 0.6                 # seconds a ring lasts
+          glow: 1.0                 # how hard the ring lights the lines
+          swell: 0.05               # how much a punch enlarges the picture
+          split: 0.0                # the ring tears red and blue apart (0 = off, 1 = as far as it pushes)
+          scatter: 0.0              # sand: the ring scatters the picture into grains (0 = a clean lens)
           punch: {track: kick-2, envelope: 0.3}   # the picture swells and flashes on a hit
           hue: 0.9                  # colour the rings give the lines; a ``harmony:`` block lets the chord pick it
           sat: 0.75
@@ -1513,7 +1517,9 @@ class ShockwaveLayer:
         self.aspect = width / height
         self.wave = Shockwave(width, height, invert=bool(spec.get("invert", True)), fill=float(spec.get("fill", 0.3)),
                               ink=float(spec.get("ink", 1.0)), width_=float(spec.get("width", RING_WIDTH)),
-                              push=float(spec.get("push", RING_PUSH)))
+                              push=float(spec.get("push", RING_PUSH)), glow=float(spec.get("glow", 1.0)),
+                              swell=float(spec.get("swell", 0.05)), split=float(spec.get("split", 0.0)),
+                              scatter=float(spec.get("scatter", 0.0)))
         self._max = MAX_RINGS
         self._speed = float(spec.get("speed", RING_SPEED))
         self._life = max(1e-3, float(spec.get("life", RING_LIFE)))
@@ -1555,7 +1561,8 @@ class ShockwaveLayer:
                 step = (target - self.hue + 0.5) % 1.0 - 0.5             # round the colour wheel the short way
                 self.hue += step * (1 - math.exp(-dt / 1.2))
         punch = float(self._punch(t)) if self._punch else 0.0
-        return self.wave.render(frame, rings, punch=punch, hue=self.hue, sat=self._sat)
+        return self.wave.render(frame, rings, punch=punch, hue=self.hue, sat=self._sat,
+                                frame_index=int(round(t * self.fps)))
 
 
 class EchoesLayer:

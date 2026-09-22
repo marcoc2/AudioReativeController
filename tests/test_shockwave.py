@@ -64,3 +64,14 @@ def test_layer_rings_on_notes_and_punches():
         ShockwaveLayer({**spec, "center": "corner"}, notes, 160, 90, 24)
     with pytest.raises(ValueError):
         build_compositor(None, {"layers": [spec]}, notes, 160, 90, fps=24)   # a post-op is not a base
+
+
+def test_scatter_turns_the_ring_to_sand_that_replays():
+    s = _wave(scatter=1.0)
+    ring = [(0.0, 0.0, 0.44, 1.0)]
+    a = s.render(_drawing(), ring, frame_index=5)
+    assert np.array_equal(a, s.render(_drawing(), ring, frame_index=5))       # same frame, same grains
+    assert not np.array_equal(a, s.render(_drawing(), ring, frame_index=6))   # the next frame, new grains
+    clean = _wave().render(_drawing(), ring)
+    assert np.abs(a[2:8, 2:8].astype(int) - clean[2:8, 2:8]).max() <= 2      # far from the ring: the same ground
+    assert np.abs(a[20:30, 70:90].astype(int) - clean[20:30, 70:90]).mean() > 10   # in the ring: scattered

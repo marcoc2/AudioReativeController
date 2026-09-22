@@ -18,5 +18,12 @@ video:
       invert: true
       fill: 0.3
       rings: {track: 7}                  # o piano (a trilha 7; há duas chamadas "piano")
+      push: 0.14                         # empurra bem mais que a areia (0.06)
+      width: 0.17                        # anel mais largo
+      life: 0.8                          # e mais demorado
+      glow: 1.8                          # acende forte as linhas e dá um clarão no fundo
+      split: 1.0                         # rasga vermelho e azul por onde passa
+      swell: 0.10                        # o kick-2 incha o dobro
+      scatter: 1.0                       # areia: a onda espalha a imagem em grãos, como o Chladni
       punch: {track: kick-2, envelope: 0.30}
       harmony: {score: input/esfolado/sheetsage, snap: auto}
