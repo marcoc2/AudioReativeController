@@ -74,14 +74,15 @@ Favo hexagonal de cera com larvas se mexendo sob o opérculo.
 
 ## Família física (realismo)
 
-### 4. [ ] `ferrofluid`: ferrofluido  ⭐ recomendado para começar
+### 4. [x] `ferrofluid`: ferrofluido → `core/ferrofluid.py`, `examples/esfolado_ferrofluido.yaml`
 Líquido preto espelhado que forma espinhos sob um campo magnético.
 | Papel musical | Gesto |
 |---|---|
 | subgrave / stem de baixo | altura dos espinhos |
 | bumbo | pulso do ímã: espinhos disparam e voltam com mola |
 | acorde | rotação/rearranjo do padrão de espinhos |
-| forma da música (`bars:`) | número de ímãs (1 no verso, vários no refrão) |
+| cada trilha MIDI escolhida (bumbo, caixa, baixo…) | o seu ímã: um pulso de mola a cada nota |
+| forma da música (`bars:`) | número de ímãs (1 no verso, vários no refrão) — *ainda não: hoje os ímãs são fixos* |
 - Tarefas: campo de altura com espinhos em arranjo hexagonal deformado pelo campo · raymarch do heightfield · material: reflexo de ambiente cromado quase preto, fresnel forte · física simples (mola amortecida por espinho) em Python, uniforms na GPU
 - Deps: —
 - Por que primeiro: maior impacto visual, fica fotorrealista, lê o grave de forma óbvia

@@ -892,6 +892,96 @@ class MouthsLayer:
                                tremble=tremble, tint=self.tint)
 
 
+class FerrofluidLayer:
+    """A pool of ferrofluid under magnets (``core/ferrofluid``, GPU): the music is the field.
+
+        - source: ferrofluid
+          supersample: 2
+          level_from: subbands.bass   # the steady pull of every magnet (0..1): the low end
+          base: 0.25                  # pull that is always there, so the pool never goes flat
+          magnets:                    # up to 4; each can answer to its own part of the song
+            - {track: kick, at: [0, 0.35], strength: 1.0, pulse: 1.0}
+            - {track: snare, at: [-1.0, 0.8], strength: 0.6, pulse: 0.8}
+            - {at: [1.1, 1.4], strength: 0.4}          # no trigger: only the steady pull
+          spring: {freq: 2.5, damping: 0.3}           # how a pulse rings: spikes shoot up and wobble back
+          harmony: {score: input/song/sheetsage, snap: auto}   # each chord turns the spike lattice
+          spin: 0.02                  # slow turn of the lattice (radians per second)
+          light_hue: 0.05             # tint of the side strip lights ...
+          light_sat: 0.0              # ... 0 keeps the studio white
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int,
+                 fps: int, features_at=None, onset_loader=None, grid=None):
+        from core.ferrofluid import MAX_MAGNETS, FerrofluidSystem
+        self.fps = fps
+        self.features_at = features_at
+        self.sys = FerrofluidSystem(width, height, supersample=int(spec.get("supersample", 2)),
+                                    spacing=float(spec.get("spacing", 0.11)))
+        self._level_from = spec.get("level_from", "subbands.bass")
+        self._base = float(spec.get("base", 0.25))
+        mspecs = spec.get("magnets") or [{"at": [0.0, 0.35]}]
+        if len(mspecs) > MAX_MAGNETS:
+            raise ValueError(f"ferrofluid: at most {MAX_MAGNETS} magnets")
+        self._magnets = []
+        for m in mspecs:
+            trig = {k: v for k, v in m.items() if k not in ("at", "strength", "pulse")}
+            hits = _layer_events(trig, notes, onset_loader, grid) if trig else []
+            self._magnets.append({
+                "at": tuple(float(c) for c in m.get("at", (0.0, 0.35))),
+                "strength": float(m.get("strength", 1.0)), "pulse": float(m.get("pulse", 1.0)),
+                "times": np.array([e.time for e in hits], dtype=float),
+                "vel": np.array([e.velocity / 127.0 for e in hits], dtype=float),
+                "x": 0.0, "v": 0.0, "n": 0})
+        spring = spec.get("spring") or {}
+        self._omega = 2 * math.pi * float(spring.get("freq", 2.5))
+        self._zeta = float(spring.get("damping", 0.3))
+        hspec = spec.get("harmony")
+        self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._chord_times = np.array([e.time for e in self._chords], dtype=float)
+        self._spin = float(spec.get("spin", 0.02))
+        self._hue = float(spec.get("light_hue", 0.05))
+        self._sat = float(spec.get("light_sat", 0.0))
+        self._angle = 0.0
+        self._level: Optional[float] = None
+        self._last_t: Optional[float] = None
+
+    def _ring(self, m: dict, t: float, dt: float) -> float:
+        """Kick the magnet's spring with every hit up to ``t`` and let it ring for ``dt``."""
+        n = int(np.searchsorted(m["times"], t, side="right"))
+        if n < m["n"] or self._last_t is None:           # first frame, or time went back: start fresh,
+            m["x"] = m["v"] = 0.0                         # hearing only the hits of this frame
+            m["n"] = int(np.searchsorted(m["times"], t - dt, side="right"))
+        if n >= m["n"]:
+            for i in range(m["n"], n):
+                m["v"] += m["pulse"] * m["vel"][i] * self._omega * 0.8
+        m["n"] = n
+        steps = max(1, int(math.ceil(dt * 240)))         # semi-implicit Euler, stable at 240 Hz
+        h = dt / steps
+        for _ in range(steps):
+            m["v"] += (-self._omega ** 2 * m["x"] - 2 * self._zeta * self._omega * m["v"]) * h
+            m["x"] += m["v"] * h
+        return m["x"]
+
+    def frame_at(self, t: float) -> np.ndarray:
+        dt = 1.0 / self.fps if self._last_t is None else min(0.1, max(0.0, t - self._last_t))
+        feats = (self.features_at(t) or {}) if self.features_at else {}
+        level = _feature(feats, self._level_from, 0.0)
+        self._level = level if self._level is None else self._level + (level - self._level) * (1 - math.exp(-dt / 0.12))
+        mags = []
+        for m in self._magnets:
+            pull = m["strength"] * (self._base + 2.0 * self._level) + max(-0.3, self._ring(m, t, dt))
+            mags.append((m["at"][0], m["at"][1], max(0.0, pull)))
+        target = 0.0
+        if len(self._chords):
+            i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
+            if i >= 0:
+                target = VeilsLayer.hue_of_root(self._chords[i].pitch) * (math.pi / 3)   # the lattice repeats every 60 degrees
+        step = (target - self._angle + math.pi / 6) % (math.pi / 3) - math.pi / 6    # the short way round
+        self._angle += step * (1 - math.exp(-dt / 0.8))
+        self._last_t = t
+        return self.sys.render(t, magnets=mags, rotation=self._angle + self._spin * t, hue=self._hue, sat=self._sat)
+
+
 class OrbitersLayer:
     """Nested orbiting mandalas (layer source).
 
@@ -1603,6 +1693,12 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             comp.add(MouthsLayer(spec, notes, width, height, fps,
                                  features_at=features_at,
                                  onset_loader=onset_loader, grid=grid),
+                     blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "ferrofluid":
+            comp.add(FerrofluidLayer(spec, notes, width, height, fps,
+                                     features_at=features_at,
+                                     onset_loader=onset_loader, grid=grid),
                      blend if len(comp) else "normal", op_fn)
             continue
         if src_name == "chladni":

@@ -7,8 +7,8 @@ holds the GLSL every such effect shares and a small GPU runner:
     FLESH_GLSL      noise, the cell lookup (seed, smooth distance to the edge and its
                     gradient, nearest neighbour), skin albedo and lighting, the
                     rounded shoulder into the seam, the ACES finish
-    FleshWall       a moderngl context that renders a fragment shader supersampled
-                    and averages it down on the GPU
+    FleshWall       a ``ShaderPass`` (core/shader_pass) that also sets the wall's rows,
+                    seed and light
 
 An effect writes its own ``main()`` after ``FLESH_GLSL``: it calls ``fleshCell()``
 to know which cell it is in, builds its organ in the cell's frame, lights the
@@ -19,6 +19,8 @@ skin around it with ``skinBase`` / ``seamFlesh`` / ``skinLight`` and ends with
 from __future__ import annotations
 
 import numpy as np
+
+from core.shader_pass import ShaderPass
 
 FLESH_HEADER = """
 #version 330
@@ -98,63 +100,14 @@ vec3 finish(vec3 col){
 }
 """
 
-_VS = """
-#version 330
-in vec2 in_pos; out vec2 v_uv;
-void main(){ v_uv = in_pos * 0.5 + 0.5; gl_Position = vec4(in_pos, 0.0, 1.0); }
-"""
 
-_DOWN_FS = """
-#version 330
-in vec2 v_uv; out vec4 f_color;
-uniform sampler2D u_tex; uniform int u_ss;
-void main(){
-    ivec2 base = ivec2(gl_FragCoord.xy) * u_ss; vec3 acc = vec3(0.0);
-    for (int j = 0; j < u_ss; j++) for (int i = 0; i < u_ss; i++) acc += texelFetch(u_tex, base + ivec2(i, j), 0).rgb;
-    f_color = vec4(acc / float(u_ss * u_ss), 1.0);
-}
-"""
-
-
-class FleshWall:
-    """Runs a flesh-wall fragment shader: ``render(**uniforms)`` -> uint8 H x W x 3."""
+class FleshWall(ShaderPass):
+    """Runs a flesh-wall fragment shader: ``draw(light, **uniforms)`` -> uint8 H x W x 3."""
 
     def __init__(self, fragment_shader: str, width: int, height: int, rows: float = 5.0,
                  seed: int = 0, supersample: int = 2):
-        import moderngl
-        self.W, self.H = int(width), int(height)
-        self.ss = max(1, int(supersample))
+        super().__init__(fragment_shader, width, height, supersample)
         self.rows, self.seed = float(rows), float(seed)
-        self.ctx = moderngl.create_standalone_context()
-        self.prog = self.ctx.program(vertex_shader=_VS, fragment_shader=fragment_shader)
-        quad = np.array([-1, -1, 1, -1, -1, 1, 1, 1], dtype="f4")
-        self._vbo = self.ctx.buffer(quad.tobytes())
-        self._vao = self.ctx.vertex_array(self.prog, [(self._vbo, "2f", "in_pos")])
-        # supersample into a texture, average it down on the GPU (a numpy mean-pool of the
-        # big image costs ~120 ms at 720p; this costs ~1 ms)
-        self._tex = self.ctx.texture((self.W * self.ss, self.H * self.ss), 3)
-        self._fbo = self.ctx.framebuffer([self._tex])
-        self._down = self.ctx.program(vertex_shader=_VS, fragment_shader=_DOWN_FS)
-        self._down_vao = self.ctx.vertex_array(self._down, [(self._vbo, "2f", "in_pos")])
-        self._out = self.ctx.simple_framebuffer((self.W, self.H), 3)
-        self._mgl = moderngl
 
     def draw(self, light: float = 1.0, **uniforms) -> np.ndarray:
-        u = self.prog
-        u["u_aspect"].value = self.W / self.H
-        u["u_rows"].value = self.rows
-        u["u_seed"].value = self.seed
-        u["u_light"].value = float(light)
-        for name, value in uniforms.items():
-            if name in u:                                   # the compiler drops unused uniforms
-                u[name].value = value
-        self._fbo.use()
-        self._fbo.clear(0.0, 0.0, 0.0)
-        self._vao.render(self._mgl.TRIANGLE_STRIP)
-        self._out.use()
-        self._tex.use(0)
-        self._down["u_tex"].value = 0
-        self._down["u_ss"].value = self.ss
-        self._down_vao.render(self._mgl.TRIANGLE_STRIP)
-        img = np.frombuffer(self._out.read(components=3), dtype=np.uint8).reshape(self.H, self.W, 3)[::-1]
-        return img.copy()
+        return super().draw(u_rows=self.rows, u_seed=self.seed, u_light=float(light), **uniforms)
