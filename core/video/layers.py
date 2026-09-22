@@ -809,6 +809,89 @@ class EyesLayer:
                                pupil=min(1.0, 0.15 + 0.5 * pupil + 0.6 * dilate), blink=blink, hue=self.hue)
 
 
+class MouthsLayer:
+    """A Voronoi wall of singing mouths (``core/mouths``, GPU), the companion of ``eyes``.
+
+        - source: mouths
+          rows: 5
+          seed: 3
+          supersample: 2
+          voice: stems_output/<hash>/demucs/<song>_(Vocals)_htdemucs_6s.flac
+                                 # the vocal stem: its level and F1 drop the jaw, its F2
+                                 # spreads the lips ("i") or rounds them ("u"); see core/voice
+          jaw_from: stems.vocals # without ``voice:``, a feature that opens the mouths (0..1)
+          harmony: {score: input/song/sheetsage, snap: auto}   # the chord bruises the lips
+          hits:                  # gestures: clench (teeth bared) | tremble | gasp (jaw drops)
+            - {track: snare, gesture: clench, envelope: 0.2}
+            - {track: kick, gesture: tremble, envelope: 0.15}
+    """
+
+    GESTURES = ("clench", "tremble", "gasp")
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int,
+                 fps: int, features_at=None, onset_loader=None, grid=None):
+        from core.mouths import MouthsSystem
+        self.fps = fps
+        self.features_at = features_at
+        self.sys = MouthsSystem(width, height, rows=float(spec.get("rows", 5)), seed=int(spec.get("seed", 0)),
+                                supersample=int(spec.get("supersample", 2)))
+        self._voice = None
+        if spec.get("voice"):
+            from core.voice import read_voice
+            self._voice = read_voice(spec["voice"])
+        self._jaw_from = spec.get("jaw_from", "stems.vocals")
+        hspec = spec.get("harmony")
+        self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._chord_times = np.array([e.time for e in self._chords], dtype=float)
+        self._gestures = []
+        for g in spec.get("hits") or []:
+            if g.get("gesture") not in self.GESTURES:
+                raise ValueError(f"mouths: unknown gesture {g.get('gesture')!r} (use one of {self.GESTURES})")
+            self._gestures.append((g["gesture"], np.array(_layer_hits(g, notes, onset_loader, grid), dtype=float),
+                                   max(1e-3, float(g.get("envelope", 0.2)))))
+        self._smooth: dict = {}
+        self._last_t: Optional[float] = None
+        self.tint = float(spec.get("tint", 0.0))
+
+    def _lowpass(self, name, value, dt, tau):
+        prev = self._smooth.get(name, value)
+        prev += (value - prev) * (1 - math.exp(-dt / tau)) if dt > 0 else 0.0
+        self._smooth[name] = prev
+        return prev
+
+    def frame_at(self, t: float) -> np.ndarray:
+        dt = 1.0 / self.fps if self._last_t is None else min(0.1, max(0.0, t - self._last_t))
+        self._last_t = t
+        if self._voice is not None:
+            jaw, spread, _ = self._voice.at(t)
+        else:
+            feats = (self.features_at(t) or {}) if self.features_at else {}
+            jaw, spread = _feature(feats, self._jaw_from, 0.0), 0.0
+        # the jaw drops fast and closes a little slower, as a real one does
+        tau = 0.025 if jaw > self._smooth.get("jaw", 0.0) else 0.05
+        jaw = self._lowpass("jaw", jaw, dt, tau)
+        spread = self._lowpass("spread", spread, dt, 0.06)
+        clench = tremble = gasp = 0.0
+        for gesture, times, dur in self._gestures:
+            i = int(np.searchsorted(times, t, side="right")) - 1
+            if i < 0:
+                continue
+            k = max(0.0, 1.0 - (t - times[i]) / dur)
+            if gesture == "clench":
+                clench = max(clench, k)
+            elif gesture == "tremble":
+                tremble = max(tremble, k)
+            else:
+                gasp = max(gasp, math.sin(math.pi * min(1.0, (t - times[i]) / dur)))
+        if len(self._chords):
+            i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
+            if i >= 0:
+                target = VeilsLayer.hue_of_root(self._chords[i].pitch)
+                self.tint += (target - self.tint) * (1 - math.exp(-dt / 1.2))
+        return self.sys.render(t, jaw=max(jaw, 0.9 * gasp), spread=spread * (1.0 - gasp), clench=clench,
+                               tremble=tremble, tint=self.tint)
+
+
 class OrbitersLayer:
     """Nested orbiting mandalas (layer source).
 
@@ -1514,6 +1597,12 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             comp.add(EyesLayer(spec, notes, width, height, fps,
                                features_at=features_at,
                                onset_loader=onset_loader, grid=grid),
+                     blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "mouths":
+            comp.add(MouthsLayer(spec, notes, width, height, fps,
+                                 features_at=features_at,
+                                 onset_loader=onset_loader, grid=grid),
                      blend if len(comp) else "normal", op_fn)
             continue
         if src_name == "chladni":

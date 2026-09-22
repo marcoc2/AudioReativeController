@@ -1,0 +1,30 @@
+# Esfolado — "Bocas": uma parede de bocas em células de Voronoi (GPU), par dos "Olhos".
+# Todas cantam a voz da música: o volume e o F1 do stem de voz abrem a mandíbula, o F2
+# estica os lábios ("i") ou arredonda ("u"). Cada CAIXA trinca os dentes, cada BUMBO faz
+# os lábios tremerem, o lead faz todas ofegarem; o acorde (SheetSage2) arroxeia os lábios.
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --scene examples/esfolado_bocas.yaml --start-time 13.351 --bars 9 \
+#       --resolution 1280x720 --fps 30 --output render_output/esfolado_bocas_c6-14.mp4
+video:
+  layers:
+    - source: mouths
+      rows: 5
+      seed: 3
+      supersample: 2
+      voice: stems_output/8462295e127671d8d229d1b8bd597e3f/demucs/esfolado_mix_20_09_2026_(Vocals)_htdemucs_6s.flac
+      harmony: {score: input/esfolado/sheetsage, snap: auto}
+      hits:
+        - {track: snare, gesture: clench, envelope: 0.18}
+        - {track: kick, gesture: tremble, envelope: 0.15}
+        - {track: [lead-legacy, synth-voice], gesture: gasp, envelope: 0.3}
+    - source: rgb_noise                  # pós-processamento: ruído RGB como o gegl:noise-rgb do GIMP
+      bars: [[6, 14]]
+      amount: 0.2
+      correlated: true
+      independent: true
+      linear: true
+      gaussian: true
+      burst: 0.15
+      trigger: {track: kick, envelope: 0.18}
