@@ -40,6 +40,10 @@ def main() -> None:
     ap.add_argument("--resolution",  default="854x480", help="WxH pixels")
     ap.add_argument("--output",      default=None,   help="Output MP4 path")
     ap.add_argument("--midi-offset", type=float, default=0.0)
+    ap.add_argument("--clip-fit", choices=["contain", "cover"], default="contain",
+                    help="contain: letterbox clips of another aspect; cover: fill the frame and crop")
+    ap.add_argument("--stems", action="store_true",
+                    help="Separate stems (demucs, GPU; cached in stems_output/) so layers can read features['stems']")
     ap.add_argument("--meter", default=None, metavar="BAR:N/D,...",
                     help="Meter changes the MIDI file does not carry, by DAW bar number, e.g. 22:6/4,27:5/4")
     ap.add_argument("--gravity-peak",   type=float, default=None,
@@ -107,7 +111,7 @@ def main() -> None:
         if not args.clips:
             raise SystemExit("--clips is required (this scene uses clip layers)")
         print(f"Loading clips from {args.clips}")
-        library = ClipLibrary(args.clips, W, H, fps, cache_size=args.cache_size)
+        library = ClipLibrary(args.clips, W, H, fps, cache_size=args.cache_size, fit=args.clip_fit)
         composer = ClipComposer(library, grid, midi_notes, video_cfg)
 
     # generator and post-op layers need per-frame audio features
@@ -116,7 +120,7 @@ def main() -> None:
            for l in video_cfg.get("layers") or []):
         from core.feature_extractor import AudioFeatureExtractor
         print("Extracting audio features for layers…")
-        extractor = AudioFeatureExtractor(args.file, fps=fps, skip_separation=True)
+        extractor = AudioFeatureExtractor(args.file, fps=fps, skip_separation=not args.stems)
         features_at = lambda t: extractor.get_features_at_time(t, apply_gate=False)
 
     stack = build_compositor(composer, video_cfg, midi_notes, W, H,

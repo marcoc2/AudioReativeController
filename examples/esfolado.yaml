@@ -1,0 +1,123 @@
+# Esfolado — reggaeton psicodélico com um miolo de luto. Orquestrado pela forma da música:
+# cada trecho tem os seus elementos, ligados e desligados por compasso (bars:).
+#
+#   python tools/run_sheetsage.py ...            (uma vez: input/esfolado/sheetsage/)
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 --stems \
+#       --clips C:/Users/marco/Videos/ltx2 --clip-fit cover --seed 3 \
+#       --scene examples/esfolado.yaml --bars 0 --resolution 1280x720 --fps 30 \
+#       --output render_output/esfolado.mp4
+#
+# Refrão (2–21) e volta (36–47): a base é um vídeo da pasta, sorteado de novo a cada
+# compasso; cada CAIXA inverte o sentido dele (reverse). O vídeo cru fica escurecido e
+# só aparece em cor plena através da mandala: um fractal flame (GPU) PINTADO com o vídeo
+# que está embaixo (paint: under) — cada ponto do fractal toma a cor do quadro sob ele,
+# e a simetria 6 caleidoscopa o vídeo. Cada nota do ACID tinge o resto (paint_mix), cada
+# nota do BAIXO re-posa a figura. Bumbo incha, caixa doura, chimbal torce, chimbal
+# aberto e lead soltam ondas de choque. Por cima, um túnel de realimentação que gira a
+# cor e pulsa no bumbo, e aberração cromática na caixa.
+# Luto (22–35): vídeo e chama saem; areia fria numa placa de Chladni vibrada pelo stem
+# de PIANO (demucs); o acorde (SheetSage2) escolhe a figura; cada nota do piano é uma gota;
+# kick-2 é um baque surdo; no 29–35 cada nota do lead acende a areia por um instante.
+# 48–51: só o baixo, a chama da volta se apaga devagar.
+video:
+  clip_per_bar: true
+  clip_order: random
+  triggers:
+    snare_flip: {track: snare, actions: [reverse]}
+  layers:
+    - source: clips
+      bars: [[2, 21], [36, 51]]
+
+    - source: solid                      # escurece o vídeo cru: a cor plena fica para a mandala
+      color: [0, 0, 0]
+      opacity: 0.88
+      bars: [[2, 21], [36, 51]]
+
+    - source: flame                      # refrão: mandala feita do vídeo
+      blend: add
+      bars: [[2, 22]]
+      fade_out: 1
+      genome: {random: 32}
+      symmetry: 6
+      samples: 10
+      supersample: 2
+      white: 60
+      exposure: 2.0
+      paint: under
+      paint_mix: 0.92
+      paint_gain: 6            # o solid acima escurece o vídeo a 12%: aqui ele volta à cor plena
+      spin: 0.05
+      pose: 0.35
+      glide: 0.25
+      root: 5
+      hue_notes: {track: acid}
+      pose_notes: {track: bass}
+      hits:
+        - {track: kick, gesture: punch, envelope: 0.14}
+        - {track: snare, gesture: sizzle, envelope: 0.12}
+        - {track: ez-hihat, notes: [42, 44], gesture: twist, envelope: 0.08}
+        - {track: ez-hihat, notes: [46], gesture: ring}
+        - {track: [lead-legacy, synth-voice], gesture: ring}
+
+    - source: chladni                    # o luto
+      blend: add
+      bars: [[22, 35]]
+      fade_in: 0.5
+      seed: 11
+      grains: 180000
+      hue: 0.60
+      root: 6
+      modes: {6: [2, 3], 5: [1, 4], 8: [3, 4], 3: [2, 5]}
+      fineness: [0.8, 1.3]
+      pour: 1.2
+      level_from: stems.piano
+      level_gain: 1.6
+      harmony: {score: input/esfolado/sheetsage, snap: auto, bloom: 2.0}
+      hits:
+        - {track: 7, gesture: ring}
+        - {track: kick-2, gesture: punch, envelope: 0.30}
+        - {track: lead-legacy, gesture: sizzle, envelope: 0.45}
+        - {track: [8, synth], gesture: twist, envelope: 0.35}
+
+    - source: flame                      # a volta: outra carne, mesma simetria, também do vídeo
+      blend: add
+      bars: [[36, 51]]
+      fade_out: 3
+      genome: {random: 34}
+      symmetry: 6
+      samples: 10
+      supersample: 2
+      white: 60
+      exposure: 2.0
+      paint: under
+      paint_mix: 0.92
+      paint_gain: 6            # o solid acima escurece o vídeo a 12%: aqui ele volta à cor plena
+      spin: 0.06
+      pose: 0.35
+      glide: 0.25
+      root: 5
+      hue_notes: {track: bass}
+      pose_notes: {track: bass}
+      harmony: {score: input/esfolado/sheetsage, snap: auto, bloom: 2.0}
+      hits:
+        - {track: kick, gesture: punch, envelope: 0.14}
+        - {track: snare, gesture: sizzle, envelope: 0.12}
+        - {track: ez-hihat, notes: [42, 44], gesture: twist, envelope: 0.08}
+        - {track: ez-hihat, notes: [46], gesture: ring}
+        - {track: lead-legacy, gesture: ring}
+
+    - source: feedback                   # túnel que gira a cor; só onde há bateria
+      bars: [[2, 21], [36, 47]]
+      fade_out: 1
+      decay: 0.45
+      base_scale: 1.02
+      max_scale: 1.09
+      max_rotate: 0.18
+      hue_shift: 0.08
+      zoom_pulse: {track: kick, envelope: 0.22}
+
+    - source: rgb_split
+      bars: [[2, 21], [36, 47]]
+      amount: 7
+      trigger: {track: snare, envelope: 0.10}
