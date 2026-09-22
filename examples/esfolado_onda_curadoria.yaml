@@ -1,0 +1,22 @@
+# Esfolado — "Onda": o luto (compassos 22–35) refeito com os quadrinhos da curadoria.
+# O desenho é virado do avesso (o traço preto vira linha branca sobre fundo escuro, como a
+# areia do Chladni) e cada nota do PIANO manda uma onda de choque do centro que dobra a
+# imagem e tinge só as linhas; os acordes soltam ondas sobrepostas. Cada KICK-2 incha e
+# acende a imagem. O acorde (SheetSage2) escolhe a cor da onda. Um clipe por compasso.
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --clips C:/Users/marco/Videos/ltx2/curadoria --clip-fit cover --seed 3 \
+#       --scene examples/esfolado_onda_curadoria.yaml --start-time 56.018 --bars 14 \
+#       --resolution 1280x720 --fps 30 --output render_output/esfolado_onda_curadoria_c22-35.mp4
+video:
+  clip_per_bar: true
+  clip_order: random
+  layers:
+    - source: clips
+    - source: shockwave
+      invert: true
+      fill: 0.3
+      rings: {track: 7}                  # o piano (a trilha 7; há duas chamadas "piano")
+      punch: {track: kick-2, envelope: 0.30}
+      harmony: {score: input/esfolado/sheetsage, snap: auto}

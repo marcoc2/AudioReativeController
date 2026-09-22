@@ -216,7 +216,7 @@ Cada batida cai uma gota; as ondulações (equação de onda de verdade, ping-po
 Curvas de nível do brilho do vídeo; as linhas sobem e descem com o grave.
 - Deps: 10 (altura)
 
-### 20. [ ] `shockwave` (post-op): onda de choque nos contornos  ⭐ ideia do Marco
+### 20. [x] `shockwave` (post-op): onda de choque nos contornos → `core/shockwave.py`, `examples/esfolado_onda_curadoria.yaml`
 Vem do gesto `ring` da areia (`core/chladni.py`, `_gesture`), que ficou ótimo no trecho
 de piano do `esfolado.mp4` (compassos 22–35): a cada nota um anel nasce e se expande
 (~0,6 s), dobra a imagem por onde passa como uma lente e tinge **só as linhas** da

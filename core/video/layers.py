@@ -1487,6 +1487,77 @@ class SlitScanLayer:
         return self.scan.render(frame, self._delay + self._amount * self._level, front, depth)
 
 
+class ShockwaveLayer:
+    """Post-op: shock waves through a drawing (``core/shockwave``, GPU), the sand's ``ring`` on any image.
+
+        - source: shockwave
+          invert: true              # the drawing inside out: ink -> white lines, fills -> dim negatives
+          fill: 0.3                 # how much of the (inverted) fills is left
+          ink: 1.0                  # how readily a dark stroke counts as a line (higher = more lines)
+          rings: {track: piano}     # each note sends a ring out (a chord: rings on top of each other)
+          center: middle            # middle | random (each ring from its own point)
+          speed: 3.2                # frame heights per second / 2 (the sand's numbers)
+          width: 0.12
+          push: 0.06                # how far the ring pushes the picture
+          life: 0.6                 # seconds a ring lasts
+          punch: {track: kick-2, envelope: 0.3}   # the picture swells and flashes on a hit
+          hue: 0.9                  # colour the rings give the lines; a ``harmony:`` block lets the chord pick it
+          sat: 0.75
+          seed: 0
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int, fps: int,
+                 features_at=None, onset_loader=None, grid=None):
+        from core.shockwave import MAX_RINGS, RING_LIFE, RING_PUSH, RING_SPEED, RING_WIDTH, Shockwave
+        self.fps = fps
+        self.aspect = width / height
+        self.wave = Shockwave(width, height, invert=bool(spec.get("invert", True)), fill=float(spec.get("fill", 0.3)),
+                              ink=float(spec.get("ink", 1.0)), width_=float(spec.get("width", RING_WIDTH)),
+                              push=float(spec.get("push", RING_PUSH)))
+        self._max = MAX_RINGS
+        self._speed = float(spec.get("speed", RING_SPEED))
+        self._life = max(1e-3, float(spec.get("life", RING_LIFE)))
+        center = spec.get("center", "middle")
+        if center not in ("middle", "random"):
+            raise ValueError(f"shockwave: unknown center {center!r} (use middle or random)")
+        rspec = spec.get("rings")
+        events = _layer_events(rspec, notes, onset_loader, grid) if rspec else []
+        self._times = np.array([e.time for e in events], dtype=float)
+        self._vel = np.array([e.velocity / 127.0 for e in events], dtype=float)
+        rng = np.random.default_rng(int(spec.get("seed", 0)))
+        pts = rng.uniform(-1, 1, (len(events), 2)) * np.array([self.aspect * 0.8, 0.8])
+        self._centers = pts if center == "random" else np.zeros((len(events), 2))
+        pspec = spec.get("punch")
+        self._punch = EnvelopeOpacity(_layer_hits(pspec, notes, onset_loader, grid),
+                                      float(pspec.get("envelope", 0.3))) if pspec else None
+        hspec = spec.get("harmony")
+        self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._chord_times = np.array([e.time for e in self._chords], dtype=float)
+        self.hue = float(spec.get("hue", 0.9))
+        self._sat = float(spec.get("sat", 0.75))
+        self._last_t: Optional[float] = None
+
+    def process(self, frame: np.ndarray, t: float) -> np.ndarray:
+        dt = 1.0 / self.fps if self._last_t is None else min(0.1, max(0.0, t - self._last_t))
+        self._last_t = t
+        hi = int(np.searchsorted(self._times, t, side="right"))
+        lo = int(np.searchsorted(self._times, t - self._life, side="right"))
+        rings = []
+        for i in range(max(lo, hi - self._max), hi):                 # the youngest rings, if there are too many
+            age = t - self._times[i]
+            k = 1.0 - age / self._life
+            rings.append((self._centers[i, 0], self._centers[i, 1], age * self._speed,
+                          k * (0.4 + 0.6 * self._vel[i])))
+        if len(self._chords):
+            i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
+            if i >= 0:
+                target = VeilsLayer.hue_of_root(self._chords[i].pitch)
+                step = (target - self.hue + 0.5) % 1.0 - 0.5             # round the colour wheel the short way
+                self.hue += step * (1 - math.exp(-dt / 1.2))
+        punch = float(self._punch(t)) if self._punch else 0.0
+        return self.wave.render(frame, rings, punch=punch, hue=self.hue, sat=self._sat)
+
+
 class EchoesLayer:
     """Post-op: dynamically blends previous frames to create temporal echoes
 
@@ -1779,6 +1850,10 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
         if src_name == "rgb_noise":
             comp.add(RgbNoiseLayer(spec, notes, fps, features_at=features_at,
                                    onset_loader=onset_loader, grid=grid), "normal", None)
+            continue
+        if src_name == "shockwave":
+            comp.add(ShockwaveLayer(spec, notes, width, height, fps, features_at=features_at,
+                                    onset_loader=onset_loader, grid=grid), "normal", None)
             continue
         if src_name == "slitscan":
             comp.add(SlitScanLayer(spec, notes, width, height, fps, features_at=features_at,
