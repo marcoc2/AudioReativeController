@@ -155,7 +155,7 @@ abaixo) e extraem dele algo para brincar: os **contornos** ou um **mapa de altur
 pinta com o que está embaixo (`frame_at_over`, como a chama com `paint: under`).
 Pensados primeiro para clipes cartoon, cujo traço limpo dá contornos fechados.
 
-### 10. [ ] Base compartilhada "leitura do quadro"
+### 10. [~] Base compartilhada "leitura do quadro" → `core/frame_read.py` (contornos: feito; regiões e altura: a fazer)
 Um passe de GPU que recebe o frame e devolve, em texturas: contornos (Sobel ou
 diferença de gaussianas, com limiar e engrossamento opcional), máscara de regiões
 fechadas, e altura suavizada (luminância com blur). Os itens abaixo leem daqui.
@@ -163,7 +163,7 @@ fechadas, e altura suavizada (luminância com blur). Os itens abaixo leem daqui.
 - Deps: —
 - Pronto quando: um desenho sintético dá contornos fechados, e um gradiente dá uma rampa de altura
 
-### 11. [ ] `drops`: gota que se espalha até os contornos  ⭐ ideia do Marco
+### 11. [x] `drops`: gota que se espalha até os contornos → `core/drops.py`, `examples/esfolado_gotas_curadoria.yaml`
 A cada ataque cai uma gota num ponto; ela pega a cor do pixel onde caiu e se
 espalha, como um balde de tinta lento, até bater nos contornos do desenho.
 | Papel musical | Gesto |
@@ -173,6 +173,7 @@ espalha, como um balde de tinta lento, até bater nos contornos do desenho.
 | duração da nota / envelope | quanto tempo a mancha fica antes de secar e sumir |
 | acorde | cor da gota: a do pixel onde caiu, ou a da paleta do acorde |
 - Tarefas: crescimento de região na GPU (a mancha dilata alguns pixels por frame e para na máscara de contornos) · várias manchas vivas ao mesmo tempo, cada uma com cor e idade · borda da mancha com leve brilho/umidade · o contorno pode deixar vazar um pouco (limiar), para gotas atravessarem traços finos
+- Variação `shape: spiral` (`examples/esfolado_gotas_espiral_curadoria.yaml`): a tinta enche a região do mesmo jeito, mas só aparece num braço de espiral que se enrola para fora do ponto da gota (`pitch`, `turns`, `arm`, `spin`)
 - Deps: 10
 
 ### 12. [ ] `neon_lines`: só os contornos, em neon
@@ -192,8 +193,10 @@ Cada região fechada pelos contornos ganha uma cor chapada; a paleta troca a cad
 - Tarefas: rotular regiões (componentes conexos na GPU por propagação de rótulo, ou na CPU em baixa resolução) · manter o rótulo estável entre frames (casar regiões pelo centroide)
 - Deps: 10
 
-### 14. [ ] `disintegrate`: o desenho vira poeira
+### 14. [x] `disintegrate`: o desenho vira poeira → `core/sandlines.py` (`source: sandlines`), `examples/esfolado_areia_curadoria.yaml`
 Partículas nascem sobre os contornos, com a cor do traço; o bumbo as sopra para longe e o desenho se refaz.
+- Feito como areia branca: o primeiro frame do clipe de cada compasso é invertido, o contraste esticado, e o quase branco (o traço) vira areia; a imagem some. A cada compasso a areia escorre para as linhas do desenho novo. A onda de choque do item 20 colore a areia e a arremessa para fora e para cima (física: voo com gravidade, quique, atrito de Coulomb no chão); a vibração da placa traz de volta ao traço (`pull`). Um kick faz a placa inteira pular (`jump`). Simulação na GPU, 200 mil grãos, ~3 ms/frame
+- A fazer: grãos com a cor do traço original (hoje brancos) como opção
 - Deps: 10 (as partículas na GPU; não estender `core/particles*.py`, legado congelado)
 
 ### 15. [ ] `relief`: o vídeo esculpido

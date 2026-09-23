@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from core.frame_read import INK_GLSL, ink_lod
 from core.shader_pass import ShaderPass
 
 MAX_RINGS = 16
@@ -46,7 +47,7 @@ uniform float u_aspect, u_width, u_push, u_punch, u_hue, u_sat, u_fill, u_invert
               u_scatter, u_frame;
 
 vec3 hsv(float h, float s, float v){ vec3 k = fract(h + vec3(0, 2.0/3.0, 1.0/3.0)) * 6.0; return v * mix(vec3(1.0), clamp(abs(k - 3.0) - 1.0, 0.0, 1.0), s); }
-float luma(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
+""" + INK_GLSL + """
 // Dave Hoskins' hash without sine: no streaks on integer pixel coordinates
 float hash1(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 
@@ -75,9 +76,7 @@ void main(){
         vec2 k = disp / (vec2(u_aspect, 1.0) * 2.0) * u_split;
         c = vec3(texture(u_img, uv - k).r, c.g, texture(u_img, uv + k).b);
     }
-    float L = luma(c), Lm = luma(textureLod(u_img, uv, u_lod).rgb);
-    // ink: darker than its neighbourhood (high-pass), or plainly dark
-    float ink = max(smoothstep(0.03, 0.03 + 0.25 / u_ink, Lm - L), smoothstep(0.30, 0.10, L));
+    float ink = inkOf(c, luma(textureLod(u_img, uv, u_lod).rgb), u_ink);   // core/frame_read
     // where the wave passes the lines break into grains; at rest they are only grainy
     ink *= mix(1.0, step(g1, 1.0 - 0.55 * hot) * (1.0 - 0.3 * g3), u_scatter);
     vec3 tint = hsv(u_hue, u_sat, 1.0);
@@ -110,8 +109,7 @@ class Shockwave:
             self._img = self._pass.ctx.texture((self.W, self.H), 3)
             self._img.filter = (self._pass._mgl.LINEAR_MIPMAP_LINEAR, self._pass._mgl.LINEAR)
             self._img.repeat_x = self._img.repeat_y = False
-        # the neighbourhood the ink is judged against: ~12 px at 720p, whatever the size
-        self._lod = float(np.log2(max(2.0, 12.0 * self.H / 720.0)))
+        self._lod = ink_lod(self.H)
 
     def render(self, frame: np.ndarray, rings=(), punch: float = 0.0, hue: float = 0.9,
                sat: float = 0.75, frame_index: int = 0) -> np.ndarray:

@@ -45,6 +45,12 @@ class ShaderPass:
         self._out = self.ctx.simple_framebuffer((self.W, self.H), 3)
         self._mgl = moderngl
 
+    def quad_program(self, fragment_shader: str):
+        """Another full-screen program in this context, for passes of one's own: (program, vao)."""
+        with self.ctx:
+            prog = self.ctx.program(vertex_shader=VERTEX_SHADER, fragment_shader=fragment_shader)
+            return prog, self.ctx.vertex_array(prog, [(self._vbo, "2f", "in_pos")])
+
     def draw(self, textures=None, **uniforms) -> np.ndarray:
         """Render; ``textures`` maps texture units (1, 2, ...) to textures of this context."""
         # several GPU layers each own a context: make this one current, or its calls land in another's

@@ -19,6 +19,7 @@ Scene YAML:
 from __future__ import annotations
 
 from typing import Callable, List, Optional, Sequence
+import colorsys
 import math
 import collections
 from scipy.ndimage import affine_transform
@@ -1565,6 +1566,339 @@ class ShockwaveLayer:
                                 frame_index=int(round(t * self.fps)))
 
 
+class SandLinesLayer:
+    """Post-op: the white outlines of the picture become sand, and shock waves scatter it (``core/sandlines``, GPU).
+
+    The picture goes away: the drawing is inverted (its ink turns white), its contrast
+    stretched, and what is near white becomes white sand on black. Once a bar (the
+    first frame of the bar's clip) the sand is given the new drawing and travels to its
+    lines. Rings run out through the sand, colour it and throw it out and up; it flies,
+    falls, slides to a stop, and the humming plate brings it back to the lines.
+
+        - source: sandlines
+          white: 0.8                # how near white (after inverting and stretching) a pixel must be to be sand
+          grains: 200000
+          rings: {track: piano}     # each note sends a ring out
+          center: middle            # middle | random (each ring from its own point)
+          speed: 3.2                # how fast a ring runs (frame heights / 2 per second)
+          width: 0.12
+          life: 0.6                 # seconds a ring lasts
+          push: 1.2                 # the speed a ring throws the sand outwards with (frame heights / 2 per second)
+          lift: 2.5                 # ... and up into the air
+          gravity: 22               # how fast it falls back
+          friction: 3.0             # how soon it stops sliding on the plate
+          bounce: 0.3               # how much of its fall it bounces back
+          pull: 3.0                 # how strongly the plate brings it back to its lines (0: it stays scattered)
+          travel: 2.5               # the fastest it creeps back (frame heights / 2 per second)
+          cool: 0.8                 # seconds a heated grain takes to turn white again
+          jump: {track: kick-2}     # each hit makes the whole plate hop
+          jump_gain: 1.0
+          size: 1.5                 # a grain, in pixels at 720p
+          bright: 0.35              # how bright a grain is (lines are many grains)
+          glow: 0.25
+          hue: 0.9                  # the colour the rings give the sand; ``harmony:`` lets the chord pick it
+          sat: 0.75
+          harmony: {score: input/song/sheetsage, snap: auto}
+          cut: 40                   # without a rhythm grid: a picture change this big is a new drawing
+          seed: 0
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int, fps: int,
+                 features_at=None, onset_loader=None, grid=None):
+        from core.sandlines import MAX_RINGS, SandLines
+        from core.shockwave import RING_LIFE, RING_SPEED, RING_WIDTH
+        self.fps = fps
+        self.aspect = width / height
+        self.grid = grid
+        self.sand = SandLines(width, height, grains=int(spec.get("grains", 200_000)), seed=int(spec.get("seed", 0)),
+                              white=float(spec.get("white", 0.8)), push=float(spec.get("push", 1.2)),
+                              lift=float(spec.get("lift", 2.5)), width_=float(spec.get("width", RING_WIDTH)),
+                              ring_speed=float(spec.get("speed", RING_SPEED)),
+                              gravity=float(spec.get("gravity", 22.0)), friction=float(spec.get("friction", 3.0)),
+                              bounce=float(spec.get("bounce", 0.3)), pull=float(spec.get("pull", 3.0)),
+                              travel=float(spec.get("travel", 2.5)), cool=float(spec.get("cool", 0.8)),
+                              size=float(spec.get("size", 1.5)), bright=float(spec.get("bright", 0.35)),
+                              glow=float(spec.get("glow", 0.25)))
+        self._max = MAX_RINGS
+        self._speed = float(spec.get("speed", RING_SPEED))
+        self._life = max(1e-3, float(spec.get("life", RING_LIFE)))
+        center = spec.get("center", "middle")
+        if center not in ("middle", "random"):
+            raise ValueError(f"sandlines: unknown center {center!r} (use middle or random)")
+        rspec = spec.get("rings")
+        events = _layer_events(rspec, notes, onset_loader, grid) if rspec else []
+        self._times = np.array([e.time for e in events], dtype=float)
+        self._vel = np.array([e.velocity / 127.0 for e in events], dtype=float)
+        rng = np.random.default_rng(int(spec.get("seed", 0)))
+        pts = rng.uniform(-1, 1, (len(events), 2)) * np.array([self.aspect * 0.8, 0.8])
+        self._centers = pts if center == "random" else np.zeros((len(events), 2))
+        jspec = spec.get("jump")
+        jumps = _layer_events(jspec, notes, onset_loader, grid) if jspec else []
+        self._jump_times = np.array([e.time for e in jumps], dtype=float)
+        self._jump_vel = np.array([e.velocity / 127.0 for e in jumps], dtype=float)
+        self._jump_gain = float(spec.get("jump_gain", 1.0))
+        hspec = spec.get("harmony")
+        self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._chord_times = np.array([e.time for e in self._chords], dtype=float)
+        self.hue = float(spec.get("hue", 0.9))
+        self._sat = float(spec.get("sat", 0.75))
+        self._cut = float(spec.get("cut", 40))
+        self._bar: Optional[int] = None
+        self._prev: Optional[np.ndarray] = None
+        self._last_t: Optional[float] = None
+
+    def _bar_of(self, t: float) -> Optional[int]:
+        g = self.grid
+        if g is None:
+            return None
+        db = getattr(g, "downbeats", None)
+        if db is not None and len(db) > 0:
+            return max(0, int(np.searchsorted(db, t, side="right")) - 1)
+        return int((t - g.start_offset) // g.bar_duration)
+
+    def process(self, frame: np.ndarray, t: float) -> np.ndarray:
+        first = self._last_t is None
+        dt = 1.0 / self.fps if first else min(0.1, max(0.0, t - self._last_t))
+        lo = t - 1.0 / self.fps if first else self._last_t     # first frame: only its own hits
+        self._last_t = t
+        # a new drawing: the first frame of each bar (its clip's first frame), or a cut
+        bar = self._bar_of(t)
+        small = frame[::16, ::16].astype(np.int16)
+        if bar is not None:
+            new = bar != self._bar
+            self._bar = bar
+        else:
+            new = self._prev is None or np.abs(small - self._prev).mean() > self._cut
+        self._prev = small
+        if new:
+            self.sand.lines(frame, bar if bar is not None else int(round(t * self.fps)))
+        for i in range(int(np.searchsorted(self._jump_times, lo, side="right")),
+                       int(np.searchsorted(self._jump_times, t, side="right"))):
+            self.sand.jump(self._jump_gain * (0.4 + 0.6 * self._jump_vel[i]))
+        hi = int(np.searchsorted(self._times, t, side="right"))
+        low = int(np.searchsorted(self._times, t - self._life, side="right"))
+        rings = []
+        for i in range(max(low, hi - self._max), hi):
+            age = t - self._times[i]
+            rings.append((self._centers[i, 0], self._centers[i, 1], age * self._speed,
+                          (1.0 - age / self._life) * (0.4 + 0.6 * self._vel[i])))
+        if len(self._chords):
+            i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
+            if i >= 0:
+                target = VeilsLayer.hue_of_root(self._chords[i].pitch)
+                step = (target - self.hue + 0.5) % 1.0 - 0.5
+                self.hue += step * (1 - math.exp(-dt / 1.2))
+        return self.sand.render(dt, rings, hue=self.hue, sat=self._sat)
+
+
+class ShadertoyLayer:
+    """A shader from shadertoy.com, run as it is (``core/shadertoy``, GPU); the music drives its clock and knobs.
+
+        - source: shadertoy
+          file: shaders/shadertoy/some_shader.glsl   # or a folder: image.glsl, buffer_a.glsl .., common.glsl
+          channel0: frame           # what the Image pass reads (overrides the file's ``// iChannel0:`` line):
+                                    # frame: the picture below (the layer is then a post-op) | previous: its
+                                    # own last output | buffer_a .. buffer_d | a path to an image | none
+          supersample: 1
+          speed: 1.0                # how fast the shader's clock (iTime) runs
+          rush: {hits: {track: kick}, amount: 3.0, envelope: 0.3}   # the clock rushes on each hit
+          uniforms:                 # float knobs of the shader's own (declared for it if it does not)
+            u_bass: subbands.bass   # an audio feature
+            u_kick: {hits: {track: kick}, envelope: 0.25}           # a pulse on each hit, 1 -> 0
+            u_amount: 0.5           # a constant
+
+    When any pass reads ``frame`` it is a post-op (the picture under it goes in);
+    otherwise a source, blended like any other.
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int, fps: int,
+                 features_at=None, onset_loader=None, grid=None):
+        from core.shadertoy import BUFFERS, Shadertoy, load
+        if not spec.get("file"):
+            raise ValueError("shadertoy: needs file: (a .glsl or a folder in shaders/shadertoy/)")
+        shader = load(spec["file"])
+        self.meta = shader["meta"]
+        self.fps = fps
+        self.features_at = features_at
+        channels = shader["channels"]
+        image = dict(channels.get("image", {}))
+        for i in range(4):
+            if f"channel{i}" in spec:
+                image[i] = spec[f"channel{i}"]
+        channels["image"] = image
+
+        def resolve(src):
+            if src in (None, "none"):
+                return None
+            if src in ("frame", "previous") or str(src).startswith("buffer_"):
+                return src
+            from PIL import Image
+            return np.asarray(Image.open(src).convert("RGB"))
+        channels = {p: {i: resolve(src) for i, src in chans.items() if resolve(src) is not None}
+                    for p, chans in channels.items()}
+        self._knobs = {}
+        for name, how in (spec.get("uniforms") or {}).items():
+            if isinstance(how, (int, float)):
+                self._knobs[name] = (lambda t, v=float(how): v)
+            elif isinstance(how, str):
+                self._knobs[name] = (lambda t, path=how: _feature(
+                    (self.features_at(t) if self.features_at else None) or {}, path))
+            elif isinstance(how, dict) and "hits" in how:
+                env = EnvelopeOpacity(_layer_hits(how["hits"], notes, onset_loader, grid),
+                                      float(how.get("envelope", 0.25)))
+                self._knobs[name] = (lambda t, e=env, k=float(how.get("amount", 1.0)): k * e(t))
+            else:
+                raise ValueError(f"shadertoy: uniform {name!r}: use a number, a feature path or {{hits: ...}}")
+        self.toy = Shadertoy(shader["image"], width, height, supersample=int(spec.get("supersample", 1)),
+                             extra=tuple(self._knobs), buffers={b: shader.get(b) for b in BUFFERS},
+                             common=shader.get("common", ""), channels=channels)
+        self._speed = float(spec.get("speed", 1.0))
+        rspec = spec.get("rush")
+        self._rush = EnvelopeOpacity(_layer_hits(rspec["hits"], notes, onset_loader, grid),
+                                     float(rspec.get("envelope", 0.3))) if rspec else None
+        self._rush_amount = float(rspec.get("amount", 3.0)) if rspec else 0.0
+        self._clock = 0.0
+        self._last_t = None
+
+    def _draw(self, below, t: float) -> np.ndarray:
+        dt = 1.0 / self.fps if self._last_t is None else max(0.0, t - self._last_t)
+        if self._last_t is None:
+            self._clock = t * self._speed                    # starts where the song is
+        else:
+            rush = self._rush_amount * self._rush(t) if self._rush else 0.0
+            self._clock += dt * (self._speed + rush)
+        self._last_t = t
+        return self.toy.render(self._clock, dt, frame=below, **{k: f(t) for k, f in self._knobs.items()})
+
+    @property
+    def is_post(self) -> bool:
+        return self.toy.reads("frame")
+
+
+class _ShadertoySource:
+    def __init__(self, layer: ShadertoyLayer):
+        self.layer = layer
+
+    def frame_at(self, t: float) -> np.ndarray:
+        return self.layer._draw(None, t)
+
+
+class _ShadertoyPost:
+    def __init__(self, layer: ShadertoyLayer):
+        self.layer = layer
+
+    def process(self, frame: np.ndarray, t: float) -> np.ndarray:
+        return self.layer._draw(frame, t)
+
+
+class DropsLayer:
+    """Post-op: drops of colour that spread until they meet the lines (``core/drops``, GPU).
+
+        - source: drops
+          hits: {track: snare}      # each note lets a drop fall
+          at: random                # random (a point off the lines) | center
+          color: under              # under: the colour where it fell, made vivid (``boost``)
+                                    # complement: the opposite of it | chord: the chord's colour
+          boost: 1.8                # how much more saturated than the picture the drop is
+          speed: 6                  # how fast the paint creeps (pixels per frame at 720p)
+          grow: 2.0                 # seconds a drop keeps spreading
+          life: 4.0                 # seconds before a stain has dried away ...
+          fade: 1.0                 # ... fading over the last this many
+          radius: 6                 # the drop's size when it lands (pixels at 720p; velocity scales it)
+          opacity: 0.9
+          stain: 0.0                # 0: the colour replaces the fill; 1: it tints it, keeping its shading
+          rim: 0.35                 # the darker wet edge, like watercolour
+          rough: 0.35               # how ragged the spreading front is (0: a clean octagon)
+          cut: 40                   # a picture change this big (mean 0..255) is a cut: old stains dry
+          ink: 1.0                  # how readily a dark stroke counts as a wall
+          wall: 0.5                 # lower: thin lines stop the paint; higher: it leaks through them
+          shape: blob               # blob | spiral: the stain shows as an arm winding out from the drop
+          pitch: 30                 # spiral: pixels between its turns (at 720p)
+          turns: 2.0                # spiral: turns a second (how fast it winds out)
+          arm: 0.55                 # spiral: the painted share of each turn (1: a solid snail shell)
+          whirl: 1.5                # spiral: how fast it spins when it lands (turns a second; it slows as it dries)
+          twirl: 1.5                # spiral: how far the drawing around it is twisted, like a whirlpool (radians; 0: not)
+          spin: random              # spiral: cw | ccw | random (each drop its own way)
+          harmony: {score: input/song/sheetsage, snap: auto}   # for color: chord
+          seed: 0
+    """
+
+    COLORS = ("under", "complement", "chord")
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int, fps: int,
+                 features_at=None, onset_loader=None, grid=None):
+        from core.drops import Drops
+        self.fps = fps
+        self.W, self.H = width, height
+        scale = height / 720.0
+        self.drops = Drops(width, height, speed=max(1, round(float(spec.get("speed", 6)) * scale)),
+                           grow=float(spec.get("grow", 2.0)), life=float(spec.get("life", 4.0)),
+                           fade=float(spec.get("fade", 1.0)), ink=float(spec.get("ink", 1.0)),
+                           wall=float(spec.get("wall", 0.5)), opacity=float(spec.get("opacity", 0.9)),
+                           rim=float(spec.get("rim", 0.35)), stain=float(spec.get("stain", 0.0)),
+                           rough=float(spec.get("rough", 0.35)), shape=spec.get("shape", "blob"),
+                           pitch=float(spec.get("pitch", 30)) * scale, turns=float(spec.get("turns", 2.0)),
+                           arm=float(spec.get("arm", 0.55)), whirl=float(spec.get("whirl", 1.5)),
+                           twirl=float(spec.get("twirl", 1.5)))
+        self._spin = spec.get("spin", "random")
+        if self._spin not in ("cw", "ccw", "random"):
+            raise ValueError(f"drops: unknown spin {self._spin!r} (use cw, ccw or random)")
+        self._radius = float(spec.get("radius", 6.0)) * scale
+        self._at = spec.get("at", "random")
+        if self._at not in ("random", "center"):
+            raise ValueError(f"drops: unknown at {self._at!r} (use random or center)")
+        self._color = spec.get("color", "under")
+        if self._color not in self.COLORS:
+            raise ValueError(f"drops: unknown color {self._color!r} (use one of {self.COLORS})")
+        self._boost = float(spec.get("boost", 1.8))
+        hspec = spec.get("hits")
+        events = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._times = np.array([e.time for e in events], dtype=float)
+        self._vel = np.array([e.velocity / 127.0 for e in events], dtype=float)
+        hspec = spec.get("harmony")
+        self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._chord_times = np.array([e.time for e in self._chords], dtype=float)
+        self._rng = np.random.default_rng(int(spec.get("seed", 0)))
+        self._cut = float(spec.get("cut", 40))
+        self._prev: Optional[np.ndarray] = None
+        self._last_t: Optional[float] = None
+
+    def _where(self, frame: np.ndarray):
+        if self._at == "center":
+            return self.W / 2, self.H / 2
+        for _ in range(8):                                   # off the lines: a drop falls into a region
+            x, y = self._rng.uniform(0.05, 0.95) * self.W, self._rng.uniform(0.05, 0.95) * self.H
+            if frame[int(y), int(x)].mean() > 70:
+                break
+        return x, y
+
+    def _colour(self, frame: np.ndarray, x: float, y: float, t: float):
+        if self._color == "chord":
+            i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
+            hue = VeilsLayer.hue_of_root(self._chords[i].pitch) if i >= 0 else 0.0
+            return colorsys.hsv_to_rgb(hue, 0.85, 1.0)
+        x0, y0 = int(x), int(y)
+        patch = frame[max(0, y0 - 2):y0 + 3, max(0, x0 - 2):x0 + 3].reshape(-1, 3).mean(axis=0) / 255.0
+        h, sat, v = colorsys.rgb_to_hsv(*patch)
+        if self._color == "complement":
+            h = (h + 0.5) % 1.0
+        return colorsys.hsv_to_rgb(h, min(1.0, sat * self._boost + 0.15), min(1.0, max(v, 0.5) * 1.15))
+
+    def process(self, frame: np.ndarray, t: float) -> np.ndarray:
+        lo = t - 1.0 / self.fps if self._last_t is None else self._last_t   # first frame: only its own hits
+        self._last_t = t
+        small = frame[::16, ::16].astype(np.int16)
+        if self._prev is not None and np.abs(small - self._prev).mean() > self._cut:
+            self.drops.cut(t)                                # the clip changed: the old stains dry
+        self._prev = small
+        for i in range(int(np.searchsorted(self._times, lo, side="right")),
+                       int(np.searchsorted(self._times, t, side="right"))):
+            x, y = self._where(frame)
+            spin = {"cw": 1.0, "ccw": -1.0}.get(self._spin) or float(self._rng.choice((-1.0, 1.0)))
+            self.drops.drop(x, y, self._colour(frame, x, y, t), self._radius * (0.5 + self._vel[i]), t=t, spin=spin)
+        return self.drops.render(frame, t)
+
+
 class EchoesLayer:
     """Post-op: dynamically blends previous frames to create temporal echoes
 
@@ -1857,6 +2191,22 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
         if src_name == "rgb_noise":
             comp.add(RgbNoiseLayer(spec, notes, fps, features_at=features_at,
                                    onset_loader=onset_loader, grid=grid), "normal", None)
+            continue
+        if src_name == "drops":
+            comp.add(DropsLayer(spec, notes, width, height, fps, features_at=features_at,
+                                onset_loader=onset_loader, grid=grid), "normal", None)
+            continue
+        if src_name == "shadertoy":
+            toy = ShadertoyLayer(spec, notes, width, height, fps, features_at=features_at,
+                                 onset_loader=onset_loader, grid=grid)
+            if toy.is_post:
+                comp.add(_ShadertoyPost(toy), "normal", None)
+            else:
+                comp.add(_ShadertoySource(toy), blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "sandlines":
+            comp.add(SandLinesLayer(spec, notes, width, height, fps, features_at=features_at,
+                                    onset_loader=onset_loader, grid=grid), "normal", None)
             continue
         if src_name == "shockwave":
             comp.add(ShockwaveLayer(spec, notes, width, height, fps, features_at=features_at,

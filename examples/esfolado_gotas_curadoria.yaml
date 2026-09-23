@@ -1,0 +1,28 @@
+# Esfolado — "Gotas": os quadrinhos da curadoria, e a cada CAIXA cai uma gota de tinta.
+# A gota pega a cor do ponto onde caiu (mais viva) e se espalha como um balde de tinta
+# lento até bater nos contornos do desenho; seca e some em alguns segundos. As manchas
+# ficam onde estão na tela; quando o clipe troca (um por compasso), as antigas
+# secam num instante (o corte é detectado) e o desenho novo recebe gotas novas.
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --clips C:/Users/marco/Videos/ltx2/curadoria --clip-fit cover --seed 3 \
+#       --scene examples/esfolado_gotas_curadoria.yaml --start-time 13.351 --bars 9 \
+#       --resolution 1280x720 --fps 30 --output render_output/esfolado_gotas_curadoria_c6-14.mp4
+video:
+  clip_per_bar: true
+  clip_order: random
+  layers:
+    - source: clips
+    - source: drops
+      hits: {track: snare}
+      at: random
+      color: under
+      boost: 1.8
+      speed: 8
+      grow: 1.2                          # espalha por ~1 s: em área aberta vira uma mancha redonda
+      life: 4.0
+      fade: 1.2
+      radius: 8
+      rim: 0.35
+      ink: 1.6                           # conta até traço fino/cinza (balões) como parede

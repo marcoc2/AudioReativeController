@@ -1,0 +1,31 @@
+# Esfolado — "Areia": o luto (compassos 22–35) com os quadrinhos da curadoria virados areia.
+# A imagem some: de cada clipe só vale o PRIMEIRO frame (um por compasso), que é invertido
+# (o traço preto vira branco), tem o contraste esticado, e o que sobra quase branco vira
+# areia branca sobre o preto. A cada compasso a areia escorre das linhas do desenho antigo
+# para as do novo. Cada nota do PIANO manda uma onda de choque do centro que pinta a areia
+# por onde passa e a arremessa para fora e para cima: os grãos voam, caem, quicam, deslizam
+# até parar, e a vibração da placa os traz de volta ao traço. Cada KICK-2 faz a placa inteira
+# pular. O acorde (SheetSage2) escolhe a cor da onda.
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --clips C:/Users/marco/Videos/ltx2/curadoria --clip-fit cover --seed 3 \
+#       --scene examples/esfolado_areia_curadoria.yaml --start-time 56.018 --bars 14 \
+#       --resolution 1280x720 --fps 30 --output render_output/esfolado_areia_curadoria_c22-35.mp4
+video:
+  clip_per_bar: true
+  clip_order: random
+  layers:
+    - source: clips
+    - source: sandlines
+      white: 0.8                         # quão perto do branco (depois de inverter e esticar) vira areia
+      rings: {track: 7}                  # o piano (a trilha 7), como na cena da onda
+      life: 0.8
+      width: 0.17
+      push: 0.35                         # a onda arremessa para fora ...
+      lift: 1.0                          # ... e para cima
+      cool: 0.35                         # a cor da onda some logo (o piano toca a cada ~0,3 s)
+      pull: 6.0                          # a placa traz a areia de volta ao traço
+      jump: {track: kick-2}              # o kick-2 faz a areia toda pular
+      jump_gain: 0.8
+      harmony: {score: input/esfolado/sheetsage, snap: auto}
