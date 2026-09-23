@@ -1,0 +1,12 @@
+# Esfolado — "Starleidoscope" (teste): o campo de estrelas em caleidoscópio, no refrão, ouvindo a
+# música como no Shadertoy: o canal de som (iChannel0: sound, no cabeçalho do shader) recebe o
+# espectro e a forma de onda do mix a cada quadro; o shader tira dele a cor das estrelas.
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --scene examples/esfolado_starleidoscope.yaml --start-time 13.351 --bars 9 \
+#       --resolution 1280x720 --fps 30 --output render_output/esfolado_starleidoscope_c6-14.mp4
+video:
+  layers:
+    - source: shadertoy
+      file: shaders/shadertoy/starleidoscope.glsl

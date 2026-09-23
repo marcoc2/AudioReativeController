@@ -13,6 +13,9 @@ and feeds them:
                         "frame"      the picture given to ``render`` (the clip below)
                         "previous"   this shader's own last output
                         "buffer_a".."buffer_d"   a buffer pass (see below)
+                        "sound"      the music, as Shadertoy's sound input: a 512 x 2 texture, row 0
+                                     the spectrum (0 .. 11 kHz, 0..1), row 1 the waveform (0.5 = silence);
+                                     ``sound_texture`` builds it from the audio features
                         an image     (uint8 H x W x 3), fixed
                     uploaded bottom row first as Shadertoy does; iChannelResolution their sizes
 
@@ -21,10 +24,11 @@ does not declare them itself, so music can drive knobs the shader exposes.
 
 Passes: as on Shadertoy, ``Buffer A..D`` run first, in that order, each into a float
 texture as big as the picture (RGBA 32-bit, all four channels kept, negative values
-too), then ``Image``. A pass reading a buffer that has already run this frame gets
+too), then ``Image``. A buffer read as ``"buffer_a mipmap"`` (Shadertoy's mipmap filter
+on that channel) gets its mipmaps built after each frame, for ``textureLod`` blurs. A pass reading a buffer that has already run this frame gets
 this frame's; reading itself, or one that runs later, it gets the last frame's (so a
 buffer can feed back into itself). ``Common`` code is put above every pass. Cube maps,
-sound and keyboard inputs are not supported.
+video and keyboard inputs are not supported.
 
 Files live in ``shaders/shadertoy/`` (see its README): one ``.glsl`` for a one-pass
 shader, or a folder with ``image.glsl``, ``buffer_a.glsl`` .. and ``common.glsl``. Each
@@ -87,12 +91,14 @@ def _header(text: str) -> dict:
 
 
 def _channels_of(meta: dict) -> dict:
-    """{0: "buffer_a", ...} from ``// iChannel0: buffer_a`` header lines."""
+    """{0: "buffer_a", ...} from ``// iChannel0: buffer_a`` header lines (a second word, ``mipmap``,
+    is kept: ``"buffer_a mipmap"``)."""
     out = {}
     for i in range(CHANNELS):
         v = meta.get(f"ichannel{i}")
         if v:
-            out[i] = v.split()[0].strip().lower()
+            words = v.lower().split()
+            out[i] = " ".join(words[:2]) if len(words) > 1 and words[1] == "mipmap" else words[0]
     return out
 
 
@@ -126,8 +132,30 @@ def wrap(code: str, extra=(), common: str = "", buffer: bool = False) -> str:
     strip = lambda s: "\n".join(line for line in s.splitlines() if not line.lstrip().startswith("#version"))
     body = strip(common) + "\n" + strip(code) if common else strip(code)
     own = "".join(f"uniform float {name};\n" for name in extra
-                  if not re.search(rf"\buniform\s+\w+\s+{re.escape(name)}\b", body))
+                  if not re.search(rf"\buniform\s+\w+\s+[^;]*\b{re.escape(name)}\b", body))   # also in a, b, c lists
     return _HEADER + own + "#line 1\n" + body + (_BUFFER_MAIN if buffer else _IMAGE_MAIN)
+
+
+SOUND_BINS = 512
+SOUND_TOP_HZ = 11025.0          # Shadertoy's sound input: 512 bins of a 2048-point FFT at 44.1 kHz
+
+
+def sound_texture(spectrum, nyquist: float, wave=None) -> np.ndarray:
+    """Shadertoy's sound input from a spectrum (0..1, bins spread 0 .. ``nyquist`` Hz) and a
+    waveform (-1..1): uint8, 2 x 512, the waveform on top (row 1 once uploaded) and the spectrum
+    below it (row 0, where ``texture(iChannel0, vec2(x, 0.0))`` reads it)."""
+    out = np.full((2, SOUND_BINS), 128, np.uint8)
+    spec = np.asarray(spectrum if spectrum is not None else [], dtype=np.float32).ravel()
+    if len(spec) > 1 and nyquist > 0:
+        hz = (np.arange(SOUND_BINS) + 0.5) * SOUND_TOP_HZ / SOUND_BINS
+        out[1] = (np.clip(np.interp(hz / nyquist * (len(spec) - 1), np.arange(len(spec)), spec), 0, 1)
+                  * 255).astype(np.uint8)
+    else:
+        out[1] = 0
+    w = np.asarray(wave if wave is not None else [], dtype=np.float32).ravel()[:SOUND_BINS]
+    if len(w):
+        out[0, :len(w)] = (np.clip(w * 0.5 + 0.5, 0, 1) * 255).astype(np.uint8)
+    return out
 
 
 def _set(prog, values: dict) -> None:
@@ -150,6 +178,13 @@ class Shadertoy:
             if b not in BUFFERS:
                 raise ValueError(f"shadertoy: unknown buffer {b!r} (use one of {BUFFERS})")
         self.channels = {k: dict(v) for k, v in (channels or {}).items()}
+        self._mip = set()                    # buffers some pass reads with the mipmap filter
+        for chans in self.channels.values():
+            for i, src in list(chans.items()):
+                if isinstance(src, str) and src.endswith(" mipmap"):
+                    chans[i] = src[:-7]
+                    if chans[i].startswith("buffer_"):
+                        self._mip.add(chans[i][7:])
         for pass_, chans in self.channels.items():
             for i, src in chans.items():
                 if isinstance(src, str) and src.startswith("buffer_") and src[7:] not in self.buffers:
@@ -165,8 +200,10 @@ class Shadertoy:
                 zero = np.zeros((self.RH, self.RW, 4), np.float32).tobytes()
                 texs = [ctx.texture((self.RW, self.RH), 4, data=zero, dtype="f4") for _ in range(2)]
                 for t in texs:
-                    t.filter = (mgl.LINEAR, mgl.LINEAR)
+                    t.filter = (mgl.LINEAR_MIPMAP_LINEAR, mgl.LINEAR) if b in self._mip else (mgl.LINEAR, mgl.LINEAR)
                     t.repeat_x = t.repeat_y = False
+                    if b in self._mip:
+                        t.build_mipmaps()
                 self._tex_buf[b] = texs
                 self._fbo_buf[b] = [ctx.framebuffer([t]) for t in texs]
                 self._cur[b] = 0
@@ -178,7 +215,8 @@ class Shadertoy:
         """Whether any pass reads ``source`` ("frame", "previous", ...)."""
         return any(isinstance(s, str) and s == source for chans in self.channels.values() for s in chans.values())
 
-    def _upload(self, key, img: np.ndarray):
+    def _upload(self, key, img: np.ndarray, sound: bool = False):
+        # the sound input is clamped and has no mipmaps (a level down would mix its two rows)
         img = np.ascontiguousarray(np.asarray(img, dtype=np.uint8)[::-1])     # bottom row first
         h, w = img.shape[:2]
         comps = img.shape[2] if img.ndim == 3 else 1
@@ -188,14 +226,15 @@ class Shadertoy:
             if tex is not None:
                 tex.release()
             tex = ctx.texture((w, h), comps)
-            tex.filter = (mgl.LINEAR_MIPMAP_LINEAR, mgl.LINEAR)
-            tex.repeat_x = tex.repeat_y = True
+            tex.filter = (mgl.LINEAR, mgl.LINEAR) if sound else (mgl.LINEAR_MIPMAP_LINEAR, mgl.LINEAR)
+            tex.repeat_x = tex.repeat_y = not sound
             self._tex[key] = tex
         tex.write(img.tobytes())
-        tex.build_mipmaps()
+        if not sound:
+            tex.build_mipmaps()
         return tex
 
-    def _inputs(self, pass_: str, frame):
+    def _inputs(self, pass_: str, frame, sound=None):
         """The textures a pass reads, bound to units 1..4, and their sizes."""
         textures, res = {}, [(0.0, 0.0, 1.0)] * CHANNELS
         for i, src in self.channels.get(pass_, {}).items():
@@ -203,6 +242,10 @@ class Shadertoy:
                 b = src[7:]
                 tex = self._tex_buf[b][self._cur[b]]     # this frame's if it has run, else the last one
                 size = (self.RW, self.RH)
+            elif src == "sound":
+                img = sound if sound is not None else np.zeros((2, SOUND_BINS), np.uint8)
+                tex = self._upload((pass_, i), img, sound=True)
+                size = (img.shape[1], img.shape[0])
             else:
                 img = frame if src == "frame" else self._previous if src == "previous" else src
                 if img is None or isinstance(img, str):
@@ -213,9 +256,9 @@ class Shadertoy:
             res[i] = (float(size[0]), float(size[1]), 1.0)
         return textures, res
 
-    def render(self, time: float, dt: float = 1.0 / 30, frame=None, **uniforms) -> np.ndarray:
-        """Draw at shader time ``time``; ``frame`` the picture for "frame" channels; ``uniforms``
-        the extra knobs."""
+    def render(self, time: float, dt: float = 1.0 / 30, frame=None, sound=None, **uniforms) -> np.ndarray:
+        """Draw at shader time ``time``; ``frame`` the picture for "frame" channels, ``sound`` the
+        texture for "sound" ones (``sound_texture``); ``uniforms`` the extra knobs."""
         now = _time.localtime(0)
         values = dict(iResolution=(float(self.RW), float(self.RH), 1.0), iTime=float(time),
                       iTimeDelta=float(dt), iFrameRate=1.0 / max(1e-6, float(dt)), iFrame=int(self._frame),
@@ -229,15 +272,17 @@ class Shadertoy:
                 if b not in self.buffers:
                     continue
                 prog, vao = self._progs[b]
-                textures, res = self._inputs(b, frame)
+                textures, res = self._inputs(b, frame, sound)
                 _set(prog, {**values, "iChannelResolution": res})
                 for unit, tex in textures.items():
                     tex.use(unit)
                 nxt = 1 - self._cur[b]
                 self._fbo_buf[b][nxt].use()
                 vao.render(self._pass._mgl.TRIANGLE_STRIP)
+                if b in self._mip:
+                    self._tex_buf[b][nxt].build_mipmaps()
                 self._cur[b] = nxt
-            textures, res = self._inputs("image", frame)
+            textures, res = self._inputs("image", frame, sound)
         out = self._pass.draw(textures=textures, **values, iChannelResolution=res)
         self._previous = out
         self._frame += 1

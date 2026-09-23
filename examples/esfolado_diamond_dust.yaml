@@ -1,0 +1,29 @@
+# Esfolado — "Diamond Dust": o pó de diamante do Tonny Espeset (shadertoy ffKXRw; livre com
+# crédito e link), na cópia shaders/shadertoy/diamond_dust_arc, onde a TEXTURA do som molda o
+# padrão do chão e os flocos (compassos 21–33, o luto: é onde a textura mais varia):
+#   harmonic_change   a harmonia mudando torce o padrão (mais distorção nas ondas)
+#   noisiness         som ruidoso deixa o padrão áspero (mais detalhe fino); tonal, liso
+#   loudness          o padrão escorre pelo chão, e os flocos brilham mais quando está alto
+#   swell             crescendo amplia o padrão; diminuendo encolhe
+#   tremolo           as ondas ondulam no ritmo do tremolo, com a profundidade dele
+#   percussive        percussão faz os flocos girarem mais
+# O relógio do shader começa em 0 (o estilo dourado, da demo Empires) e troca de estilo a cada 11 s.
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --scene examples/esfolado_diamond_dust.yaml --start-time 56.018 --bars 13 \
+#       --resolution 1280x720 --fps 30 --output render_output/esfolado_diamond_dust_c21-33.mp4
+video:
+  layers:
+    - source: shadertoy
+      file: shaders/shadertoy/diamond_dust_arc
+      start: 0.0
+      uniforms:
+        u_warp: {feature: texture.harmonic_change, gain: 1.5}
+        u_rough: {feature: texture.noisiness, gain: 0.3, bias: -0.07}
+        u_flow: {rate: 0.05, from: texture.loudness}
+        u_breath: {feature: texture.swell, gain: -0.4}
+        u_ripple: {feature: texture.tremolo_depth, gain: 1.2}
+        u_trem_phase: {rate: 6.283, from: texture.tremolo_rate}
+        u_glint: {feature: texture.loudness, gain: 5.0, bias: -4.0}
+        u_spin: {rate: 1.5, from: texture.percussive}

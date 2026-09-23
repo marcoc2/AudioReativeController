@@ -1691,6 +1691,127 @@ class SandLinesLayer:
         return self.sand.render(dt, rings, hue=self.hue, sat=self._sat)
 
 
+def _music_knob(name: str, how, notes: Sequence, features_at=None, onset_loader=None, grid=None):
+    """A value that follows the music, as ``t -> float`` (called once a frame, in time order):
+
+        0.5                                       a constant
+        subbands.bass                             an audio feature
+        {feature: texture.noisiness, gain: 1, bias: 0}   an audio feature, scaled: bias + gain * feature
+        {hits: <trigger>, envelope: 0.25, amount: 1}   1 -> 0 after each hit
+        {count: <trigger>, per: bar}              hits so far in the current bar (0 at the bar's start)
+        {pitch: <trigger>, low: 36, high: 84, glide: 0.1}   the latest note's pitch, low..high -> 0..1
+        {rate: 2.0, base: 0.3, from: <any of these>}   keeps adding (base + rate * from) per second
+        {bar: {step: 1, offset: 0, morph: 0.35}}  goes up by ``step`` at each bar, over its first
+                                                  ``morph`` seconds (a shape per bar, melting into the next)
+        {harmony: {score: ..., snap: auto}, glide: 1.2}   the hue (0..1) of the chord's root, gliding
+                                                  the short way round the colour wheel
+        {since: <trigger>, nth: 0}                seconds since the latest hit (nth: 1 the one before, ...);
+                                                  1000 before there was one
+    """
+    if isinstance(how, (int, float)):
+        return lambda t, v=float(how): v
+    if isinstance(how, str):
+        return lambda t: _feature((features_at(t) if features_at else None) or {}, how)
+    if isinstance(how, dict) and "feature" in how:
+        path, gain, bias = str(how["feature"]), float(how.get("gain", 1.0)), float(how.get("bias", 0.0))
+        return lambda t: bias + gain * _feature((features_at(t) if features_at else None) or {}, path)
+    if isinstance(how, dict) and "hits" in how:
+        env = EnvelopeOpacity(_layer_hits(how["hits"], notes, onset_loader, grid), float(how.get("envelope", 0.25)))
+        return lambda t, k=float(how.get("amount", 1.0)): k * env(t)
+    if isinstance(how, dict) and "count" in how:
+        if how.get("per", "bar") != "bar":
+            raise ValueError(f"uniform {name!r}: count per {how.get('per')!r} (only per: bar)")
+        if grid is None:
+            raise ValueError(f"uniform {name!r}: count per bar needs a rhythm grid (render with --midi)")
+        times = np.array(sorted(_layer_hits(how["count"], notes, onset_loader, grid)), dtype=float)
+        db = getattr(grid, "downbeats", None)
+
+        def count(t):
+            if db is not None and len(db):
+                i = int(np.searchsorted(db, t, side="right")) - 1
+                start = float(db[i]) if i >= 0 else -np.inf
+            else:
+                start = grid.start_offset + ((t - grid.start_offset) // grid.bar_duration) * grid.bar_duration
+            return float(np.searchsorted(times, t, side="right") - np.searchsorted(times, start, side="left"))
+        return count
+    if isinstance(how, dict) and "pitch" in how:
+        events = _layer_events(how["pitch"], notes, onset_loader, grid)
+        times = np.array([e.time for e in events], dtype=float)
+        low, high = float(how.get("low", 36)), float(how.get("high", 84))
+        pitches = np.clip((np.array([e.pitch for e in events], dtype=float) - low) / max(1.0, high - low), 0, 1)
+        glide = max(1e-3, float(how.get("glide", 0.1)))
+        state = {"v": None, "t": None}
+
+        def pitch(t):
+            i = int(np.searchsorted(times, t, side="right")) - 1
+            target = float(pitches[i]) if i >= 0 else 0.5
+            if state["v"] is None:
+                state["v"] = target
+            else:
+                state["v"] += (target - state["v"]) * (1 - np.exp(-max(0.0, t - state["t"]) / glide))
+            state["t"] = t
+            return state["v"]
+        return pitch
+    if isinstance(how, dict) and "rate" in how:
+        src = _music_knob(name, how.get("from", 1.0), notes, features_at, onset_loader, grid)
+        rate, base = float(how["rate"]), float(how.get("base", 0.0))
+        state = {"v": 0.0, "t": None}
+
+        def accumulate(t):
+            v = src(t)
+            if state["t"] is not None:
+                state["v"] += max(0.0, t - state["t"]) * (base + rate * v)
+            state["t"] = t
+            return state["v"]
+        return accumulate
+    if isinstance(how, dict) and "since" in how:
+        times = np.array(sorted(_layer_hits(how["since"], notes, onset_loader, grid)), dtype=float)
+        nth = int(how.get("nth", 0))
+
+        def since(t):
+            i = int(np.searchsorted(times, t, side="right")) - 1 - nth
+            return float(t - times[i]) if i >= 0 else 1000.0
+        return since
+    if isinstance(how, dict) and "bar" in how:
+        if grid is None:
+            raise ValueError(f"uniform {name!r}: bar needs a rhythm grid (render with --midi)")
+        cfg = how["bar"] or {}
+        step, offset = float(cfg.get("step", 1.0)), float(cfg.get("offset", 0.0))
+        morph = max(1e-3, float(cfg.get("morph", 0.35)))
+        db = getattr(grid, "downbeats", None)
+
+        def bar(t):
+            if db is not None and len(db):
+                i = int(np.searchsorted(db, t, side="right")) - 1
+                start = float(db[max(i, 0)])
+            else:
+                i = int((t - grid.start_offset) // grid.bar_duration)
+                start = grid.start_offset + i * grid.bar_duration
+            x = float(np.clip((t - start) / morph, 0.0, 1.0))
+            return offset + step * (i - 1 + x * x * (3 - 2 * x))
+        return bar
+    if isinstance(how, dict) and "harmony" in how:
+        chords = _layer_events(how["harmony"], notes, onset_loader, grid)
+        times = np.array([e.time for e in chords], dtype=float)
+        glide = max(1e-3, float(how.get("glide", 1.2)))
+        state = {"h": None, "t": None}
+
+        def hue(t):
+            i = int(np.searchsorted(times, t, side="right")) - 1
+            if i < 0:
+                return state["h"] if state["h"] is not None else float(how.get("start", 0.6))
+            target = VeilsLayer.hue_of_root(chords[i].pitch)
+            if state["h"] is None:
+                state["h"] = target
+            else:
+                gap = (target - state["h"] + 0.5) % 1.0 - 0.5
+                state["h"] = (state["h"] + gap * (1 - math.exp(-max(0.0, t - state["t"]) / glide))) % 1.0
+            state["t"] = t
+            return state["h"]
+        return hue
+    raise ValueError(f"uniform {name!r}: use a number, a feature path, or {{feature|hits|count|pitch|rate|bar|harmony|since: ...}}")
+
+
 class ShadertoyLayer:
     """A shader from shadertoy.com, run as it is (``core/shadertoy``, GPU); the music drives its clock and knobs.
 
@@ -1698,14 +1819,20 @@ class ShadertoyLayer:
           file: shaders/shadertoy/some_shader.glsl   # or a folder: image.glsl, buffer_a.glsl .., common.glsl
           channel0: frame           # what the Image pass reads (overrides the file's ``// iChannel0:`` line):
                                     # frame: the picture below (the layer is then a post-op) | previous: its
-                                    # own last output | buffer_a .. buffer_d | a path to an image | none
+                                    # own last output | buffer_a .. buffer_d | sound: the music as Shadertoy's
+                                    # sound input (spectrum + waveform) | a path to an image | none
           supersample: 1
           speed: 1.0                # how fast the shader's clock (iTime) runs
+          start: 0.0                # the clock at the first frame (default: the song's time there)
           rush: {hits: {track: kick}, amount: 3.0, envelope: 0.3}   # the clock rushes on each hit
           uniforms:                 # float knobs of the shader's own (declared for it if it does not)
             u_bass: subbands.bass   # an audio feature
             u_kick: {hits: {track: kick}, envelope: 0.25}           # a pulse on each hit, 1 -> 0
             u_amount: 0.5           # a constant
+            u_count: {count: {track: kick}, per: bar}               # hits so far in this bar (0 at its start)
+            u_note: {pitch: {track: bass}, low: 36, high: 60, glide: 0.1}   # the last note's pitch, 0..1
+            u_spin: {rate: 2.0, base: 0.3, from: {hits: {track: bass}, envelope: 0.2}}
+                                    # an angle that keeps turning: base + rate * (a knob as above) per second
 
     When any pass reads ``frame`` it is a post-op (the picture under it goes in);
     otherwise a source, blended like any other.
@@ -1730,45 +1857,42 @@ class ShadertoyLayer:
         def resolve(src):
             if src in (None, "none"):
                 return None
-            if src in ("frame", "previous") or str(src).startswith("buffer_"):
+            if src in ("frame", "previous", "sound") or str(src).startswith("buffer_"):
                 return src
             from PIL import Image
             return np.asarray(Image.open(src).convert("RGB"))
         channels = {p: {i: resolve(src) for i, src in chans.items() if resolve(src) is not None}
                     for p, chans in channels.items()}
-        self._knobs = {}
-        for name, how in (spec.get("uniforms") or {}).items():
-            if isinstance(how, (int, float)):
-                self._knobs[name] = (lambda t, v=float(how): v)
-            elif isinstance(how, str):
-                self._knobs[name] = (lambda t, path=how: _feature(
-                    (self.features_at(t) if self.features_at else None) or {}, path))
-            elif isinstance(how, dict) and "hits" in how:
-                env = EnvelopeOpacity(_layer_hits(how["hits"], notes, onset_loader, grid),
-                                      float(how.get("envelope", 0.25)))
-                self._knobs[name] = (lambda t, e=env, k=float(how.get("amount", 1.0)): k * e(t))
-            else:
-                raise ValueError(f"shadertoy: uniform {name!r}: use a number, a feature path or {{hits: ...}}")
+        self._knobs = {name: _music_knob(name, how, notes, features_at, onset_loader, grid)
+                       for name, how in (spec.get("uniforms") or {}).items()}
         self.toy = Shadertoy(shader["image"], width, height, supersample=int(spec.get("supersample", 1)),
                              extra=tuple(self._knobs), buffers={b: shader.get(b) for b in BUFFERS},
                              common=shader.get("common", ""), channels=channels)
         self._speed = float(spec.get("speed", 1.0))
+        self._start = spec.get("start")
         rspec = spec.get("rush")
         self._rush = EnvelopeOpacity(_layer_hits(rspec["hits"], notes, onset_loader, grid),
                                      float(rspec.get("envelope", 0.3))) if rspec else None
         self._rush_amount = float(rspec.get("amount", 3.0)) if rspec else 0.0
         self._clock = 0.0
         self._last_t = None
+        self._hears = self.toy.reads("sound")
 
     def _draw(self, below, t: float) -> np.ndarray:
         dt = 1.0 / self.fps if self._last_t is None else max(0.0, t - self._last_t)
         if self._last_t is None:
-            self._clock = t * self._speed                    # starts where the song is
+            self._clock = t * self._speed if self._start is None else float(self._start)   # where the song is
         else:
             rush = self._rush_amount * self._rush(t) if self._rush else 0.0
             self._clock += dt * (self._speed + rush)
         self._last_t = t
-        return self.toy.render(self._clock, dt, frame=below, **{k: f(t) for k, f in self._knobs.items()})
+        sound = None
+        if self._hears:                                      # Shadertoy's sound input, from our music
+            from core.shadertoy import sound_texture
+            feats = (self.features_at(t) if self.features_at else None) or {}
+            sound = sound_texture(feats.get("spectrum"), float(feats.get("nyquist", 22050.0)), feats.get("wave"))
+        return self.toy.render(self._clock, dt, frame=below, sound=sound,
+                               **{k: f(t) for k, f in self._knobs.items()})
 
     @property
     def is_post(self) -> bool:

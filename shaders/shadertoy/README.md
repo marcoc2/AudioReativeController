@@ -63,6 +63,10 @@ referência; não vai para vídeo publicado sem autorização do autor).
   uniforms:                        # botões próprios (float), declarados se o shader não declarar
     u_bass: subbands.bass          # um recurso do áudio
     u_kick: {hits: {track: kick}, envelope: 0.25}           # pulso 1 -> 0 a cada batida
+    u_count: {count: {track: kick}, per: bar}               # batidas já tocadas no compasso (0 no início)
+    u_note: {pitch: {track: bass}, low: 48, high: 53, glide: 0.08}   # altura da última nota, 0..1
+    u_spin: {rate: 4.0, base: 0.3, from: {hits: {track: bass}, envelope: 0.2}}
+                                   # um ângulo que não para: base + rate * (outro botão) por segundo
 ```
 
 Um shader só responde a um `uniforms:` se o usar: para ligar um botão num shader

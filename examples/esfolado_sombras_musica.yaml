@@ -1,0 +1,28 @@
+# Esfolado — "Sombras da música": o shader de sombras 2D do Flyguy (shadertoy XsK3RR) com cada
+# luz seguindo um instrumento do refrão (cópia shaders/shadertoy/sombras_2d_arc):
+#   vermelha (o farol dentro do anel)  acende no KICK
+#   rosa + verde (as luzes do mouse)   um par espelhado que pisca na CAIXA e gira a cada batida
+#   azul (orbita o anel)               o HI-HAT empurra a órbita e dá brilho
+#   amarela (direita)                  o ACID: pisca a cada nota, sobe e desce com a altura dela
+#   roxa (esquerda)                    o BAIXO: idem
+#   a fenda do anel                    gira com o BAIXO (lenta parada, acelera quando ele toca)
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --scene examples/esfolado_sombras_musica.yaml --start-time 13.351 --bars 9 \
+#       --resolution 1280x720 --fps 30 --output render_output/esfolado_sombras_musica_c6-14.mp4
+video:
+  layers:
+    - source: shadertoy
+      file: shaders/shadertoy/sombras_2d_arc
+      uniforms:
+        u_kick: {hits: {track: kick}, envelope: 0.35}
+        u_snare: {hits: {track: snare}, envelope: 0.3}
+        u_turn: {rate: 2.5, base: 0.1, from: {hits: {track: snare}, envelope: 0.3}}
+        u_orbit: {rate: 1.5, base: 0.2, from: {hits: {track: ez-hihat}, envelope: 0.12}}
+        u_hat: {hits: {track: ez-hihat}, envelope: 0.12}
+        u_acid: {hits: {track: acid}, envelope: 0.2}
+        u_acid_y: {pitch: {track: acid}, low: 48, high: 53, glide: 0.08}
+        u_bass: {hits: {track: bass}, envelope: 0.25}
+        u_bass_y: {pitch: {track: bass}, low: 48, high: 53, glide: 0.08}
+        u_spin: {rate: 4.0, base: 0.3, from: {hits: {track: bass}, envelope: 0.2}}
