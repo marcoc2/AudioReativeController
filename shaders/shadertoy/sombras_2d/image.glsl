@@ -1,7 +1,7 @@
 // title: 2D distance field shadows (6 luzes)
-// url: (preencher: link do shadertoy)
-// author: (preencher)
-// license: CC BY-NC-SA 3.0 (padrão do Shadertoy; confirmar)
+// url: https://www.shadertoy.com/view/XsK3RR
+// author: Flyguy (publicado em 2016-01-17)
+// license: CC BY-NC-SA 3.0 (padrão do Shadertoy: o código não declara outra)
 // iChannel0: buffer_a
 // notes: aba Image; lê o mapa de sombras do Buffer A (uma linha por luz)
 
