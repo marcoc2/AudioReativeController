@@ -92,6 +92,9 @@ class _State:
     scene_clip_per_bar: bool = True
     scene_clip_order: str = "shuffle"
     _scene_extra_video: dict = {}   # video-level keys the editor doesn't manage
+    # layers editor: one dict per scene layer (see _layers_to_rows)
+    layer_rows: list = []
+    _layer_counter: int = 0
 
     # preview playback
     preview_frames:   list  = []
@@ -133,6 +136,10 @@ class _State:
     # UI/audio sync calibration: added to the displayed time while playing.
     # Positive values push the UI forward (use when the audio sounds ahead).
     sync_offset_ms: int = 0
+    # the MIDI's place against the audio (s, added to every MIDI time) and meter
+    # changes ("22:6/4,27:5/4"), the same as clip_generator's --midi-offset / --meter
+    midi_offset: float = 0.0
+    meter: str = ""
     _last_controls_t: float = 0.0   # throttle for the controls tables
 
     # internal flag: stop scrubber → seek feedback loop
@@ -219,10 +226,26 @@ def _fill_table(tag: str, rows: list):
 # ---------------------------------------------------------------------------
 
 OUT_H, SPEED_H = 30, 26   # output-arrangement and speed-curve lane heights
+MIDI_ROW_H = 11           # one mini-row per MIDI track (note ticks + name)
+
+
+def _midi_lane_tracks() -> list:
+    """Track names in the MIDI lane, in the file's order."""
+    if not S.midi_notes:
+        return []
+    seen = {}
+    for n in S.midi_notes:
+        if n.track and n.track not in seen:
+            seen[n.track] = n.track_index
+    return sorted(seen, key=lambda t: seen[t])
+
+
+def _midi_lane_h() -> int:
+    return len(_midi_lane_tracks()) * MIDI_ROW_H
 
 
 def _timeline_height() -> int:
-    h = BAR_H + max(1, len(S._wave_sources)) * TRACK_H
+    h = BAR_H + max(1, len(S._wave_sources)) * TRACK_H + _midi_lane_h()
     if S.trigger_events:
         h += EVENT_H
     if S.resolved_segments:
@@ -335,9 +358,29 @@ def _draw_timeline_static():
                       f"zoom: {v0:.1f}s – {v1:.1f}s", size=11,
                       color=(255, 200, 120, 220), parent="timeline_canvas")
 
+    # MIDI lane: one mini-row per track — where each instrument plays (what track: selects)
+    tracks = _midi_lane_tracks()
+    if tracks:
+        ym = BAR_H + len(S._wave_sources) * TRACK_H
+        cols: dict = {t: set() for t in tracks}
+        for n in S.midi_notes:
+            if n.track in cols and v0 <= n.time <= v1:
+                cols[n.track].add(_t_to_x(n.time, v0, vd))
+        for ti, name in enumerate(tracks):
+            y = ym + ti * MIDI_ROW_H
+            color = TRACK_COLORS[(ti + 1) % len(TRACK_COLORS)]
+            dpg.draw_rectangle([0, y], [TIMELINE_W, y + MIDI_ROW_H],
+                               fill=(24, 26, 36, 150) if ti % 2 else (30, 32, 44, 150),
+                               color=(0, 0, 0, 0), parent="timeline_canvas")
+            for x in cols[name]:
+                dpg.draw_line([x, y + 2], [x, y + MIDI_ROW_H - 2], color=(*color, 210),
+                              thickness=1, parent="timeline_canvas")
+            dpg.draw_text([4, y], name, size=10, color=(220, 220, 220, 170),
+                          parent="timeline_canvas")
+
     # Trigger events lane + hand-over markers (clips scenes)
     if S.trigger_events:
-        y0 = BAR_H + len(S._wave_sources) * TRACK_H
+        y0 = BAR_H + len(S._wave_sources) * TRACK_H + _midi_lane_h()
         dpg.draw_rectangle([0, y0], [TIMELINE_W, y0 + EVENT_H],
                            fill=(30, 30, 42, 140), color=(0, 0, 0, 0),
                            parent="timeline_canvas")
@@ -370,7 +413,8 @@ def _draw_timeline_static():
 
     # Output lane: resolved clip blocks + direction, then the speed curve
     if S.resolved_segments:
-        y0 = BAR_H + len(S._wave_sources) * TRACK_H + (EVENT_H if S.trigger_events else 0)
+        y0 = (BAR_H + len(S._wave_sources) * TRACK_H + _midi_lane_h()
+              + (EVENT_H if S.trigger_events else 0))
         for seg in S.resolved_segments:
             if seg.t1 < v0 or seg.t0 > v1:
                 continue
@@ -505,7 +549,29 @@ def _clear_stem_rows():
 # ---------------------------------------------------------------------------
 
 _TRIG_KNOWN_KEYS = {"notes", "audio", "actions", "until", "min_velocity",
-                    "gravity", "threshold", "min_gap"}
+                    "gravity", "threshold", "min_gap",
+                    "track", "score", "events", "snap", "voice"}
+TRIG_SOURCES = ["notes", "track", "audio", "score"]
+SCORE_EVENTS_UI = ["chord_changes", "section_changes", "melody"]
+SCORE_SNAPS_UI = ["auto", "bar", "beat", "off"]
+
+
+def _trig_source(spec: dict) -> str:
+    """Where a trigger's hits come from (the same precedence the composer uses)."""
+    if "audio" in spec:
+        return "audio"
+    if "score" in spec:
+        return "score"
+    if "track" in spec:
+        return "track"
+    return "notes"
+
+
+def _parse_tracks(text: str):
+    """"kick, kick-2" -> ["kick", "kick-2"]; one name stays a plain string; digits are indexes."""
+    items = [t.strip() for t in str(text).split(",") if t.strip()]
+    items = [int(t) if t.isdigit() else t for t in items]
+    return items[0] if len(items) == 1 else items
 
 
 def _video_cfg_to_rows(video_cfg: dict) -> list:
@@ -513,10 +579,17 @@ def _video_cfg_to_rows(video_cfg: dict) -> list:
     rows = []
     for name, spec in (video_cfg.get("triggers") or {}).items():
         g = spec.get("gravity") or {}
+        track = spec.get("track", "")
         rows.append({
             "name": name,
-            "source": "audio" if "audio" in spec else "notes",
+            "source": _trig_source(spec),
             "notes": ",".join(str(n) for n in spec.get("notes", [])),
+            "track": ", ".join(str(t) for t in track) if isinstance(track, (list, tuple))
+                     else str(track),
+            "score": str(spec.get("score", "")),
+            "events": spec.get("events", "chord_changes"),
+            "snap": spec.get("snap", "auto"),
+            "voice": str(spec.get("voice", "")),
             "audio": spec.get("audio", ""),
             "threshold": float(spec.get("threshold", 0.3)),
             "min_gap": float(spec.get("min_gap", 0.05)),
@@ -545,15 +618,32 @@ def _rows_to_video_cfg(rows: list, clip_per_bar: bool, clip_order: str,
         if not name:
             continue
         spec = dict(r.get("_extra") or {})
-        if r.get("source") == "audio" and r.get("audio"):
+        source = r.get("source", "notes")
+        notes = [
+            int(x) for x in str(r.get("notes", "")).replace(";", ",").split(",")
+            if x.strip().lstrip("-").isdigit()
+        ]
+        if source == "audio" and r.get("audio"):
             spec["audio"]     = r["audio"]
             spec["threshold"] = float(r.get("threshold", 0.3))
             spec["min_gap"]   = float(r.get("min_gap", 0.05))
+        elif source == "track" and str(r.get("track", "")).strip():
+            spec["track"] = _parse_tracks(r["track"])
+            if notes:                              # optional: only these pitches of the track
+                spec["notes"] = notes
+        elif source == "score" and str(r.get("score", "")).strip():
+            spec["score"] = str(r["score"]).strip()
+            events = r.get("events", "chord_changes")
+            if events != "chord_changes":          # the composer's default
+                spec["events"] = events
+            if r.get("snap", "auto") != "auto":
+                spec["snap"] = r["snap"]
+            if events == "melody" and str(r.get("voice", "")).strip():
+                spec["voice"] = str(r["voice"]).strip()
+            if notes:                              # optional: e.g. only changes into G#
+                spec["notes"] = notes
         else:
-            spec["notes"] = [
-                int(x) for x in str(r.get("notes", "")).replace(";", ",").split(",")
-                if x.strip().lstrip("-").isdigit()
-            ]
+            spec["notes"] = notes
         spec["actions"] = [a.strip() for a in str(r.get("actions", "")).split(",")
                            if a.strip()]
         if str(r.get("until", "")).strip():
@@ -600,11 +690,41 @@ def _pick_trig_audio(s, a):
             dpg.set_value(f"trig_audio_label_{rid}", Path(p).name)
 
 
+_track_names_cache: dict = {}
+
+
+def _midi_track_names() -> list:
+    """The MIDI's track names (what ``track:`` triggers select), for the editor's menu."""
+    if S.midi_notes:
+        return sorted({n.track for n in S.midi_notes if n.track})
+    if not S.midi_path or not Path(S.midi_path).is_file():
+        return []
+    if S.midi_path not in _track_names_cache:
+        try:
+            from core.rhythm.midi_reader import read_midi
+            _, notes = read_midi(S.midi_path)
+            _track_names_cache[S.midi_path] = sorted({n.track for n in notes if n.track})
+        except Exception:
+            _track_names_cache[S.midi_path] = []
+    return _track_names_cache[S.midi_path]
+
+
+def _default_score_path() -> str:
+    """input/<song>/sheetsage next to the audio, when SheetSage has run for it."""
+    if S.audio_path:
+        cand = Path(S.audio_path).parent / "sheetsage"
+        if cand.is_dir():
+            return cand.as_posix()
+    return ""
+
+
 def _add_trigger_row(cfg: Optional[dict] = None) -> None:
     rid = S._trig_counter
     S._trig_counter += 1
     tag = f"trig_row_{rid}"
     row = {"name": f"trig{rid}", "source": "notes", "notes": "36", "audio": "",
+           "track": "", "score": _default_score_path(), "events": "chord_changes",
+           "snap": "auto", "voice": "",
            "threshold": 0.3, "min_gap": 0.05, "actions": "next_clip", "until": "",
            "min_vel": 0, "grav_on": False, "peak": 3.0, "floor": 0.3,
            "radius": 0.45, "curve": 2.0, "_extra": {}}
@@ -617,21 +737,58 @@ def _add_trigger_row(cfg: Optional[dict] = None) -> None:
     def _set(key):
         return lambda s, v, u=row: u.update({key: v})
 
+    def _on_source(s, v, u=row):
+        u["source"] = v
+        for src in TRIG_SOURCES:
+            if dpg.does_item_exist(f"trig_{src}_{rid}"):
+                dpg.configure_item(f"trig_{src}_{rid}", show=(src == v))
+
+    def _add_track(s, v, u=row):
+        names = [t.strip() for t in u["track"].split(",") if t.strip()]
+        if v and v not in names:
+            names.append(v)
+        u["track"] = ", ".join(names)
+        dpg.set_value(f"trig_track_text_{rid}", u["track"])
+
     with dpg.group(tag=tag, parent="triggers_panel"):
         with dpg.group(horizontal=True):
             dpg.add_input_text(default_value=row["name"], width=70,
                                callback=_set("name"))
-            dpg.add_combo(["notes", "audio"], default_value=row["source"], width=70,
-                          callback=_set("source"))
+            dpg.add_combo(TRIG_SOURCES, default_value=row["source"], width=70,
+                          callback=_on_source)
             dpg.add_text("notes:")
-            dpg.add_input_text(default_value=row["notes"], width=70,
+            dpg.add_input_text(default_value=row["notes"], width=60, hint="36,38",
                                callback=_set("notes"))
-            dpg.add_button(label="Audio…", width=60,
-                           callback=lambda s, a, u=row: (
-                               _trig_audio_target.update({"row": u}),
-                               dpg.show_item("dlg_trig_audio")))
-            dpg.add_text(Path(row["audio"]).name if row["audio"] else "(none)",
-                         tag=f"trig_audio_label_{rid}")
+            # per-source fields; only the chosen source's group shows
+            with dpg.group(horizontal=True, tag=f"trig_notes_{rid}",
+                           show=row["source"] == "notes"):
+                pass
+            with dpg.group(horizontal=True, tag=f"trig_track_{rid}",
+                           show=row["source"] == "track"):
+                dpg.add_text("track:")
+                dpg.add_input_text(default_value=row["track"], width=130, hint="kick, kick-2",
+                                   tag=f"trig_track_text_{rid}", callback=_set("track"))
+                dpg.add_combo(_midi_track_names(), width=90, default_value="",
+                              callback=_add_track)
+            with dpg.group(horizontal=True, tag=f"trig_audio_{rid}",
+                           show=row["source"] == "audio"):
+                dpg.add_button(label="Audio…", width=60,
+                               callback=lambda s, a, u=row: (
+                                   _trig_audio_target.update({"row": u}),
+                                   dpg.show_item("dlg_trig_audio")))
+                dpg.add_text(Path(row["audio"]).name if row["audio"] else "(none)",
+                             tag=f"trig_audio_label_{rid}")
+            with dpg.group(horizontal=True, tag=f"trig_score_{rid}",
+                           show=row["source"] == "score"):
+                dpg.add_input_text(default_value=row["score"], width=150,
+                                   hint="input/música/sheetsage", callback=_set("score"))
+                dpg.add_combo(SCORE_EVENTS_UI, default_value=row["events"], width=110,
+                              callback=_set("events"))
+                dpg.add_text("snap")
+                dpg.add_combo(SCORE_SNAPS_UI, default_value=row["snap"], width=55,
+                              callback=_set("snap"))
+                dpg.add_input_text(default_value=row["voice"], width=80,
+                                   hint="voice (melody)", callback=_set("voice"))
             dpg.add_button(label="x", width=24,
                            callback=lambda s, a, u=(tag, row): _remove_trigger_row(*u))
         active = {a.strip() for a in str(row["actions"]).split(",") if a.strip()}
@@ -673,6 +830,181 @@ def _clear_trigger_rows():
             dpg.delete_item(t)
     S.trig_rows.clear()
 
+# ---------------------------------------------------------------------------
+# Scene layer editor (dynamic rows)
+# ---------------------------------------------------------------------------
+
+# the keys a layer row edits with its own widgets; everything else is the row's params YAML
+_LAYER_KEYS = ("source", "enabled", "file", "blend", "opacity", "bars")
+_BLEND_ORDER = ["normal", "add", "screen", "multiply"]
+_NEW_LAYER_PARAMS = {"solid": "color: [0, 0, 0]\n"}
+
+
+def _shader_choices() -> list:
+    """The Shadertoy shaders in the project: single .glsl files and multipass folders."""
+    root = Path("shaders/shadertoy")
+    if not root.is_dir():
+        return []
+    out = [f.as_posix() for f in root.glob("*.glsl")]
+    out += [d.as_posix() for d in root.iterdir() if d.is_dir() and (d / "image.glsl").is_file()]
+    return sorted(out)
+
+
+def _yaml_flow(value) -> str:
+    import yaml
+    return yaml.safe_dump(value, default_flow_style=True, allow_unicode=True).strip()
+
+
+def _layers_to_rows(video_cfg: dict) -> list:
+    """Scene ``layers:`` -> editor row dicts (params YAML keeps what the row has no widget for)."""
+    import yaml
+    rows = []
+    for spec in video_cfg.get("layers") or []:
+        spec = spec or {}
+        params = {k: v for k, v in spec.items() if k not in _LAYER_KEYS}
+        op = spec.get("opacity", 1.0)
+        rows.append({
+            "source":  spec.get("source", "clips"),
+            "enabled": spec.get("enabled", True) is not False,
+            "file":    str(spec.get("file", "") or ""),
+            "blend":   spec.get("blend", "normal"),
+            "opacity": float(op) if isinstance(op, (int, float)) else 1.0,
+            "bars":    _yaml_flow(spec["bars"]) if "bars" in spec else "",
+            "params":  yaml.safe_dump(params, allow_unicode=True, sort_keys=False)
+                       if params else "",
+        })
+    return rows
+
+
+def _rows_to_layers(rows: list) -> list:
+    """Editor rows -> scene ``layers:``; raises ValueError naming the row whose YAML is wrong."""
+    import yaml
+    layers = []
+    for i, r in enumerate(rows, 1):
+        spec = {"source": r["source"]}
+        if not r.get("enabled", True):
+            spec["enabled"] = False
+        if r.get("file"):
+            spec["file"] = r["file"]
+        if r.get("blend", "normal") != "normal":
+            spec["blend"] = r["blend"]
+        if abs(float(r.get("opacity", 1.0)) - 1.0) > 1e-6:
+            spec["opacity"] = round(float(r["opacity"]), 3)
+        bars = str(r.get("bars", "")).strip()
+        if bars:
+            try:
+                spec["bars"] = yaml.safe_load(bars)
+            except yaml.YAMLError as exc:
+                raise ValueError(f"layer {i} ({r['source']}): bars is not valid YAML: {exc}")
+        text = str(r.get("params", "")).strip()
+        if text:
+            try:
+                params = yaml.safe_load(text)
+            except yaml.YAMLError as exc:
+                raise ValueError(f"layer {i} ({r['source']}): params are not valid YAML: {exc}")
+            if not isinstance(params, dict):
+                raise ValueError(f"layer {i} ({r['source']}): params must be 'key: value' lines")
+            spec.update({k: v for k, v in params.items() if k not in _LAYER_KEYS})
+        layers.append(spec)
+    return layers
+
+
+def _add_layer_row(cfg: Optional[dict] = None) -> None:
+    row = {"source": "solid", "enabled": True, "file": "", "blend": "normal",
+           "opacity": 1.0, "bars": "", "params": ""}
+    if cfg:
+        row.update(cfg)
+    row["_rid"] = S._layer_counter
+    S._layer_counter += 1
+    S.layer_rows.append(row)
+
+
+def _draw_layer_rows() -> None:
+    """(Re)build the layer panel from S.layer_rows — the order on screen is the stack order."""
+    if not dpg.does_item_exist("layers_panel"):
+        return
+    dpg.delete_item("layers_panel", children_only=True)
+    shaders = _shader_choices()
+    n = len(S.layer_rows)
+    for i, row in enumerate(S.layer_rows):
+        def _set(key, row=row):
+            return lambda s, v: row.update({key: v})
+        with dpg.group(parent="layers_panel"):
+            with dpg.group(horizontal=True):
+                dpg.add_checkbox(default_value=row["enabled"], callback=_set("enabled"))
+                dpg.add_text(f"{i + 1}. {row['source']}",
+                             color=(230, 210, 140) if row["enabled"] else (110, 110, 110))
+                if i == 0:
+                    dpg.add_text("(base)", color=(120, 120, 140))
+                else:
+                    dpg.add_combo(_BLEND_ORDER, default_value=row["blend"], width=80,
+                                  callback=_set("blend"))
+                dpg.add_text("opacity")
+                dpg.add_slider_float(default_value=row["opacity"], min_value=0.0,
+                                     max_value=1.0, width=80, format="%.2f",
+                                     callback=_set("opacity"))
+                dpg.add_text("bars")
+                dpg.add_input_text(default_value=row["bars"], width=130,
+                                   hint="[[21, 33]]", callback=_set("bars"))
+                dpg.add_button(label="^", width=20, enabled=i > 0,
+                               callback=lambda s, a, u=i: _move_layer(u, -1))
+                dpg.add_button(label="v", width=20, enabled=i < n - 1,
+                               callback=lambda s, a, u=i: _move_layer(u, +1))
+                dpg.add_button(label="x", width=20,
+                               callback=lambda s, a, u=i: _remove_layer(u))
+            if row["source"] == "shadertoy":
+                with dpg.group(horizontal=True):
+                    dpg.add_text("     shader")
+                    choices = shaders if row["file"] in shaders or not row["file"] \
+                        else [row["file"]] + shaders
+                    dpg.add_combo(choices, default_value=row["file"], width=360,
+                                  callback=_set("file"))
+            lines = max(2, min(14, str(row["params"]).count("\n") + 2))
+            with dpg.tree_node(label="     params (YAML)", default_open=False):
+                dpg.add_input_text(default_value=row["params"], multiline=True,
+                                   width=560, height=lines * 17, tab_input=True,
+                                   callback=_set("params"))
+            dpg.add_spacer(height=2)
+
+
+def _move_layer(i: int, step: int) -> None:
+    j = i + step
+    if 0 <= j < len(S.layer_rows):
+        S.layer_rows[i], S.layer_rows[j] = S.layer_rows[j], S.layer_rows[i]
+        _draw_layer_rows()
+
+
+def _remove_layer(i: int) -> None:
+    if 0 <= i < len(S.layer_rows):
+        S.layer_rows.pop(i)
+        _draw_layer_rows()
+
+
+def btn_add_layer() -> None:
+    src = dpg.get_value("new_layer_source") or "solid"
+    cfg = {"source": src, "params": _NEW_LAYER_PARAMS.get(src, "")}
+    if src == "shadertoy":
+        shaders = _shader_choices()
+        cfg["file"] = shaders[0] if shaders else ""
+    _add_layer_row(cfg)
+    _draw_layer_rows()
+
+
+def _leading_comments(path: str) -> str:
+    """The comment block at the top of a scene file (credits, how to render), kept on save."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, UnicodeDecodeError):
+        return ""
+    head = []
+    for ln in lines:
+        if ln.startswith("#") or not ln.strip():
+            head.append(ln)
+        else:
+            break
+    return "\n".join(head).rstrip() + "\n" if any(l.startswith("#") for l in head) else ""
+
+
 
 def btn_scene_to_editor():
     import yaml
@@ -685,19 +1017,24 @@ def btn_scene_to_editor():
     S.scene_clip_per_bar = bool(video.get("clip_per_bar", True))
     S.scene_clip_order   = video.get("clip_order", "shuffle")
     S._scene_extra_video = {k: v for k, v in video.items()
-                            if k not in ("clip_per_bar", "clip_order", "triggers")}
+                            if k not in ("clip_per_bar", "clip_order", "triggers", "layers")}
     dpg.set_value("scene_cpb_check", S.scene_clip_per_bar)
     dpg.set_value("scene_order_combo", S.scene_clip_order)
     _clear_trigger_rows()
     for cfg in _video_cfg_to_rows(video):
         _add_trigger_row(cfg)
+    S.layer_rows = []
+    for cfg in _layers_to_rows(video):
+        _add_layer_row(cfg)
+    _draw_layer_rows()
     if dpg.does_item_exist("scene_editor_label"):
         n = len(S.trig_rows)
         dpg.set_value("scene_editor_label",
                       f"editando: {Path(S.scene_path).name} — "
                       f"{n} trigger(s) ativos" if n else
                       f"editando: {Path(S.scene_path).name} — sem triggers (adicione)")
-    _log(f"Editor <- {Path(S.scene_path).name}: {len(S.trig_rows)} trigger(s)")
+    _log(f"Editor <- {Path(S.scene_path).name}: {len(S.trig_rows)} trigger(s), "
+         f"{len(S.layer_rows)} layer(s)")
 
 
 def btn_editor_to_scene():
@@ -705,14 +1042,25 @@ def btn_editor_to_scene():
     video = _rows_to_video_cfg(S.trig_rows, S.scene_clip_per_bar,
                                S.scene_clip_order, S._scene_extra_video)
     try:
+        layers = _rows_to_layers(S.layer_rows)
+    except ValueError as exc:
+        _set_status(f"Scene NÃO salva — {exc}")
+        _log(f"Scene não salva: {exc}")
+        return
+    if layers:                                   # no layers: the legacy single clips base
+        video["layers"] = layers
+    try:
         with open(S.scene_path, encoding="utf-8") as f:
             scene = yaml.safe_load(f) or {}
     except FileNotFoundError:
         scene = {}
     scene["video"] = video
+    header = _leading_comments(S.scene_path)   # the file's credits / how-to survive the rewrite
     with open(S.scene_path, "w", encoding="utf-8") as f:
+        f.write(header)
         yaml.dump(scene, f, allow_unicode=True, sort_keys=False)
-    _log(f"Scene salva -> {S.scene_path} ({len(video['triggers'])} triggers)")
+    _log(f"Scene salva -> {S.scene_path} ({len(video['triggers'])} triggers, "
+         f"{len(layers)} layers)")
     _set_status(f"Scene salva: {Path(S.scene_path).name}")
     if dpg.does_item_exist("scene_editor_label"):
         dpg.set_value("scene_editor_label",
@@ -737,6 +1085,8 @@ def _project_dict() -> dict:
         "scene": S.scene_path,
         "skip_separation": S.skip_separation,
         "sync_offset_ms": S.sync_offset_ms,
+        "midi_offset": S.midi_offset,
+        "meter": S.meter,
         "stems": {r["name"]: r["path"] for r in S.stem_rows if r["name"] and r["path"]},
         "render": {
             "bars":       S.bars,
@@ -786,6 +1136,8 @@ def _apply_project(data: dict):
     S.scene_path      = data.get("scene", S.scene_path)
     S.skip_separation = bool(data.get("skip_separation", False))
     S.sync_offset_ms  = int(data.get("sync_offset_ms", S.sync_offset_ms))
+    S.midi_offset     = float(data.get("midi_offset", 0.0))
+    S.meter           = str(data.get("meter", "") or "")
 
     render = data.get("render", {})
     S.bars   = int(render.get("bars",   S.bars))
@@ -831,6 +1183,8 @@ def _apply_project(data: dict):
     for attr in ("grav_peak", "grav_floor", "grav_radius", "grav_curve"):
         dpg.set_value(attr, getattr(S, attr))
     dpg.set_value("sync_input", S.sync_offset_ms)
+    dpg.set_value("midi_offset_input", S.midi_offset)
+    dpg.set_value("meter_input", S.meter)
     dpg.configure_item("clips_group", show=(S.mode == "clips"))
     if dpg.does_item_exist("mode_script_label"):
         dpg.set_value("mode_script_label", f"→ {_mode_script(S.mode)}")
@@ -910,7 +1264,7 @@ def _do_load():
     from core.feature_extractor import AudioFeatureExtractor
     from core.pipeline import ARCPipeline
     from core.rhythm.midi_automation import MidiAutomationReader
-    from core.rhythm.midi_reader import read_midi
+    from core.rhythm.midi_reader import parse_meter_changes, read_midi, shift_in_time
     from core.rhythm.analyzer import analyze
 
     S.loading = True
@@ -932,7 +1286,10 @@ def _do_load():
 
         if S.midi_path:
             _set_status("Reading MIDI…")
-            S.grid, S.midi_notes = read_midi(S.midi_path, fps=S.fps)
+            S.grid, S.midi_notes = read_midi(
+                S.midi_path, fps=S.fps,
+                meter_changes=parse_meter_changes(S.meter) if S.meter.strip() else None)
+            shift_in_time(S.grid, S.midi_notes, S.midi_offset)
             S.midi_automation = MidiAutomationReader(S.midi_path, fps=S.fps)
             lanes = S.midi_automation.available_lanes
             if lanes:
@@ -1282,22 +1639,35 @@ def _resolve_output_lane():
 
 
 def _clip_preview_frames(start_t: float, n_frames: int) -> list:
-    """Render preview frames with the real ClipComposer (clips mode)."""
+    """Render preview frames with the same stack a full render uses: the ClipComposer
+    (when the scene has clips) under the scene's layers — generators, shaders, post-ops."""
     from core.video.clip_library import ClipLibrary
     from core.video.composer import ClipComposer
-
-    if not S.clips_dir:
-        raise RuntimeError("Clips mode: select a clips folder first.")
+    from core.video.layers import build_compositor
 
     video_cfg = _effective_video_cfg()
-    _log(f"Clips preview: loading library from {S.clips_dir}")
-    lib  = ClipLibrary(S.clips_dir, PREV_W, PREV_H, S.fps, cache_size=4)
-    comp = ClipComposer(lib, S.grid, S.midi_notes, video_cfg)
-    comp.seek(start_t)
+    layers = video_cfg.get("layers")
+    uses_clips = not layers or any((l or {}).get("source", "clips") == "clips" for l in layers)
+    comp = None
+    if uses_clips:
+        if not S.clips_dir:
+            raise RuntimeError("Clips mode: this scene uses clips — select a clips folder first.")
+        _log(f"Clips preview: loading library from {S.clips_dir}")
+        lib  = ClipLibrary(S.clips_dir, PREV_W, PREV_H, S.fps, cache_size=4)
+        comp = ClipComposer(lib, S.grid, S.midi_notes, video_cfg)
+        comp.seek(start_t)
+
+    features_at = None
+    if S.extractor is not None:
+        features_at = lambda t: S.extractor.get_features_at_time(t, apply_gate=False)
+    stack = build_compositor(comp, video_cfg, S.midi_notes, PREV_W, PREV_H,
+                             fps=S.fps, features_at=features_at, grid=S.grid)
+    if len(stack) > 1:
+        _log(f"Preview: {len(stack)} layers")
 
     frames = []
     for fi in range(n_frames):
-        arr = comp.frame_at(start_t + fi / S.fps)
+        arr = stack.frame_at(start_t + fi / S.fps)
         frames.append(_np_to_dpg(arr))
         _set_status(f"Rendering preview… {int((fi+1)/n_frames*100)}%")
     return frames
@@ -1409,7 +1779,7 @@ def _build_render_cmd() -> list:
     if S.mode == "clips":
         cmd = [sys.executable, "clip_generator.py",
                "--file",  S.audio_path,
-               "--clips", S.clips_dir,
+               *(["--clips", S.clips_dir] if S.clips_dir else []),   # generative scenes need none
                "--bars",  "0" if S.full_song else str(S.bars),
                "--cache-size", str(S.cache_size),
                "--fps",   str(S.fps),
@@ -1420,6 +1790,10 @@ def _build_render_cmd() -> list:
         if S.clips_seed is not None:
             cmd += ["--seed", str(S.clips_seed)]
         cmd += ["--codec", S.codec]
+        if S.midi_path and S.midi_offset:
+            cmd += ["--midi-offset", str(S.midi_offset)]
+        if S.midi_path and S.meter.strip():
+            cmd += ["--meter", S.meter.strip()]
         if S.grav_enable:
             cmd += ["--gravity-peak",   str(S.grav_peak),
                     "--gravity-floor",  str(S.grav_floor),
@@ -1545,6 +1919,7 @@ def _on_mode_change(s, v):
 # ---------------------------------------------------------------------------
 
 def _build_ui():
+    from core.video.layers import LAYER_SOURCES
     dpg.create_context()
 
     with dpg.texture_registry():
@@ -1620,6 +1995,15 @@ def _build_ui():
             dpg.add_button(label="MIDI", width=55,
                            callback=lambda: dpg.show_item("dlg_midi"))
             dpg.add_text("(none)", tag="midi_label")
+        with dpg.group(horizontal=True):
+            dpg.add_text("  offset (s):")
+            dpg.add_input_float(default_value=S.midi_offset, width=80, step=0,
+                                format="%.3f", tag="midi_offset_input",
+                                callback=lambda s, v: setattr(S, "midi_offset", float(v)))
+            dpg.add_text("meter:")
+            dpg.add_input_text(default_value=S.meter, width=110, hint="22:6/4,27:5/4",
+                               tag="meter_input",
+                               callback=lambda s, v: setattr(S, "meter", str(v)))
         with dpg.group(horizontal=True):
             dpg.add_button(label="Scene", width=55,
                            callback=lambda: dpg.show_item("dlg_scene"))
@@ -1785,6 +2169,21 @@ def _build_ui():
                               default_value=S.scene_clip_order,
                               callback=lambda s, v: setattr(S, "scene_clip_order", v))
             with dpg.group(tag="triggers_panel"):
+                pass
+
+        # ── Scene layer editor ──────────────────────────────────────────
+        with dpg.collapsing_header(label="SCENE — LAYERS (editor)", default_open=True):
+            dpg.add_text("a pilha de cima para baixo: a 1ª é a base, as seguintes vão por cima",
+                         color=(120, 120, 140))
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Reload Scene", width=110,
+                               callback=btn_scene_to_editor)
+                dpg.add_button(label="Save Scene", width=100,
+                               callback=btn_editor_to_scene)
+                dpg.add_combo(list(LAYER_SOURCES), default_value="shadertoy", width=120,
+                              tag="new_layer_source")
+                dpg.add_button(label="+ Add Layer", width=100, callback=btn_add_layer)
+            with dpg.group(tag="layers_panel"):
                 pass
 
         # ── Clip deck ───────────────────────────────────────────────────

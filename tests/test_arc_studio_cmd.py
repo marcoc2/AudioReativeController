@@ -17,6 +17,8 @@ def _reset_state():
     S.full_song  = False
     S.cache_size = 8
     S.grav_enable = False
+    S.midi_offset = 0.0
+    S.meter = ""
 
 
 def test_clips_mode_dispatches_to_clip_generator():
@@ -140,3 +142,122 @@ def test_editor_skips_unnamed_rows():
     rows = [{"name": "  ", "source": "notes", "notes": "36", "actions": "next_clip"}]
     cfg = _rows_to_video_cfg(rows, True, "shuffle")
     assert cfg["triggers"] == {}
+
+
+def test_generative_scene_renders_without_clips_folder():
+    _reset_state()
+    S.clips_dir = None
+    cmd = _build_render_cmd()
+    assert "--clips" not in cmd and None not in cmd
+
+
+def test_midi_offset_and_meter_reach_the_render():
+    _reset_state()
+    assert "--midi-offset" not in _build_render_cmd() and "--meter" not in _build_render_cmd()
+    S.midi_offset, S.meter = 0.018, "22:6/4,27:5/4"
+    cmd = _build_render_cmd()
+    assert cmd[cmd.index("--midi-offset") + 1] == "0.018"
+    assert cmd[cmd.index("--meter") + 1] == "22:6/4,27:5/4"
+
+
+def test_track_and_score_triggers_survive_the_editor():
+    video = {"triggers": {
+        "kick":  {"track": ["kick", "kick-2"], "actions": ["reverse"]},
+        "chord": {"score": "input/x/sheetsage", "actions": ["next_clip"]},
+        "snare": {"track": "snare", "notes": [38], "actions": ["restart"]},
+    }}
+    back = _rows_to_video_cfg(_video_cfg_to_rows(video), True, "sequential")["triggers"]
+    assert back["kick"] == {"track": ["kick", "kick-2"], "actions": ["reverse"]}
+    assert back["chord"] == {"score": "input/x/sheetsage", "actions": ["next_clip"]}
+    assert back["snare"]["notes"] == [38] and back["snare"]["track"] == "snare"
+
+
+def _norm_layer(spec):
+    """What a layer means, without its defaults spelled out."""
+    out = dict(spec)
+    if out.get("enabled", True) is True:
+        out.pop("enabled", None)
+    if out.get("blend") == "normal":
+        out.pop("blend")
+    if out.get("opacity") == 1 or out.get("opacity") == 1.0:
+        out.pop("opacity")
+    return out
+
+
+def test_every_example_scene_survives_the_layer_editor():
+    from pathlib import Path
+
+    import yaml
+
+    from arc_studio import _layers_to_rows, _rows_to_layers
+    checked = 0
+    for path in sorted(Path("examples").glob("*.yaml")):
+        video = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("video") or {}
+        if not video.get("layers"):
+            continue
+        back = _rows_to_layers(_layers_to_rows(video))
+        assert [_norm_layer(l) for l in back] == [_norm_layer(l or {}) for l in video["layers"]], path
+        checked += 1
+    assert checked > 10
+
+
+def test_layer_editor_rejects_bad_yaml_and_keeps_switches():
+    import pytest
+
+    from arc_studio import _rows_to_layers
+    rows = [{"source": "solid", "enabled": True, "file": "", "blend": "normal", "opacity": 1.0,
+             "bars": "", "params": "color: [0, 0, 0]"},
+            {"source": "shadertoy", "enabled": False, "file": "shaders/shadertoy/x.glsl",
+             "blend": "screen", "opacity": 0.5, "bars": "[[21, 33]]", "params": "speed: 0.5"}]
+    assert _rows_to_layers(rows) == [
+        {"source": "solid", "color": [0, 0, 0]},
+        {"source": "shadertoy", "enabled": False, "file": "shaders/shadertoy/x.glsl",
+         "blend": "screen", "opacity": 0.5, "bars": [[21, 33]], "speed": 0.5}]
+    rows[1]["params"] = "speed: [0.5"
+    with pytest.raises(ValueError, match="layer 2"):
+        _rows_to_layers(rows)
+    rows[1]["params"] = "just words"
+    with pytest.raises(ValueError, match="key: value"):
+        _rows_to_layers(rows)
+
+
+def test_trigger_editor_builds_each_source():
+    base = {"name": "t", "notes": "", "audio": "", "track": "", "score": "",
+            "events": "chord_changes", "snap": "auto", "voice": "", "actions": "next_clip",
+            "until": "", "min_vel": 0, "grav_on": False, "_extra": {}}
+    def build(**kw):
+        return _rows_to_video_cfg([{**base, **kw}], True, "sequential")["triggers"]["t"]
+    assert build(source="notes", notes="36, 38") == {"notes": [36, 38], "actions": ["next_clip"]}
+    assert build(source="track", track="kick, kick-2") == {"track": ["kick", "kick-2"],
+                                                           "actions": ["next_clip"]}
+    assert build(source="track", track="snare", notes="38")["notes"] == [38]
+    assert build(source="score", score="input/x/sheetsage", events="melody", snap="beat",
+                 voice="vocals") == {"score": "input/x/sheetsage", "events": "melody",
+                                     "snap": "beat", "voice": "vocals", "actions": ["next_clip"]}
+    # switching a row's source drops the old source's keys
+    rows = _video_cfg_to_rows({"triggers": {"t": {"track": "kick", "actions": ["reverse"]}}})
+    rows[0]["source"], rows[0]["notes"] = "notes", "36"
+    assert _rows_to_video_cfg(rows, True, "sequential")["triggers"]["t"] == {
+        "notes": [36], "actions": ["reverse"]}
+
+
+def test_every_example_scene_keeps_its_triggers_through_the_editor():
+    from pathlib import Path
+
+    import yaml
+    checked = 0
+    for path in sorted(Path("examples").glob("*.yaml")):
+        video = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("video") or {}
+        trig = video.get("triggers")
+        if not trig:
+            continue
+        back = _rows_to_video_cfg(_video_cfg_to_rows(video), True, "sequential")["triggers"]
+        for name, spec in trig.items():
+            defaults = {"events": "chord_changes", "snap": "auto"}   # dropped: same meaning
+            want = {k: v for k, v in spec.items() if defaults.get(k) != v}
+            got = back[name]
+            if "audio" in want:                     # the editor spells out onset defaults
+                got = {k: v for k, v in got.items() if k in want}
+            assert got == want, (path, name)
+        checked += 1
+    assert checked >= 5

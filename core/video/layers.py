@@ -27,6 +27,13 @@ from scipy.ndimage import affine_transform
 import numpy as np
 
 BLENDS = {"normal", "add", "screen", "multiply"}
+# every ``source:`` build_compositor knows (the GUI's layer menu reads this)
+LAYER_SOURCES = (
+    "clips", "solid", "cells", "veils", "flame", "eyes", "mouths", "ferrofluid", "chladni",
+    "orbiters", "particles", "feedback", "rgb_noise", "drops", "shadertoy", "sandlines",
+    "shockwave", "slitscan", "grain", "echoes", "rgb_split", "mandelbox", "mandelbulb",
+    "julia", "cubes",
+)
 
 
 def draw_line_numpy(img: np.ndarray, x0: float, y0: float, x1: float, y1: float, color: tuple):
@@ -2223,6 +2230,7 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
 
     Layers with ``source: clips`` map to the base; unknown sources raise.
     Without a ``layers:`` section, the result is just the base (legacy).
+    A layer with ``enabled: false`` is skipped (kept in the scene, left out of the picture).
     Layer triggers accept MIDI ``notes`` or ``audio`` onset sources.
     """
     comp = Compositor()
@@ -2231,6 +2239,8 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
     layers_cfg = video_cfg.get("layers") or [{"source": "clips"}]
     windows: list = []
     for spec in layers_cfg:
+        if spec.get("enabled", True) is False:         # switched off, kept in the scene
+            continue
         src_name = spec.get("source", "clips")
         blend = spec.get("blend", "normal")
         static_op = spec.get("opacity")

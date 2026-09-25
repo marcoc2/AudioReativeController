@@ -323,3 +323,21 @@ def test_prism_liquid_arc_is_the_original_at_rest_and_splashes_on_a_kick():
     arc.render(4.0, u_hue=0.0)
     red = arc.render(4.0 + 1 / 30, u_hue=0.0).reshape(-1, 3).mean(0)
     assert red[0] > red[1] and red[0] > red[2]                 # the chord's colour (hue 0: red)
+
+
+def test_layer_sources_list_matches_the_compositor():
+    import inspect
+    import re
+
+    from core.video import layers
+    handled = set(re.findall(r'src_name == "([a-z_0-9]+)"', inspect.getsource(layers.build_compositor)))
+    assert handled == set(layers.LAYER_SOURCES)
+
+
+def test_disabled_layer_is_left_out():
+    from core.video.layers import build_compositor
+    cfg = {"layers": [{"source": "solid", "color": [0, 0, 0]},
+                      {"source": "solid", "color": [255, 0, 0], "enabled": False}]}
+    stack = build_compositor(None, cfg, [], 8, 8)
+    assert len(stack) == 1
+    assert stack.frame_at(0.0).max() == 0
