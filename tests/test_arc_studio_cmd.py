@@ -261,3 +261,39 @@ def test_every_example_scene_keeps_its_triggers_through_the_editor():
             assert got == want, (path, name)
         checked += 1
     assert checked >= 5
+
+
+def test_render_options_start_stems_fit_and_named_output():
+    _reset_state()
+    S.start_time, S.render_stems, S.clip_fit = 0.0, False, "contain"
+    cmd = _build_render_cmd()
+    assert "--start-time" not in cmd and "--stems" not in cmd and "--clip-fit" not in cmd
+    assert cmd[cmd.index("--output") + 1] == "render_output/song_clips_enxame.mp4"
+    S.start_time, S.render_stems, S.clip_fit = 53.351, True, "cover"
+    cmd = _build_render_cmd()
+    assert cmd[cmd.index("--start-time") + 1] == "53.351"
+    assert "--stems" in cmd and cmd[cmd.index("--clip-fit") + 1] == "cover"
+    assert cmd[cmd.index("--output") + 1] == "render_output/song_clips_enxame_from53s.mp4"
+    S.start_time, S.render_stems, S.clip_fit = 0.0, False, "contain"
+
+
+def test_repaint_command_follows_the_song():
+    from arc_studio import _build_repaint_cmd
+    _reset_state()
+    S.repaint_video = "render_output/song_x.mp4"
+    S.repaint_start, S.repaint_fps, S.repaint_seconds = 10.685, 12.0, 4.0
+    S.repaint_workflow, S.repaint_scene = "reference/wf.json", "(none)"
+    S.repaint_prompt = "make it claymation"
+    S.midi_offset, S.meter = 0.018, ""
+    cmd = _build_repaint_cmd()
+    assert cmd[1] == "repaint.py"
+    got = dict(zip(cmd[2::2], cmd[3::2]))
+    assert got == {"--video": "render_output/song_x.mp4", "--workflow": "reference/wf.json",
+                   "--prompt": "make it claymation", "--midi": "song.mid",
+                   "--midi-offset": "0.018", "--start-time": "10.685", "--fps": "12",
+                   "--seconds": "4", "--output": "render_output/song_x_repaint.mp4"}
+    S.repaint_scene, S.repaint_prompt, S.repaint_seconds = "examples/r.yaml", "", 0.0
+    cmd = _build_repaint_cmd()
+    assert cmd[cmd.index("--scene") + 1] == "examples/r.yaml"
+    assert "--prompt" not in cmd and "--seconds" not in cmd
+    S.midi_offset = 0.0

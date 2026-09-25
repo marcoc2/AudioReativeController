@@ -112,6 +112,21 @@ class _State:
     mode:   str = "particles"
     preview_bars: int = 1   # bars rendered by the Preview button (RAM-bound)
     codec: str = "x264"     # clips-mode encoder; nvenc = GPU, ideal p/ 4K
+    start_time: float = 0.0     # where the render starts in the song (0 = first downbeat)
+    render_stems: bool = False  # separate stems for the layers' features (--stems; slow)
+    clip_fit: str = "contain"   # how clips fill the frame: contain (bars) or cover (crop)
+    last_render: str = ""       # the last full render's MP4 (the repaint's default input)
+    last_render_start: float = 0.0
+
+    # repaint: the render through a ComfyUI workflow (see repaint.py)
+    repaint_video: str = ""
+    repaint_start: float = 0.0          # where that video starts in the song
+    repaint_workflow: str = "reference/workflow_api_rundiff.json"
+    repaint_scene: str = "(none)"       # a scene with a repaint: block (denoise/kick/prompts)
+    repaint_prompt: str = ""            # one prompt for every frame (overrides the scene's)
+    repaint_fps: float = 12.0
+    repaint_seconds: float = 0.0        # 0 = the whole video
+    _repaint_proc = None
 
     # clips mode settings
     clips_dir: Optional[str] = None
@@ -1093,6 +1108,18 @@ def _project_dict() -> dict:
             "fps":        S.fps,
             "resolution": f"{S.width}x{S.height}",
             "mode":       S.mode,
+            "start_time": S.start_time,
+            "stems":      S.render_stems,
+            "clip_fit":   S.clip_fit,
+        },
+        "repaint": {
+            "video":    S.repaint_video,
+            "start":    S.repaint_start,
+            "workflow": S.repaint_workflow,
+            "scene":    S.repaint_scene,
+            "prompt":   S.repaint_prompt,
+            "fps":      S.repaint_fps,
+            "seconds":  S.repaint_seconds,
         },
         "clips": {
             "dir":        S.clips_dir or "",
@@ -1143,6 +1170,17 @@ def _apply_project(data: dict):
     S.bars   = int(render.get("bars",   S.bars))
     S.fps    = int(render.get("fps",    S.fps))
     S.mode   =     render.get("mode",   S.mode)
+    S.start_time   = float(render.get("start_time", 0.0))
+    S.render_stems = bool(render.get("stems", False))
+    S.clip_fit     = render.get("clip_fit", "contain")
+    rp = data.get("repaint") or {}
+    S.repaint_video    = rp.get("video", "")
+    S.repaint_start    = float(rp.get("start", 0.0))
+    S.repaint_workflow = rp.get("workflow", S.repaint_workflow)
+    S.repaint_scene    = rp.get("scene", "(none)")
+    S.repaint_prompt   = rp.get("prompt", "")
+    S.repaint_fps      = float(rp.get("fps", 12.0))
+    S.repaint_seconds  = float(rp.get("seconds", 0.0))
     res      =     render.get("resolution", f"{S.width}x{S.height}")
     S.width, S.height = (int(x) for x in res.split("x"))
 
@@ -1183,6 +1221,17 @@ def _apply_project(data: dict):
     for attr in ("grav_peak", "grav_floor", "grav_radius", "grav_curve"):
         dpg.set_value(attr, getattr(S, attr))
     dpg.set_value("sync_input", S.sync_offset_ms)
+    for tag, val in (("start_time_input", S.start_time), ("stems_check", S.render_stems),
+                     ("clip_fit_combo", S.clip_fit),
+                     ("repaint_video_label", Path(S.repaint_video).name or "(nenhum)"),
+                     ("repaint_start_input", S.repaint_start),
+                     ("repaint_workflow_combo", S.repaint_workflow),
+                     ("repaint_scene_combo", S.repaint_scene),
+                     ("repaint_prompt_input", S.repaint_prompt),
+                     ("repaint_fps_input", S.repaint_fps),
+                     ("repaint_seconds_input", S.repaint_seconds)):
+        if dpg.does_item_exist(tag):
+            dpg.set_value(tag, val)
     dpg.set_value("midi_offset_input", S.midi_offset)
     dpg.set_value("meter_input", S.meter)
     dpg.configure_item("clips_group", show=(S.mode == "clips"))
@@ -1790,6 +1839,13 @@ def _build_render_cmd() -> list:
         if S.clips_seed is not None:
             cmd += ["--seed", str(S.clips_seed)]
         cmd += ["--codec", S.codec]
+        if S.start_time > 0:
+            cmd += ["--start-time", f"{S.start_time:.3f}"]
+        if S.render_stems:
+            cmd += ["--stems"]
+        if S.clip_fit != "contain":
+            cmd += ["--clip-fit", S.clip_fit]
+        cmd += ["--output", _render_output_path()]
         if S.midi_path and S.midi_offset:
             cmd += ["--midi-offset", str(S.midi_offset)]
         if S.midi_path and S.meter.strip():
@@ -1810,6 +1866,25 @@ def _build_render_cmd() -> list:
     if S.midi_path:
         cmd += ["--midi", S.midi_path]
     return cmd
+
+
+def _render_output_path() -> str:
+    """render_output/<song>_<scene>[_from<start>].mp4 — one file per song, scene and start."""
+    song = Path(S.audio_path or "render").stem
+    scene = Path(S.scene_path or "scene").stem
+    tail = f"_from{S.start_time:.0f}s" if S.start_time > 0 else ""
+    return f"render_output/{song}_{scene}{tail}.mp4"
+
+
+def btn_start_from_scrubber():
+    """Start the render at the bar under the scrubber."""
+    t = float(dpg.get_value("scrubber") or 0.0)
+    if S.grid is not None and S.grid.downbeats is not None and len(S.grid.downbeats):
+        past = [float(d) for d in S.grid.downbeats if float(d) <= t + 1e-3]
+        t = past[-1] if past else float(S.grid.downbeats[0])
+    S.start_time = round(t, 3)
+    dpg.set_value("start_time_input", S.start_time)
+    _set_status(f"Render começa em {S.start_time:.3f}s (compasso {_bar_at(t + 1e-3) + 1})")
 
 
 def btn_render_full():
@@ -1839,18 +1914,173 @@ def btn_render_full():
     _log("$ " + " ".join(Path(c).name if c.endswith(".py") else c for c in cmd))
     _set_status("Rendering (see log)…")
 
+    out = cmd[cmd.index("--output") + 1] if "--output" in cmd else ""
+    start = S.start_time
+
     def _run():
         S.rendering = True
         try:
             subprocess.run(cmd, check=True)
             _set_status("Render complete.")
-            _log("Done.")
+            _log(f"Done. -> {out}" if out else "Done.")
+            if out:                       # the repaint picks up where the render left it
+                S.last_render, S.last_render_start = out, start
+                S.repaint_video, S.repaint_start = out, start
+                if dpg.does_item_exist("repaint_video_label"):
+                    dpg.set_value("repaint_video_label", Path(out).name)
+                    dpg.set_value("repaint_start_input", start)
         except subprocess.CalledProcessError as e:
             _set_status(f"Render failed (exit {e.returncode}).")
         finally:
             S.rendering = False
 
     threading.Thread(target=_run, daemon=True).start()
+
+# ---------------------------------------------------------------------------
+# Repaint (ComfyUI)
+# ---------------------------------------------------------------------------
+
+def _repaint_scenes() -> list:
+    """Scenes with a repaint: block (denoise, kick, seed, prompts), for the repaint menu."""
+    out = ["(none)"]
+    for f in sorted(Path("examples").glob("*.yaml")):
+        try:
+            if "\nrepaint:" in "\n" + f.read_text(encoding="utf-8"):
+                out.append(f.as_posix())
+        except UnicodeDecodeError:
+            pass
+    return out
+
+
+def _repaint_workflows() -> list:
+    return sorted(f.as_posix() for f in Path("reference").glob("*.json")) if Path("reference").is_dir() else []
+
+
+def _repaint_output_path() -> str:
+    v = Path(S.repaint_video)
+    return (v.parent / f"{v.stem}_repaint.mp4").as_posix()
+
+
+def _build_repaint_cmd() -> list:
+    """repaint.py's command line for the current repaint settings."""
+    cmd = [sys.executable, "repaint.py", "--video", S.repaint_video]
+    if S.repaint_scene and S.repaint_scene != "(none)":
+        cmd += ["--scene", S.repaint_scene]
+    if S.repaint_workflow:
+        cmd += ["--workflow", S.repaint_workflow]
+    if S.repaint_prompt.strip():
+        cmd += ["--prompt", S.repaint_prompt.strip()]
+    if S.midi_path:
+        cmd += ["--midi", S.midi_path]
+        if S.midi_offset:
+            cmd += ["--midi-offset", str(S.midi_offset)]
+        if S.meter.strip():
+            cmd += ["--meter", S.meter.strip()]
+    if S.repaint_start > 0:
+        cmd += ["--start-time", f"{S.repaint_start:.3f}"]
+    cmd += ["--fps", f"{S.repaint_fps:g}"]
+    if S.repaint_seconds > 0:
+        cmd += ["--seconds", f"{S.repaint_seconds:g}"]
+    cmd += ["--output", _repaint_output_path()]
+    return cmd
+
+
+def _comfy_report() -> str:
+    """ComfyUI's state and the GPU's, said before anything is sent to it."""
+    from core.video.h3_client import ComfyH3Client
+    from core.video.repaint import queue_status
+    client = ComfyH3Client()
+    if not client.is_available():
+        return f"ComfyUI fora do ar em {client.server_url}"
+    q = queue_status(client)
+    msg = (f"ComfyUI ok — fila: {q['running']} rodando, {q['pending']} esperando "
+           f"({q['ours']} nossos)")
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total",
+                              "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        util, used, total = (x.strip() for x in out.splitlines()[0].split(","))
+        msg += f" · GPU {util}% · {int(used) / 1024:.1f}/{int(total) / 1024:.0f} GB"
+    except Exception:
+        pass
+    return msg
+
+
+def btn_repaint_check():
+    def _run():
+        try:
+            msg = _comfy_report()
+        except Exception as exc:
+            msg = f"ComfyUI: {exc}"
+        _set_status(msg)
+        _log(msg)
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def btn_repaint():
+    if S._repaint_proc is not None and S._repaint_proc.poll() is None:
+        _set_status("Repaint já está rodando.")
+        return
+    if not S.repaint_video or not Path(S.repaint_video).is_file():
+        _set_status("Repaint: escolha um vídeo (ou renderize antes).")
+        return
+    if not S.repaint_workflow and S.repaint_scene == "(none)":
+        _set_status("Repaint: escolha um workflow ou uma cena com repaint:.")
+        return
+    cmd = _build_repaint_cmd()
+
+    def _run():
+        try:
+            report = _comfy_report()
+        except Exception as exc:
+            report = f"ComfyUI: {exc}"
+        _log(report)
+        if "fora do ar" in report:
+            _set_status(report)
+            return
+        if " 0 rodando, 0 esperando" not in report:
+            _log("Repaint: a fila da ComfyUI tem jobs de outros — os nossos entram intercalados "
+                 "(mais lento para todos). Stop Repaint tira só os nossos.")
+        _log("$ " + " ".join(Path(c).name if c.endswith(".py") else c for c in cmd))
+        _set_status("Repaint rodando na ComfyUI (ver log)…")
+        S._repaint_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                           text=True, encoding="utf-8", errors="replace")
+        for line in S._repaint_proc.stdout:
+            line = line.rstrip()
+            if line:
+                _log(line)
+        code = S._repaint_proc.wait()
+        _set_status("Repaint pronto: " + Path(_repaint_output_path()).name if code == 0
+                    else f"Repaint parou (exit {code}) — ver log.")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def btn_repaint_stop():
+    """Stop the repaint and take only our jobs out of ComfyUI's queue (others stay)."""
+    proc = S._repaint_proc
+    if proc is not None and proc.poll() is None:
+        proc.kill()
+
+    def _run():
+        from core.video.h3_client import ComfyH3Client
+        from core.video.repaint import cancel_jobs
+        try:
+            n = cancel_jobs(ComfyH3Client())
+            msg = f"Repaint parado — {n} job(s) nossos tirados da fila; os quadros prontos ficam (roda de novo para continuar)."
+        except Exception as exc:
+            msg = f"Repaint parado; não consegui limpar a fila: {exc}"
+        _set_status(msg)
+        _log(msg)
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _pick_repaint_video(s, a):
+    p = _first_selection(a)
+    if p:
+        S.repaint_video = p
+        dpg.set_value("repaint_video_label", Path(p).name)
+
 
 # ---------------------------------------------------------------------------
 # File dialog callbacks
@@ -1956,6 +2186,11 @@ def _build_ui():
     dpg.add_file_dialog(show=False, directory_selector=True,
                         callback=_pick_clips_dir, tag="dlg_clips",
                         width=620, height=420)
+
+    with dpg.file_dialog(show=False, callback=_pick_repaint_video, tag="dlg_repaint_video",
+                         width=620, height=420):
+        dpg.add_file_extension(".mp4"); dpg.add_file_extension(".mov")
+        dpg.add_file_extension(".*")
 
     with dpg.file_dialog(show=False, callback=_pick_trig_audio, tag="dlg_trig_audio",
                          width=620, height=420):
@@ -2143,6 +2378,20 @@ def _build_ui():
                                                 tag=attr, step=0, format="%.2f",
                                                 callback=lambda s, v, u: setattr(S, u, v),
                                                 user_data=attr)
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("Start (s):")
+                        dpg.add_input_float(default_value=S.start_time, width=80, step=0,
+                                            format="%.3f", tag="start_time_input",
+                                            callback=lambda s, v: setattr(S, "start_time", float(v)))
+                        dpg.add_button(label="<- scrubber", width=85,
+                                       callback=btn_start_from_scrubber)
+                        dpg.add_text("Fit:")
+                        dpg.add_combo(["contain", "cover"], default_value=S.clip_fit,
+                                      width=75, tag="clip_fit_combo",
+                                      callback=lambda s, v: setattr(S, "clip_fit", v))
+                        dpg.add_checkbox(label="Stems (features)", tag="stems_check",
+                                         default_value=S.render_stems,
+                                         callback=lambda s, v: setattr(S, "render_stems", v))
                 dpg.add_button(label="Render Full",
                                callback=btn_render_full, width=120)
 
@@ -2185,6 +2434,49 @@ def _build_ui():
                 dpg.add_button(label="+ Add Layer", width=100, callback=btn_add_layer)
             with dpg.group(tag="layers_panel"):
                 pass
+
+        # ── Repaint through ComfyUI ─────────────────────────────────────
+        with dpg.collapsing_header(label="REPAINT — ComfyUI (img2img / edit)"):
+            dpg.add_text("repinta cada quadro de um render num workflow da ComfyUI; usa a GPU "
+                         "(e a fila da ComfyUI é compartilhada) — confira antes com Check",
+                         color=(120, 120, 140))
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Video…", width=60,
+                               callback=lambda: dpg.show_item("dlg_repaint_video"))
+                dpg.add_text(Path(S.repaint_video).name or "(nenhum — renderize ou escolha)",
+                             tag="repaint_video_label")
+                dpg.add_text("começa na música em (s):")
+                dpg.add_input_float(default_value=S.repaint_start, width=80, step=0,
+                                    format="%.3f", tag="repaint_start_input",
+                                    callback=lambda s, v: setattr(S, "repaint_start", float(v)))
+            with dpg.group(horizontal=True):
+                dpg.add_text("Workflow:")
+                wfs = _repaint_workflows()
+                dpg.add_combo(wfs, default_value=S.repaint_workflow, width=330,
+                              tag="repaint_workflow_combo",
+                              callback=lambda s, v: setattr(S, "repaint_workflow", v))
+                dpg.add_text("Cena:")
+                dpg.add_combo(_repaint_scenes(), default_value=S.repaint_scene, width=250,
+                              tag="repaint_scene_combo",
+                              callback=lambda s, v: setattr(S, "repaint_scene", v))
+            with dpg.group(horizontal=True):
+                dpg.add_text("Prompt:")
+                dpg.add_input_text(default_value=S.repaint_prompt, width=420,
+                                   hint="vazio = os prompts da cena (ex.: make it claymation)",
+                                   tag="repaint_prompt_input",
+                                   callback=lambda s, v: setattr(S, "repaint_prompt", v))
+                dpg.add_text("FPS:")
+                dpg.add_input_float(default_value=S.repaint_fps, width=60, step=0,
+                                    format="%.0f", tag="repaint_fps_input",
+                                    callback=lambda s, v: setattr(S, "repaint_fps", float(v)))
+                dpg.add_text("Segundos:")
+                dpg.add_input_float(default_value=S.repaint_seconds, width=60, step=0,
+                                    format="%.1f", tag="repaint_seconds_input",
+                                    callback=lambda s, v: setattr(S, "repaint_seconds", float(v)))
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Check ComfyUI / GPU", width=150, callback=btn_repaint_check)
+                dpg.add_button(label="Repaint", width=90, callback=btn_repaint)
+                dpg.add_button(label="Stop Repaint", width=100, callback=btn_repaint_stop)
 
         # ── Clip deck ───────────────────────────────────────────────────
         with dpg.collapsing_header(label="CLIP DECK — thumbnails + pin (arraste até a timeline)"):

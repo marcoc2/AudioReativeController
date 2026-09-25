@@ -84,3 +84,37 @@ def test_edit_workflow_prompt_and_seed_without_denoise():
     assert job[wf.load]["inputs"]["image"] == "f.png"
     assert job[wf.positive]["inputs"]["text"] == "make it claymation"
     assert job[wf.seed[0]]["inputs"][wf.seed[1]] == 99
+
+
+class _FakeComfy:
+    def __init__(self, running, pending):
+        self.q = {"queue_running": running, "queue_pending": pending}
+        self.posts = []
+
+    def _get(self, endpoint):
+        return self.q
+
+    def _post(self, endpoint, payload):
+        self.posts.append((endpoint, payload))
+        return {}
+
+
+def _item(pid, prefix):
+    return [0, pid, {"19": {"inputs": {"filename_prefix": prefix}}}, {}, []]
+
+
+def test_cancel_takes_out_only_our_jobs():
+    from core.video.repaint import cancel_jobs, queue_status
+    c = _FakeComfy(running=[_item("bot1", "ltx/out")],
+                   pending=[_item("a", "arc_repaint/run/f00001"), _item("bot2", "h3/x"),
+                            _item("b", "arc_repaint/run/f00002")])
+    assert queue_status(c) == {"running": 1, "pending": 3, "ours": 2}
+    assert cancel_jobs(c) == 2
+    assert c.posts == [("/queue", {"delete": ["a", "b"]})]      # the bot's running job is left alone
+
+
+def test_cancel_interrupts_when_ours_is_running():
+    from core.video.repaint import cancel_jobs
+    c = _FakeComfy(running=[_item("a", "arc_repaint/run/f00001")], pending=[])
+    assert cancel_jobs(c) == 1
+    assert c.posts == [("/interrupt", {})]

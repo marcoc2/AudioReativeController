@@ -170,6 +170,31 @@ def plan_frames(duration: float, fps: float, start: float, bar_of: Callable[[flo
 
 # ── running it ───────────────────────────────────────────────────────────────
 
+JOB_MARK = "arc_repaint/"     # every job we queue saves under this prefix
+
+
+def queue_status(client: ComfyClient) -> dict:
+    """Who is in ComfyUI's queue: {running, pending, ours} (ours = jobs a repaint queued)."""
+    q = client._get("/queue")
+    items = list(q.get("queue_running", [])) + list(q.get("queue_pending", []))
+    ours = [it for it in items if JOB_MARK in json.dumps(it)]
+    return {"running": len(q.get("queue_running", [])), "pending": len(q.get("queue_pending", [])),
+            "ours": len(ours)}
+
+
+def cancel_jobs(client: ComfyClient) -> int:
+    """Take our repaint jobs out of ComfyUI's queue (and stop ours if it is the one running);
+    other people's jobs are left alone. Returns how many were ours."""
+    q = client._get("/queue")
+    pending = [it[1] for it in q.get("queue_pending", []) if JOB_MARK in json.dumps(it)]
+    if pending:
+        client._post("/queue", {"delete": pending})
+    running = [it for it in q.get("queue_running", []) if JOB_MARK in json.dumps(it)]
+    if running:
+        client._post("/interrupt", {})
+    return len(pending) + len(running)
+
+
 def _read_frames(video: Path, wanted: Sequence[float]):
     """The source frames nearest to each wanted time (seconds), keyed by source frame index;
     also the source's fps and frame count."""
@@ -238,7 +263,7 @@ def repaint(source: str | Path, output: str | Path, workflow: Workflow, plan: Li
         name = client.upload_image(f)
         f.unlink()
         job = workflow.job(name, p.prompt, negative, p.denoise, p.seed,
-                           prefix=f"arc_repaint/{run}/f{p.index:05d}", steps=steps, cfg=cfg_scale)
+                           prefix=f"{JOB_MARK}{run}/f{p.index:05d}", steps=steps, cfg=cfg_scale)
         pending.append((client.queue_prompt(job), p))
         if len(pending) >= in_flight:
             collect(pending.pop(0))
