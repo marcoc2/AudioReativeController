@@ -1,0 +1,26 @@
+# Esfolado repintado — cada quadro do render do ARC passa por um img2img SDXL (RunDiffusion XL)
+# no ComfyUI. O kick sobe o denoise (a imagem derrete na batida e volta), o seed fica o mesmo
+# dentro do compasso (o desenho não ferve à toa) e o prompt troca a cada 2 compassos.
+# A 12 fps parece animação feita à mão.
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --scene examples/esfolado_shaders_inteira.yaml --start-time 10.685 --bars 4 \
+#       --resolution 848x480 --fps 30 --output render_output/esfolado_repaint_fonte_c5-8.mp4
+#   python repaint.py --video render_output/esfolado_repaint_fonte_c5-8.mp4 \
+#       --scene examples/esfolado_repaint.yaml --midi input/esfolado/esfolado.mid \
+#       --midi-offset 0.018 --start-time 10.685 --output render_output/esfolado_repaint_c5-8.mp4
+repaint:
+  workflow: reference/workflow_api_rundiff.json
+  fps: 12
+  denoise: 0.33                                 # entre os kicks: o render ainda manda
+  kick: {track: [kick, kick-2], denoise: 0.55, envelope: 0.25}
+  seed: {base: 1971, per: bar}
+  prompts:
+    every: 2
+    list:
+      - "psychedelic flayed anatomy, translucent skin revealing glowing veins and nerves, iridescent oil-slick colors, visionary art, intricate, vivid saturated acid colors"
+      - "melting kaleidoscopic flesh, bioluminescent mycelium, many staring eyes, ferrofluid spikes, 1970s psychedelic poster, hand-painted, trippy, highly detailed"
+      - "1930s rubber hose cartoon, hand-drawn cel animation, bold ink outlines, surreal melting shapes, psychedelic colors, grainy film"
+      - "prismatic crystal cathedral made of liquid mercury and stained glass, fractal light, visionary psychedelic art, glowing, ornate"
+  negative: "text, watermark, signature, nsfw, nude, blurry, lowres, jpeg artifacts"

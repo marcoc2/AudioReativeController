@@ -295,3 +295,31 @@ def test_diamond_dust_arc_is_the_original_at_rest_and_moves_with_its_knobs():
     arc.render(2.0, u_warp=1.5, u_flow=0.2)
     moved = arc.render(2.0 + 1 / 30, u_warp=1.5, u_flow=0.2)
     assert np.abs(moved.astype(int) - b).mean() > 3
+
+
+def test_prism_liquid_runs():
+    from core.shadertoy import BUFFERS
+    shader = load("shaders/shadertoy/prism_liquid")
+    assert shader["channels"]["image"] == {0: "buffer_a"}
+    toy = _toy(shader["image"], buffers={b: shader.get(b) for b in BUFFERS}, channels=shader["channels"])
+    toy.render(4.0)
+    out = toy.render(4.0 + 1 / 30)
+    assert 20 < out.mean() < 220 and out.std() > 10
+
+
+def test_prism_liquid_arc_is_the_original_at_rest_and_splashes_on_a_kick():
+    from core.shadertoy import BUFFERS
+
+    def make(folder, extra=()):
+        sh = load(f"shaders/shadertoy/{folder}")
+        return _toy(sh["image"], buffers={b: sh.get(b) for b in BUFFERS}, channels=sh["channels"], extra=extra)
+    orig, arc = make("prism_liquid"), make("prism_liquid_arc", ("u_kick_age", "u_hue", "u_facets"))
+    orig.render(4.0), arc.render(4.0)
+    a, b = orig.render(4.0 + 1 / 30), arc.render(4.0 + 1 / 30)
+    assert np.abs(a.astype(int) - b).mean() < 0.5
+    arc.render(4.0, u_kick_age=0.1)
+    splashed = arc.render(4.0 + 1 / 30, u_kick_age=0.1)
+    assert np.abs(splashed.astype(int) - b).mean() > 1
+    arc.render(4.0, u_hue=0.0)
+    red = arc.render(4.0 + 1 / 30, u_hue=0.0).reshape(-1, 3).mean(0)
+    assert red[0] > red[1] and red[0] > red[2]                 # the chord's colour (hue 0: red)
