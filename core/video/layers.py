@@ -26,6 +26,8 @@ from scipy.ndimage import affine_transform
 
 import numpy as np
 
+from core.video.matte import LayerMatte, apply_matte
+
 BLENDS = {"normal", "add", "screen", "multiply"}
 # every ``source:`` build_compositor knows (the GUI's layer menu reads this)
 LAYER_SOURCES = (
@@ -161,12 +163,16 @@ class Compositor:
         self._layers: List[tuple] = []
 
     def add(self, source, blend: str = "normal",
-            opacity: Optional[Callable[[float], float]] = None) -> None:
+            opacity: Optional[Callable[[float], float]] = None, matte=None) -> None:
+        """``matte(t)`` (H×W×1, 0..1; see core/video/matte.py) keeps the layer's result only
+        where it is, the picture below showing elsewhere."""
         if blend not in BLENDS:
             raise ValueError(f"unknown blend {blend!r}; expected {sorted(BLENDS)}")
         if not self._layers and hasattr(source, "process"):
             raise ValueError("a post-op cannot be the base layer")
-        self._layers.append((source, blend, opacity))
+        if not self._layers and matte is not None:
+            raise ValueError("the base layer cannot have a mask (there is nothing below it)")
+        self._layers.append((source, blend, opacity, matte))
 
     def __len__(self) -> int:
         return len(self._layers)
@@ -174,26 +180,27 @@ class Compositor:
     def frame_at(self, t: float) -> np.ndarray:
         if not self._layers:
             raise RuntimeError("compositor has no layers")
-        src0, _, _ = self._layers[0]
-        out = src0.frame_at(t)
-        for src, blend, opacity in self._layers[1:]:
+        out = self._layers[0][0].frame_at(t)
+        for src, blend, opacity, matte in self._layers[1:]:
+            below = out
+            op = 1.0 if opacity is None else float(opacity(t))
             if hasattr(src, "process"):
                 # post-op: transforms the composite built so far (a ``bars:`` window gates it)
-                op = 1.0 if opacity is None else float(opacity(t))
                 if op <= 0.0:
                     if hasattr(src, "observe"):         # a post-op with memory keeps watching while gated
                         src.observe(out, t)
                     continue
                 done = src.process(out, t)
                 out = done if op >= 1.0 else blend_frames(out, done, "normal", op)
-                continue
-            op = 1.0 if opacity is None else float(opacity(t))
-            if op <= 0.0:
-                continue
-            # a source that paints itself with what lies below (``frame_at_over``) sees the composite so far
-            top = src.frame_at_over(out, t) if hasattr(src, "frame_at_over") else src.frame_at(t)
-            if top is not None:
-                out = blend_frames(out, top, blend, op)
+            else:
+                if op <= 0.0:
+                    continue
+                # a source that paints itself with what lies below (``frame_at_over``) sees the composite so far
+                top = src.frame_at_over(out, t) if hasattr(src, "frame_at_over") else src.frame_at(t)
+                if top is not None:
+                    out = blend_frames(out, top, blend, op)
+            if matte is not None and out is not below:
+                out = apply_matte(below, out, matte(t))
         return out
 
 
@@ -2240,12 +2247,15 @@ class CubesLayer:
 
 def build_compositor(base, video_cfg: dict, notes: Sequence,
                      width: int, height: int, onset_loader=None,
-                     fps: int = 24, features_at=None, grid=None) -> "Compositor":
+                     fps: int = 24, features_at=None, grid=None,
+                     masks: Optional[str] = None) -> "Compositor":
     """Compose ``base`` (ClipComposer) with the scene's extra layers.
 
     Layers with ``source: clips`` map to the base; unknown sources raise.
     Without a ``layers:`` section, the result is just the base (legacy).
     A layer with ``enabled: false`` is skipped (kept in the scene, left out of the picture).
+    A layer with ``mask:`` shows only inside or outside the objects of a mask track
+    (core/video/matte.py); ``masks`` is the track used when its ``mask:`` names none.
     Layer triggers accept MIDI ``notes`` or ``audio`` onset sources.
     """
     comp = Compositor()
@@ -2405,7 +2415,16 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             continue
         raise ValueError(f"unknown layer source {src_name!r}")
     for i, window in enumerate(windows):               # post-ops are added without opacity: gate them here
-        src, blend, opacity = comp._layers[i]
+        src, blend, opacity, matte = comp._layers[i]
         if window is not None and hasattr(src, "process"):
-            comp._layers[i] = (src, blend, window)
+            comp._layers[i] = (src, blend, window, matte)
+    tracks: dict = {}                                   # one reader per track folder, shared
+    enabled = [spec for spec in layers_cfg if spec.get("enabled", True) is not False]
+    for i, spec in enumerate(enabled):
+        if spec.get("mask"):
+            if i == 0:
+                raise ValueError("the base layer cannot have a mask (there is nothing below it)")
+            src, blend, opacity, _ = comp._layers[i]
+            comp._layers[i] = (src, blend, opacity,
+                               LayerMatte(spec["mask"], width, height, masks, tracks))
     return comp

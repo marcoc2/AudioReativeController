@@ -58,6 +58,8 @@ def main() -> None:
                     default=None, help="Override the scene's clip selection order")
     ap.add_argument("--seed", type=int, default=None,
                     help="Override the scene's shuffle/random seed (reproducible order)")
+    ap.add_argument("--masks", default=None, metavar="FOLDER",
+                    help="Mask track (segment_video.py) for layers whose mask: names none")
     ap.add_argument("--codec", choices=["x264", "nvenc"], default="x264",
                     help="Encoder: nvenc = GPU (NVIDIA), RAM baixa e rapido em 4K")
     args = ap.parse_args()
@@ -124,7 +126,7 @@ def main() -> None:
         features_at = lambda t: extractor.get_features_at_time(t, apply_gate=False)
 
     stack = build_compositor(composer, video_cfg, midi_notes, W, H,
-                             fps=fps, features_at=features_at, grid=grid)
+                             fps=fps, features_at=features_at, grid=grid, masks=args.masks)
     if len(stack) > 1:
         print(f"layers: {len(stack)} (compositing enabled)")
 
