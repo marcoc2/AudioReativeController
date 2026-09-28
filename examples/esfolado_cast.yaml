@@ -1,0 +1,29 @@
+# Esfolado — "the cast": every shot's objects are cast as the band. The biggest one is
+# the kick (it jumps out of the paper), the second the snare (it jolts, leaving its
+# ghost), the third the hi-hat (a halo round it), and the background plays the bass,
+# blushing with the chord's colour on each note. Needs a mask track of the plain render
+# (see examples/esfolado_world_melts.yaml for how it is made):
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --clips C:/Users/marco/Videos/ltx2/curadoria --clip-fit cover --seed 3 \
+#       --scene examples/esfolado_cast.yaml --start-time 13.351 --bars 4 \
+#       --resolution 854x480 --fps 30 --masks render_output/esfolado_gotas_follow_c6-9_base_segments \
+#       --output render_output/esfolado_cast_c6-9.mp4
+video:
+  clip_per_bar: true
+  clip_order: random
+  layers:
+    - source: clips
+    - source: cast
+      roles:
+        - {who: largest, plays: {track: [kick, kick-2]}, act: punch, amount: 0.14}
+        - {who: second, plays: {track: snare}, act: shake, amount: 14}
+        - {who: third, plays: {track: ez-hihat}, act: glow, width: 10, color: [255, 235, 160]}
+        - who: background
+          plays: {track: bass}
+          act: tint
+          amount: 0.45
+          envelope: 0.35
+          color: chord
+          harmony: {score: input/esfolado/sheetsage, snap: auto}

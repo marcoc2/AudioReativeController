@@ -32,7 +32,7 @@ BLENDS = {"normal", "add", "screen", "multiply"}
 # every ``source:`` build_compositor knows (the GUI's layer menu reads this)
 LAYER_SOURCES = (
     "clips", "solid", "cells", "veils", "flame", "eyes", "mouths", "ferrofluid", "chladni",
-    "orbiters", "particles", "feedback", "rgb_noise", "drops", "shadertoy", "sandlines",
+    "orbiters", "particles", "feedback", "rgb_noise", "drops", "cast", "shadertoy", "sandlines",
     "shockwave", "slitscan", "grain", "echoes", "rgb_split", "mandelbox", "mandelbulb",
     "julia", "cubes",
 )
@@ -2263,6 +2263,7 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
     # used as-is (first layer = canvas), so pure-generative scenes work
     layers_cfg = video_cfg.get("layers") or [{"source": "clips"}]
     windows: list = []
+    tracks: dict = {}                                   # one mask-track reader per folder, shared
     for spec in layers_cfg:
         if spec.get("enabled", True) is False:         # switched off, kept in the scene
             continue
@@ -2371,6 +2372,11 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             comp.add(ShockwaveLayer(spec, notes, width, height, fps, features_at=features_at,
                                     onset_loader=onset_loader, grid=grid), "normal", None)
             continue
+        if src_name == "cast":
+            from core.video.cast import CastLayer
+            comp.add(CastLayer(spec, notes, width, height, fps, onset_loader=onset_loader,
+                               grid=grid, default_track=masks, tracks=tracks), "normal", None)
+            continue
         if src_name == "slitscan":
             comp.add(SlitScanLayer(spec, notes, width, height, fps, features_at=features_at,
                                    onset_loader=onset_loader, grid=grid), "normal", None)
@@ -2418,7 +2424,6 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
         src, blend, opacity, matte = comp._layers[i]
         if window is not None and hasattr(src, "process"):
             comp._layers[i] = (src, blend, window, matte)
-    tracks: dict = {}                                   # one reader per track folder, shared
     enabled = [spec for spec in layers_cfg if spec.get("enabled", True) is not False]
     for i, spec in enumerate(enabled):
         if spec.get("mask"):
