@@ -1,13 +1,17 @@
+# ARC is GPU-first. Install the CUDA build of torch before the rest, e.g. (RTX 40xx):
+#   pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+# Optional extras live in requirements-segment.txt (SAM2 tracking).
 numpy
 librosa
 pygame
 scipy
 soundfile
-audio-separator[cpu]
+audio-separator[gpu]
 loguru
-pathlib
 mido>=1.3
 PyYAML>=6.0
 dearpygui>=2.0
 sounddevice>=0.4
 moderngl>=5.10
+opencv-python>=4.8
+Pillow

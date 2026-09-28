@@ -1,0 +1,9 @@
+# Optional: SAM2 video segmentation (object-following effects). Needs the CUDA torch
+# from requirements.txt. The PyPI package named "sam2" is NOT Meta's; install the
+# official repo, pinned, without compiling its optional CUDA extension:
+#   set SAM2_BUILD_CUDA=0   (PowerShell: $env:SAM2_BUILD_CUDA="0")
+#   pip install -r requirements-segment.txt
+# Weights: any SAM 2.1 checkpoint; the fp16 .safetensors in ComfyUI/models/sam2
+# (Kijai/sam2-safetensors) load as-is, so nothing needs downloading twice.
+SAM-2 @ git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4
+safetensors

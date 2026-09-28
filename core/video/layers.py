@@ -1922,6 +1922,32 @@ class _ShadertoyPost:
         return self.layer._draw(frame, t)
 
 
+def drop_spot(frame: np.ndarray, rng, at: str = "random"):
+    """Where a drop falls: the centre, or a random point off the lines (into a region)."""
+    H, W = frame.shape[:2]
+    if at == "center":
+        return W / 2, H / 2
+    for _ in range(8):
+        x, y = rng.uniform(0.05, 0.95) * W, rng.uniform(0.05, 0.95) * H
+        if frame[int(y), int(x)].mean() > 70:
+            break
+    return x, y
+
+
+def drop_colour(frame: np.ndarray, x: float, y: float, mode: str, boost: float = 1.8,
+                chord_hue: Optional[float] = None):
+    """A drop's colour (rgb 0..1): ``under`` the colour where it fell made vivid, ``complement``
+    the opposite hue, ``chord`` the hue of the chord playing (``chord_hue``; red when none)."""
+    if mode == "chord":
+        return colorsys.hsv_to_rgb(chord_hue or 0.0, 0.85, 1.0)
+    x0, y0 = int(x), int(y)
+    patch = frame[max(0, y0 - 2):y0 + 3, max(0, x0 - 2):x0 + 3].reshape(-1, 3).mean(axis=0) / 255.0
+    h, sat, v = colorsys.rgb_to_hsv(*patch)
+    if mode == "complement":
+        h = (h + 0.5) % 1.0
+    return colorsys.hsv_to_rgb(h, min(1.0, sat * boost + 0.15), min(1.0, max(v, 0.5) * 1.15))
+
+
 class DropsLayer:
     """Post-op: drops of colour that spread until they meet the lines (``core/drops``, GPU).
 
@@ -1995,25 +2021,14 @@ class DropsLayer:
         self._last_t: Optional[float] = None
 
     def _where(self, frame: np.ndarray):
-        if self._at == "center":
-            return self.W / 2, self.H / 2
-        for _ in range(8):                                   # off the lines: a drop falls into a region
-            x, y = self._rng.uniform(0.05, 0.95) * self.W, self._rng.uniform(0.05, 0.95) * self.H
-            if frame[int(y), int(x)].mean() > 70:
-                break
-        return x, y
+        return drop_spot(frame, self._rng, self._at)
 
     def _colour(self, frame: np.ndarray, x: float, y: float, t: float):
+        hue = None
         if self._color == "chord":
             i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
             hue = VeilsLayer.hue_of_root(self._chords[i].pitch) if i >= 0 else 0.0
-            return colorsys.hsv_to_rgb(hue, 0.85, 1.0)
-        x0, y0 = int(x), int(y)
-        patch = frame[max(0, y0 - 2):y0 + 3, max(0, x0 - 2):x0 + 3].reshape(-1, 3).mean(axis=0) / 255.0
-        h, sat, v = colorsys.rgb_to_hsv(*patch)
-        if self._color == "complement":
-            h = (h + 0.5) % 1.0
-        return colorsys.hsv_to_rgb(h, min(1.0, sat * self._boost + 0.15), min(1.0, max(v, 0.5) * 1.15))
+        return drop_colour(frame, x, y, self._color, self._boost, hue)
 
     def process(self, frame: np.ndarray, t: float) -> np.ndarray:
         lo = t - 1.0 / self.fps if self._last_t is None else self._last_t   # first frame: only its own hits
