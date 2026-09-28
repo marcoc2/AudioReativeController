@@ -31,7 +31,8 @@ class ShaderPass:
         import moderngl
         self.W, self.H = int(width), int(height)
         self.ss = max(1, int(supersample))
-        self.ctx = moderngl.create_standalone_context()
+        from core.gpu import context
+        self.ctx = context()                  # shared by every layer of the render (core/gpu.py)
         self.prog = self.ctx.program(vertex_shader=VERTEX_SHADER, fragment_shader=fragment_shader)
         quad = np.array([-1, -1, 1, -1, -1, 1, 1, 1], dtype="f4")
         self._vbo = self.ctx.buffer(quad.tobytes())
@@ -53,7 +54,7 @@ class ShaderPass:
 
     def draw(self, textures=None, **uniforms) -> np.ndarray:
         """Render; ``textures`` maps texture units (1, 2, ...) to textures of this context."""
-        # several GPU layers each own a context: make this one current, or its calls land in another's
+        # the shared context must be current in this thread for the calls below
         with self.ctx:
             u = self.prog
             uniforms.setdefault("u_aspect", self.W / self.H)

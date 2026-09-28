@@ -1800,6 +1800,8 @@ def _do_preview():
         _set_status("Preview crashed — see log.")
     finally:
         S.rendering = False
+        from core import gpu
+        gpu.release()          # this thread's GPU context (and all the layers made in it) goes
 
 
 def btn_preview():

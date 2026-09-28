@@ -411,7 +411,8 @@ class _GpuBackend:
         self._mgl = moderngl
         self.W, self.H, self.ss = width, height, max(1, int(supersample))
         self.threads, self.keep, self.seed = int(threads), int(keep), int(seed)
-        self.ctx = ctx = moderngl.create_standalone_context(require=430)
+        from core.gpu import context
+        self.ctx = ctx = context()                  # the shared context asks for GL 4.3
         self.cs = ctx.compute_shader(_CS)
         self.points = ctx.buffer(reserve=self.threads * self.keep * 16)
         self.draw = ctx.program(vertex_shader=_DRAW_VS, fragment_shader=_DRAW_FS)

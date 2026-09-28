@@ -147,7 +147,8 @@ class CubeField:
         import moderngl  # lazy — matches mandelbulb; layer skips if unavailable
         self.W, self.H = int(width), int(height)
         self.n_screens = max(1, int(n_screens))
-        self.ctx = moderngl.create_standalone_context()
+        from core.gpu import context
+        self.ctx = context()
         self._mgl = moderngl
 
         self.prog = self.ctx.program(vertex_shader=_VS, fragment_shader=_FS)
@@ -281,6 +282,7 @@ class CubeField:
             self.id_prog["u_mvp"].write(self._mvp(i, depth, rot))
             self.id_prog["u_id"].value = float(i + 1)
             self.id_vao.render(mode=gl.TRIANGLES, vertices=36)
+        self.ctx.disable(gl.DEPTH_TEST)        # the context is shared: leave it as found
 
         buf = np.frombuffer(self.id_fbo.read(components=3), dtype=np.uint8)
         ids = buf.reshape(h, w, 3)[:, :, 0].astype(np.int64).ravel()
@@ -327,6 +329,7 @@ class CubeField:
             if cube_layers is not None:
                 self.prog["u_layer_base"].value = float(cube_layers[i])
             self.vao.render(mode=gl.TRIANGLES, vertices=36)
+        self.ctx.disable(gl.DEPTH_TEST)
 
         buf = self.fbo.read(components=3)
         # GL framebuffer is bottom-left origin; flip to the system's top-left
@@ -341,7 +344,3 @@ class CubeField:
                 obj.release()
             except Exception:
                 pass
-        try:
-            self.ctx.release()
-        except Exception:
-            pass
