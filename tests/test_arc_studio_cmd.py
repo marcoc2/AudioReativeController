@@ -297,3 +297,14 @@ def test_repaint_command_follows_the_song():
     assert cmd[cmd.index("--scene") + 1] == "examples/r.yaml"
     assert "--prompt" not in cmd and "--seconds" not in cmd
     S.midi_offset = 0.0
+
+
+def test_bars_counted_from_a_start_rounded_just_before_the_downbeat():
+    import pytest
+    from clip_generator import span_of_bars
+    from core.rhythm.grid import RhythmGrid
+    grid = RhythmGrid(bpm=90.0, fps=30)                   # bars of 2.6667 s from 0
+    bar = grid.bar_duration
+    assert span_of_bars(grid, 2 * bar - 0.0003, 1, 30) == pytest.approx(bar, abs=1e-3)
+    assert span_of_bars(grid, 2 * bar, 4, 30) == pytest.approx(4 * bar)
+    assert span_of_bars(grid, 2 * bar + 1.0, 1, 30) == pytest.approx(bar - 1.0)   # mid-bar: to its end

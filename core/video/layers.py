@@ -22,6 +22,8 @@ from typing import Callable, List, Optional, Sequence
 import colorsys
 import math
 import collections
+import time
+from pathlib import Path
 from scipy.ndimage import affine_transform
 
 import numpy as np
@@ -157,10 +159,16 @@ class SolidLayer:
 
 
 class Compositor:
-    """Bottom-up layer stack. First layer is the base canvas."""
+    """Bottom-up layer stack. First layer is the base canvas.
+
+    Set ``profile = {}`` to have ``frame_at`` add up, per layer, the seconds spent on its own
+    work, on blending its result in and on its mask; ``profile_report(frames)`` prints them.
+    """
 
     def __init__(self):
         self._layers: List[tuple] = []
+        self.names: List[str] = []           # one per layer, for the profile
+        self.profile: Optional[dict] = None
 
     def add(self, source, blend: str = "normal",
             opacity: Optional[Callable[[float], float]] = None, matte=None) -> None:
@@ -173,15 +181,26 @@ class Compositor:
         if not self._layers and matte is not None:
             raise ValueError("the base layer cannot have a mask (there is nothing below it)")
         self._layers.append((source, blend, opacity, matte))
+        self.names.append(type(source).__name__)
 
     def __len__(self) -> int:
         return len(self._layers)
 
+    def _spent(self, k: int, part: str, since: float) -> float:
+        now = time.perf_counter()
+        row = self.profile.setdefault(k, {"work": 0.0, "blend": 0.0, "mask": 0.0})
+        row[part] += now - since
+        return now
+
     def frame_at(self, t: float) -> np.ndarray:
         if not self._layers:
             raise RuntimeError("compositor has no layers")
+        prof = self.profile is not None
+        clock = time.perf_counter() if prof else 0.0
         out = self._layers[0][0].frame_at(t)
-        for src, blend, opacity, matte in self._layers[1:]:
+        if prof:
+            clock = self._spent(0, "work", clock)
+        for k, (src, blend, opacity, matte) in enumerate(self._layers[1:], 1):
             below = out
             op = 1.0 if opacity is None else float(opacity(t))
             if hasattr(src, "process"):
@@ -189,19 +208,41 @@ class Compositor:
                 if op <= 0.0:
                     if hasattr(src, "observe"):         # a post-op with memory keeps watching while gated
                         src.observe(out, t)
+                    if prof:
+                        clock = self._spent(k, "work", clock)
                     continue
                 done = src.process(out, t)
+                if prof:
+                    clock = self._spent(k, "work", clock)
                 out = done if op >= 1.0 else blend_frames(out, done, "normal", op)
             else:
                 if op <= 0.0:
                     continue
                 # a source that paints itself with what lies below (``frame_at_over``) sees the composite so far
                 top = src.frame_at_over(out, t) if hasattr(src, "frame_at_over") else src.frame_at(t)
+                if prof:
+                    clock = self._spent(k, "work", clock)
                 if top is not None:
                     out = blend_frames(out, top, blend, op)
+            if prof:
+                clock = self._spent(k, "blend", clock)
             if matte is not None and out is not below:
                 out = apply_matte(below, out, matte(t))
+                if prof:
+                    clock = self._spent(k, "mask", clock)
         return out
+
+    def profile_report(self, frames: int) -> str:
+        """Mean milliseconds per frame, per layer, from ``profile``."""
+        lines = [f"  {'layer':32s} {'work':>8s} {'blend':>8s} {'mask':>8s} {'total':>8s}   (ms/frame)"]
+        grand = 0.0
+        for k, name in enumerate(self.names):
+            row = (self.profile or {}).get(k, {"work": 0.0, "blend": 0.0, "mask": 0.0})
+            ms = [1000.0 * row[p] / max(1, frames) for p in ("work", "blend", "mask")]
+            grand += sum(ms)
+            lines.append(f"  {k}:{name:30s} {ms[0]:8.1f} {ms[1]:8.1f} {ms[2]:8.1f} {sum(ms):8.1f}")
+        lines.append(f"  {'layers, all':32s} {'':8s} {'':8s} {'':8s} {grand:8.1f}")
+        return "\n".join(lines)
 
 
 def _layer_events(spec: dict, notes: Sequence, onset_loader=None, grid=None) -> list:
@@ -2432,4 +2473,9 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             src, blend, opacity, _ = comp._layers[i]
             comp._layers[i] = (src, blend, opacity,
                                LayerMatte(spec["mask"], width, height, masks, tracks))
+    for i, spec in enumerate(enabled):                  # the profile names layers as the scene does
+        name = spec.get("source", "clips")
+        if spec.get("file"):
+            name += " " + Path(str(spec["file"])).stem
+        comp.names[i] = name
     return comp

@@ -14,7 +14,10 @@ Usage examples
 
 import argparse
 import subprocess
+import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
@@ -25,7 +28,30 @@ from core.video.composer import ClipComposer
 from core.video.layers import build_compositor
 
 
-def main() -> None:
+@dataclass
+class Render:
+    """Everything a render needs, set up: ``stack.frame_at(start_sec + i / fps)`` for i < n_frames."""
+    stack: object
+    start_sec: float
+    n_frames: int
+    fps: int
+    width: int
+    height: int
+    output_path: str
+    composer: Optional[object] = None
+    library: Optional[object] = None
+
+
+def span_of_bars(grid, start_sec: float, bars: int, fps: float) -> float:
+    """Seconds that ``bars`` bars take from ``start_sec`` (bars are not all the same length
+    when the meter changes). A start within half a frame of a downbeat counts as that bar:
+    --start-time 13.351 for a bar at 13.3513 would otherwise spend one of the bars on the
+    0.3 ms left of the bar before."""
+    first_bar = grid.bar_index(start_sec + 0.5 / fps)
+    return grid.bar_start(first_bar + bars) - start_sec
+
+
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="ARC clip compositor")
     ap.add_argument("--file",        required=True,  help="Audio file (mp3/wav/flac)")
     ap.add_argument("--clips",       default=None,   help="Folder of pre-rendered video clips (optional for pure-generative scenes)")
@@ -62,8 +88,13 @@ def main() -> None:
                     help="Mask track (segment_video.py) for layers whose mask: names none")
     ap.add_argument("--codec", choices=["x264", "nvenc"], default="x264",
                     help="Encoder: nvenc = GPU (NVIDIA), RAM baixa e rapido em 4K")
-    args = ap.parse_args()
+    ap.add_argument("--profile", action="store_true",
+                    help="Print how many ms each layer takes per frame (work, blend, mask)")
+    return ap
 
+
+def prepare(args) -> Render:
+    """Read the song, the MIDI and the scene; build the layer stack. No frame is rendered."""
     W, H = (int(x) for x in args.resolution.split("x"))
     fps = args.fps
 
@@ -137,9 +168,7 @@ def main() -> None:
         composer.seek(start_sec)
 
     if args.bars > 0:
-        # N bars from where we start; bars are not all the same length when the meter changes
-        first_bar = grid.bar_index(start_sec)
-        total_dur = grid.bar_start(first_bar + args.bars) - start_sec
+        total_dur = span_of_bars(grid, start_sec, args.bars, fps)
     else:
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -161,7 +190,18 @@ def main() -> None:
 
     stem        = Path(args.file).stem
     output_path = args.output or f"render_output/{stem}_clips.mp4"
+    return Render(stack, start_sec, n_frames, fps, W, H, output_path, composer, library)
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    r = prepare(args)
+    stack, composer, library = r.stack, r.composer, r.library
+    W, H, fps, n_frames, start_sec, output_path = r.width, r.height, r.fps, r.n_frames, r.start_sec, r.output_path
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    if args.profile:
+        stack.profile = {}
+    t_render = t_write = 0.0
 
     # Encode by piping raw frames straight into ffmpeg (no temp files).
     enc = subprocess.Popen(
@@ -184,8 +224,12 @@ def main() -> None:
     try:
         for fi in range(n_frames):
             t = start_sec + fi / fps
+            t0 = time.perf_counter()
             frame = stack.frame_at(t)
+            t1 = time.perf_counter()
             enc.stdin.write(frame.tobytes())
+            t_render += t1 - t0
+            t_write += time.perf_counter() - t1
             if fi % fps == 0:
                 if composer is not None:
                     tp = composer.transport
@@ -202,6 +246,10 @@ def main() -> None:
 
     if enc.returncode != 0:
         raise SystemExit(f"ffmpeg encoding failed (exit {enc.returncode})")
+    if args.profile and n_frames:
+        print(stack.profile_report(n_frames))
+        print(f"  whole frame: {1000 * t_render / n_frames:8.1f} ms   "
+              f"to the encoder: {1000 * t_write / n_frames:6.1f} ms")
     print(f"\nDone! -> {output_path}")
 
 
