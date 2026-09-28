@@ -183,6 +183,26 @@ class RegionTracker:
                     del self._regions[rid]
         return out
 
+    def auto_masks(self, frame: np.ndarray, points_per_side: int = 32, min_iou: float = 0.6,
+                   min_stability: float = 0.7) -> list:
+        """Everything SAM2 finds on one picture by itself (a grid of point prompts):
+        bool H×W masks, largest first. Separate from the stream; tracking is unaffected.
+
+        SAM2's own defaults (0.8 / 0.95) keep only the masks it is sure of, and on drawn
+        pictures those are the whole panel and small pieces; whole characters score lower,
+        so the bars are lower here (measured on comics, 28/09/2026)."""
+        key = (points_per_side, min_iou, min_stability)
+        if getattr(self, "_auto_key", None) != key:
+            from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+            self._auto = SAM2AutomaticMaskGenerator(self.predictor, points_per_side=points_per_side,
+                                                    pred_iou_thresh=min_iou,
+                                                    stability_score_thresh=min_stability)
+            self._auto_key = key
+        with self._autocast():
+            found = self._auto.generate(np.array(frame, copy=True))
+        found.sort(key=lambda m: -m["area"])
+        return [m["segmentation"].astype(bool) for m in found]
+
     def forget(self, region_id) -> None:
         self._regions.pop(region_id, None)
 

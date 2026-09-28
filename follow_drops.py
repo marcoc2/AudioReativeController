@@ -28,6 +28,7 @@ from pathlib import Path
 import yaml
 
 from core.rhythm.midi_reader import parse_meter_changes, read_midi, shift_in_time
+from core.video.frames import iter_frames, open_encoder, probe_video
 
 
 def _drops_layer(scene: dict, index) -> int:
@@ -40,14 +41,6 @@ def _drops_layer(scene: dict, index) -> int:
     if index not in found:
         raise SystemExit(f"layer {index} is not a drops layer (drops layers: {found})")
     return index
-
-
-def _probe(video: str):
-    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-                          "stream=width,height,r_frame_rate", "-of", "csv=p=0", video],
-                         capture_output=True, text=True, check=True).stdout.strip().split(",")
-    num, den = out[2].split("/")
-    return int(out[0]), int(out[1]), float(num) / float(den)
 
 
 def main():
@@ -98,7 +91,7 @@ def main():
         grid, notes = read_midi(args.midi, meter_changes=parse_meter_changes(args.meter) if args.meter else None)
         shift_in_time(grid, notes, args.midi_offset)
     start = args.start_time or (float(grid.start_offset) if grid is not None and grid.start_offset else 0.0)
-    W, H, fps = _probe(base)
+    W, H, fps = probe_video(base)
 
     from core.segment import RegionTracker
     from core.video.drops_follow import FollowedDrops
@@ -106,21 +99,10 @@ def main():
     tracker = RegionTracker(args.sam2_weights, args.sam2_model)
     drops = FollowedDrops(spec, notes, W, H, fps, tracker, grid=grid)
 
-    dec = subprocess.Popen(["ffmpeg", "-v", "error", "-i", base, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-                           stdout=subprocess.PIPE)
-    enc = subprocess.Popen(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
-                            "-s", f"{W}x{H}", "-r", f"{fps:g}", "-i", "-", "-i", base,
-                            "-map", "0:v", "-map", "1:a?", "-c:v", "libx264", "-crf", "18",
-                            "-pix_fmt", "yuv420p", "-c:a", "copy", "-shortest", str(out)],
-                           stdin=subprocess.PIPE)
-    import numpy as np
-    size, i, t0 = W * H * 3, 0, time.time()
+    enc = open_encoder(str(out), W, H, fps, audio_from=base)
+    i, t0 = 0, time.time()
     try:
-        while True:
-            buf = dec.stdout.read(size)
-            if len(buf) < size:
-                break
-            frame = np.frombuffer(buf, np.uint8).reshape(H, W, 3)
+        for frame in iter_frames(base):
             enc.stdin.write(drops.process(frame, start + i / fps).tobytes())
             i += 1
             if i % int(round(fps)) == 0:
@@ -129,8 +111,6 @@ def main():
     finally:
         enc.stdin.close()
         enc.wait()
-        dec.stdout.close()
-        dec.wait()
     s = drops.stats
     print(f"done: {out}  ({i} frames, {s['drops']} drops: {s['mask_prompts']} from their region, "
           f"{s['point_prompts']} from a point)")
