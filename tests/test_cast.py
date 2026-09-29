@@ -109,3 +109,44 @@ def test_mistakes_are_named(track):
             _cast(folder, [role], _notes(("kick", START)))
     with pytest.raises(ValueError, match="mask track"):
         CastLayer({"roles": [{"plays": {"track": "kick"}}]}, [], W, H, FPS)
+
+
+def _gpu(w, h):
+    try:
+        from core.video.gpu_compose import GpuComposer
+        return GpuComposer(w, h)
+    except Exception as exc:
+        pytest.skip(f"no OpenGL: {exc}")
+
+
+@pytest.mark.parametrize("act", ["punch", "shake", "tint", "glow", "presence"])
+@pytest.mark.parametrize("size", [(W, H), (2 * W + 3, 2 * H - 1)])   # the track stretched, unevenly
+def test_the_gpu_plays_what_numpy_plays(track, act, size):
+    import cv2
+    from core.video.gpu_compose import Frame
+    folder, _ = track
+    rw, rh = size
+    g = _gpu(rw, rh)
+    roles = [{"who": "largest", "plays": {"track": "snare"}, "act": act, "color": [40, 200, 255]},
+             {"who": "background", "plays": {"track": "snare"}, "act": "tint", "amount": 0.3}]
+    cast = CastLayer({"track": folder, "roles": roles}, _notes(("snare", START + 0.3)), rw, rh, FPS)
+    noise = np.random.default_rng(7).integers(0, 40, (rh, rw, 3))
+    frame = np.clip(cv2.resize(_frame(3), (rw, rh)).astype(int) - noise, 0, 255).astype(np.uint8)
+    t = START + 0.35                        # just after the hit (for presence: still fading in)
+    want = cast.process(frame, t)
+    assert not np.array_equal(want, frame)
+    g.begin()
+    got = cast.process_gpu(Frame(g, cpu=frame), t, g).cpu()
+    d = np.abs(got.astype(int) - want.astype(int))
+    assert d.max() <= 2 and (d > 0).mean() < 0.01, (act, d.max(), (d > 0).mean())
+
+
+def test_the_gpu_leaves_a_quiet_frame_alone(track):
+    from core.video.gpu_compose import Frame
+    folder, _ = track
+    g = _gpu(W, H)
+    cast = _cast(folder, [{"who": "largest", "plays": {"track": "kick"}, "act": "punch"}],
+                 _notes(("kick", START + 0.9)))
+    g.begin()
+    f = Frame(g, cpu=_frame(2))
+    assert cast.process_gpu(f, START + 0.2, g) is f and g.uploads == 0

@@ -121,6 +121,27 @@ void main(){
 }
 """ % MAX_WEIGHTS
 
+# cv2.dilate / cv2.erode of a frame-sized texture over OpenCV's elliptic kernel (taps
+# outside the frame are left out, as OpenCV's default border does)
+_MORPH_FS = """
+#version 330
+out vec4 f_color;
+uniform sampler2D u_src;
+uniform sampler2D u_offs;
+uniform int u_n; uniform int u_min;
+void main(){
+    ivec2 p = ivec2(gl_FragCoord.xy), size = textureSize(u_src, 0);
+    float v = texelFetch(u_src, p, 0).r;
+    for (int i = 0; i < u_n; i++){
+        ivec2 q = p + ivec2(texelFetch(u_offs, ivec2(i, 0), 0).rg);
+        if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+        float s = texelFetch(u_src, q, 0).r;
+        v = (u_min == 1) ? min(v, s) : max(v, s);
+    }
+    f_color = vec4(v, 0.0, 0.0, 1.0);
+}
+"""
+
 _INVERT_FS = """
 #version 330
 out vec4 f_color;
@@ -156,14 +177,13 @@ class GpuComposer:
         with ctx:
             self._vbo = ctx.buffer(quad.tobytes())
             self._progs = {}
-            for name, fs in (("blend", _BLEND_FS), ("apply", _APPLY_FS), ("grow", _GROW_FS),
-                             ("blur", _BLUR_FS), ("invert", _INVERT_FS)):
-                prog = ctx.program(vertex_shader=VERTEX_SHADER, fragment_shader=fs)
-                self._progs[name] = (prog, ctx.vertex_array(prog, [(self._vbo, "2f", "in_pos")]))
+        for name, fs in (("blend", _BLEND_FS), ("apply", _APPLY_FS), ("grow", _GROW_FS),
+                         ("blur", _BLUR_FS), ("morph", _MORPH_FS), ("invert", _INVERT_FS)):
+            self._program(name, fs)
         self._pool: Dict[tuple, list] = {}
         self._used: Dict[tuple, int] = {}
         self._fbos: Dict[int, object] = {}
-        self._sel: Dict[tuple, object] = {}
+        self._small: Dict[tuple, object] = {}
         self._kernels: Dict[tuple, np.ndarray] = {}
         self.uploads = self.downloads = 0
         self.moving = 0.0                    # seconds spent moving frames, for the profile
@@ -173,9 +193,23 @@ class GpuComposer:
         """A new frame: the textures of the last one may be reused."""
         self._used = {}
 
-    def texture(self):
-        """A frame-sized RGB texture for a layer to draw into, this frame."""
-        return self._tex()
+    def texture(self, comps: int = 3, dtype: str = "f1"):
+        """A frame-sized texture for a layer to draw into, this frame (RGB by default; a
+        mask: ``texture(1, "f4")``)."""
+        return self._tex(comps, dtype)
+
+    def small(self, img: np.ndarray, key: str):
+        """A one-channel array of any size (a selection at the track's size, a lookup table)
+        as a texture: uint8 -> 0..1, float32 as it is. One texture per ``key`` and size,
+        rewritten on every call; passes already drawn with the old contents keep them."""
+        dtype = "f4" if img.dtype == np.float32 else "f1"
+        h, w = img.shape[:2]
+        tex = self._small.get((key, w, h, dtype))
+        with self.ctx:
+            if tex is None:
+                tex = self._small[(key, w, h, dtype)] = self.ctx.texture((w, h), 1, dtype=dtype)
+            tex.write(np.ascontiguousarray(img, dtype=np.float32 if dtype == "f4" else np.uint8).tobytes())
+        return tex
 
     def _tex(self, comps: int = 3, dtype: str = "f1"):
         key = (comps, dtype)
@@ -214,7 +248,19 @@ class GpuComposer:
         # writable, like every frame the numpy layers have been given
         return np.frombuffer(bytearray(buf), np.uint8).reshape(self.H, self.W, 3)
 
-    def _run(self, name: str, out, textures: dict, **uniforms):
+    def _program(self, name: str, fs: str):
+        with self.ctx:
+            prog = self.ctx.program(vertex_shader=VERTEX_SHADER, fragment_shader=fs)
+            self._progs[name] = (prog, self.ctx.vertex_array(prog, [(self._vbo, "2f", "in_pos")]))
+
+    def run(self, name: str, out, textures: dict, fs: Optional[str] = None, **uniforms):
+        """Draw the fragment shader ``name`` over the texture ``out``, one fragment per texel
+        (``gl_FragCoord`` in numpy's row order). A layer brings its own shaders: ``fs`` is
+        compiled the first time its name is seen."""
+        if name not in self._progs:
+            if fs is None:
+                raise KeyError(f"no GPU pass {name!r}")
+            self._program(name, fs)
         prog, vao = self._progs[name]
         with self.ctx:
             for unit, (uname, tex) in enumerate(textures.items()):
@@ -233,49 +279,59 @@ class GpuComposer:
     # ------------------------------------------------------------------ passes
     def blend(self, below, top, mode: str, opacity: float):
         """``blend_frames`` on the GPU: textures in, a texture out."""
-        return self._run("blend", self._tex(), {"u_below": below, "u_top": top},
+        return self.run("blend", self._tex(), {"u_below": below, "u_top": top},
                          u_mode=MODES[mode], u_op=float(opacity))
 
     def apply(self, below, above, matte):
         """``apply_matte`` on the GPU (matte: an R32F texture of the frame size)."""
-        return self._run("apply", self._tex(), {"u_below": below, "u_above": above, "u_matte": matte})
+        return self.run("apply", self._tex(), {"u_below": below, "u_above": above, "u_matte": matte})
+
+    def _ellipse(self, radius: int):
+        """OpenCV's elliptic kernel of that radius as a texture of offsets, and its length."""
+        key = ("ellipse", radius)
+        if key not in self._kernels:
+            offs = ellipse_offsets(radius) if radius else np.zeros((1, 2), np.float32)
+            if len(offs) > MAX_TAPS:
+                raise ValueError(f"a {radius} px kernel is more than the GPU passes take")
+            with self.ctx:
+                tex = self.ctx.texture((len(offs), 1), 2, data=offs.tobytes(), dtype="f4")
+            self._kernels[key] = (tex, len(offs) if radius else 0)
+        return self._kernels[key]
+
+    def blur(self, src, sigma: float):
+        """cv2.GaussianBlur(mask, (0, 0), sigma) of a frame-sized one-channel float texture."""
+        key = ("gauss", round(float(sigma), 6))
+        if key not in self._kernels:
+            half = gaussian_half(sigma)
+            if len(half) > MAX_WEIGHTS:
+                raise ValueError(f"a blur of sigma {sigma:.1f} px is more than the GPU passes take")
+            w_arr = np.zeros(MAX_WEIGHTS, np.float32)
+            w_arr[:len(half)] = half
+            self._kernels[key] = (w_arr, len(half) - 1)
+        w_arr, half = self._kernels[key]
+        m = self.run("blur", self._tex(1, "f4"), {"u_src": src}, u_dir=(1, 0), u_half=half, u_w=w_arr)
+        return self.run("blur", self._tex(1, "f4"), {"u_src": m}, u_dir=(0, 1), u_half=half, u_w=w_arr)
+
+    def dilate(self, src, radius: int):
+        """cv2.dilate (radius > 0) or cv2.erode (< 0) of a frame-sized one-channel float
+        texture over OpenCV's elliptic kernel."""
+        offs, n = self._ellipse(abs(radius))
+        return self.run("morph", self._tex(1, "f4"), {"u_src": src, "u_offs": offs},
+                        u_n=n, u_min=int(radius < 0))
 
     def matte(self, selection: Optional[np.ndarray], grow: int, feather: float, outside: bool):
         """``LayerMatte`` on the GPU: the objects picked (uint8 0/1 at the track's size, or
         None: none) stretched, grown and feathered to the frame, inverted for ``outside``."""
         if selection is None:
             selection = np.zeros((1, 1), np.uint8)
-        h, w = selection.shape
-        sel = self._sel.get((w, h))
-        with self.ctx:
-            if sel is None:
-                sel = self._sel[(w, h)] = self.ctx.texture((w, h), 1, dtype="f1")
-            sel.write(np.ascontiguousarray(selection * 255 if selection.max() <= 1 else selection,
-                                           dtype=np.uint8).tobytes())
-        key = ("ellipse", abs(grow))
-        if key not in self._kernels:
-            offs = ellipse_offsets(abs(grow)) if grow else np.zeros((1, 2), np.float32)
-            if len(offs) > MAX_TAPS:
-                raise ValueError(f"mask: grow {grow} px is more than the GPU matte takes")
-            with self.ctx:
-                tex = self.ctx.texture((len(offs), 1), 2, data=offs.tobytes(), dtype="f4")
-            self._kernels[key] = (tex, len(offs) if grow else 0)
-        offs_tex, n = self._kernels[key]
-        m = self._run("grow", self._tex(1, "f4"), {"u_sel": sel, "u_offs": offs_tex},
-                      u_size=(float(self.W), float(self.H)), u_n=n, u_min=int(grow < 0))
+        sel = self.small(selection * 255 if selection.max() <= 1 else selection, "matte")
+        offs_tex, n = self._ellipse(abs(grow))
+        m = self.run("grow", self._tex(1, "f4"), {"u_sel": sel, "u_offs": offs_tex},
+                     u_size=(float(self.W), float(self.H)), u_n=n, u_min=int(grow < 0))
         if feather > 0.25:
-            key = ("gauss", round(float(feather), 6))
-            if key not in self._kernels:
-                self._kernels[key] = gaussian_half(feather)
-            half = self._kernels[key]
-            if len(half) > MAX_WEIGHTS:
-                raise ValueError(f"mask: feather {feather:.1f} px is more than the GPU matte takes")
-            w_arr = np.zeros(MAX_WEIGHTS, np.float32)
-            w_arr[:len(half)] = half
-            m = self._run("blur", self._tex(1, "f4"), {"u_src": m}, u_dir=(1, 0), u_half=len(half) - 1, u_w=w_arr)
-            m = self._run("blur", self._tex(1, "f4"), {"u_src": m}, u_dir=(0, 1), u_half=len(half) - 1, u_w=w_arr)
+            m = self.blur(m, feather)
         if outside:
-            m = self._run("invert", self._tex(1, "f4"), {"u_src": m})
+            m = self.run("invert", self._tex(1, "f4"), {"u_src": m})
         return m
 
 
