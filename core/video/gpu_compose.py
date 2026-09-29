@@ -142,6 +142,13 @@ void main(){
 }
 """
 
+_COPY_FS = """
+#version 330
+out vec4 f_color;
+uniform sampler2D u_src;
+void main(){ f_color = texelFetch(u_src, ivec2(gl_FragCoord.xy), 0); }
+"""
+
 _INVERT_FS = """
 #version 330
 out vec4 f_color;
@@ -178,7 +185,8 @@ class GpuComposer:
             self._vbo = ctx.buffer(quad.tobytes())
             self._progs = {}
         for name, fs in (("blend", _BLEND_FS), ("apply", _APPLY_FS), ("grow", _GROW_FS),
-                         ("blur", _BLUR_FS), ("morph", _MORPH_FS), ("invert", _INVERT_FS)):
+                         ("blur", _BLUR_FS), ("morph", _MORPH_FS), ("invert", _INVERT_FS),
+                         ("copy", _COPY_FS)):
             self._program(name, fs)
         self._pool: Dict[tuple, list] = {}
         self._used: Dict[tuple, int] = {}
@@ -197,6 +205,15 @@ class GpuComposer:
         """A frame-sized texture for a layer to draw into, this frame (RGB by default; a
         mask: ``texture(1, "f4")``)."""
         return self._tex(comps, dtype)
+
+    def keep(self, comps: int = 3, dtype: str = "f1"):
+        """A frame-sized texture that outlives the frame: a layer's memory (it owns it)."""
+        with self.ctx:
+            return self.ctx.texture((self.W, self.H), comps, dtype=dtype)
+
+    def copy(self, src, dst):
+        """``src`` into ``dst``, texel for texel (both frame-sized)."""
+        return self.run("copy", dst, {"u_src": src})
 
     def small(self, img: np.ndarray, key: str):
         """A one-channel array of any size (a selection at the track's size, a lookup table)

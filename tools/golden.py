@@ -58,6 +58,7 @@ CASES = {
     "world_melts":           ("esfolado_world_melts.yaml", ESFOLADO + CURADORIA + MASKS),
     "shadertoy_lente":       ("shadertoy_exemplo_curadoria.yaml", ESFOLADO + CURADORIA),
     "esfolado_cast":         ("esfolado_cast.yaml", ESFOLADO + CURADORIA + MASKS),
+    "esfolado_melodia":      ("esfolado_melodia.yaml", ESFOLADO + CURADORIA + MASKS),
     "kiss_veus":             ("kiss_veus.yaml", KISS),
     "kiss_areia":            ("kiss_areia.yaml", KISS),
     "kiss_chama":            ("kiss_chama.yaml", KISS),

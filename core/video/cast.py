@@ -12,6 +12,8 @@ not by id: in every shot the roles are filled again from what that shot holds.
         - {who: background, plays: {track: bass},     act: tint, color: chord,
            harmony: {score: input/song/sheetsage, snap: auto}}
         - {who: largest,    plays: {track: synth-voice}, act: presence, hold: 2.0}
+        - {who: second,     plays: {track: acid},     act: rings, speed: 300}
+        - {who: largest,    plays: {track: lead},     act: echo, trail: 3}
 
 who     largest | second | third | fourth (by their mean size in the shot) |
         leftmost | rightmost | topmost | bottommost (by where they sit) |
@@ -24,8 +26,15 @@ act     punch     the object jumps out of the paper on each hit, bigger, with a 
         glow      a halo round its outline on each hit (width: pixels at 720p)
         presence  it is a flat silhouette until its instrument plays, and goes back to one
                   when it has been quiet for ``hold`` seconds (fade: seconds to change)
+        rings     each note sends a ring out from its outline, like sonar: low notes thick,
+                  loud ones bright (speed: pixels/s at 720p, life: seconds, width: pixels
+                  at 720p; color defaults to the note's own hue)
+        echo      while a note sounds it leaves ghosts of itself behind, one every ``every``
+                  seconds, each fading over ``trail`` times the note's length: a long note
+                  leaves a long trail, staccato a short one (amount: the ghosts' opacity;
+                  color: tint them, onion-skin style)
 envelope  seconds a hit takes to die away (default by act)
-color     [r, g, b] | chord (the chord's hue, needs harmony:)
+color     [r, g, b] | chord (the chord's hue, needs harmony:) | pitch (the note's hue)
 
 Roles are played in order, each on the picture the previous left; a post-op, it sees the
 whole composite below it. On the GPU when the compositor has one (the picture never leaves
@@ -41,11 +50,15 @@ import numpy as np
 
 from core.segment.mask_track import MaskTrack
 
-ACTS = ("punch", "shake", "tint", "glow", "presence")
+ACTS = ("punch", "shake", "tint", "glow", "presence", "rings", "echo")
 RANKS = {"largest": 0, "second": 1, "third": 2, "fourth": 3}
 PLACES = {"leftmost": (1, 1), "rightmost": (1, -1), "topmost": (2, 1), "bottommost": (2, -1)}
-ENVELOPE = {"punch": 0.25, "shake": 0.15, "tint": 0.4, "glow": 0.3, "presence": 0.0}
+ENVELOPE = {"punch": 0.25, "shake": 0.15, "tint": 0.4, "glow": 0.3, "presence": 0.0,
+            "rings": 0.0, "echo": 0.0}
 FLAT = (28, 24, 34)                      # a silhouette's colour, for presence
+MAX_RINGS = 32                           # rings out at once, per role
+MAX_GHOSTS = 16                          # ghosts kept, per role
+LUMA = (0.299, 0.587, 0.114)
 
 # --- the acts on the GPU: the numpy ones in _play, pixel for pixel (within a level)
 
@@ -158,6 +171,76 @@ void main(){
 }
 """
 
+# the object's distance field (at the track's size) stretched as cv2.resize INTER_LINEAR
+# does, and the rings riding it, outside the object only: each ring mixes its colour in
+# (not added: on white paper an added colour would vanish)
+_RINGS_FS = """
+#version 330
+out vec4 f_color;
+uniform sampler2D u_src, u_m, u_dist;
+uniform vec2 u_size; uniform float u_scale;
+uniform int u_n;
+uniform vec4 u_ring[%d];            // radius, thickness, strength
+uniform vec4 u_col[%d];
+float at(vec2 q){
+    ivec2 n = textureSize(u_dist, 0);
+    vec2 s = clamp((q + 0.5) * vec2(n) / u_size - 0.5, vec2(0.0), vec2(n - 1));
+    ivec2 i0 = ivec2(floor(s)), i1 = min(i0 + 1, n - 1);
+    vec2 f = s - vec2(i0);
+    float a = texelFetch(u_dist, i0, 0).r, b = texelFetch(u_dist, ivec2(i1.x, i0.y), 0).r;
+    float c = texelFetch(u_dist, ivec2(i0.x, i1.y), 0).r, d = texelFetch(u_dist, i1, 0).r;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+void main(){
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    vec3 v = floor(texelFetch(u_src, p, 0).rgb * 255.0 + 0.5);
+    if (texelFetch(u_m, p, 0).r < 0.5){
+        float d = at(floor(gl_FragCoord.xy)) * u_scale;
+        for (int i = 0; i < u_n; i++){
+            float x = (d - u_ring[i].x) / u_ring[i].y;
+            float a = min(1.0, u_ring[i].z * exp(-x * x));
+            v = v * (1.0 - a) + u_col[i].rgb * a;
+        }
+    }
+    f_color = vec4(floor(clamp(v + 0.5, 0.0, 255.0)) / 255.0, 1.0);
+}
+""" % (MAX_RINGS, MAX_RINGS)
+
+# one ghost laid over what is built so far (kept unrounded, in a float texture)
+_GHOST_FS = """
+#version 330
+out vec4 f_color;
+uniform sampler2D u_acc, u_ghost, u_gm;
+uniform int u_first, u_tint;
+uniform float u_a; uniform vec3 u_c;
+void main(){
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    vec3 v = texelFetch(u_acc, p, 0).rgb;
+    if (u_first == 1) v = floor(v * 255.0 + 0.5);
+    vec3 g = floor(texelFetch(u_ghost, p, 0).rgb * 255.0 + 0.5);
+    if (u_tint == 1) g = clamp(u_c * (0.25 + 1.1 * dot(g, vec3(0.299, 0.587, 0.114)) / 255.0), 0.0, 255.0);
+    float k = u_a * texelFetch(u_gm, p, 0).r;
+    f_color = vec4(v * (1.0 - k) + g * k, 1.0);
+}
+"""
+
+# and the object itself back on top of its ghosts
+_ECHO_FS = """
+#version 330
+out vec4 f_color;
+uniform sampler2D u_acc, u_src, u_am;
+uniform int u_first;                // no ghost laid: u_acc is the picture itself
+void main(){
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    vec3 v = texelFetch(u_acc, p, 0).rgb;
+    if (u_first == 1) v = floor(v * 255.0 + 0.5);
+    vec3 s = floor(texelFetch(u_src, p, 0).rgb * 255.0 + 0.5);
+    float a = texelFetch(u_am, p, 0).r;
+    v = v * (1.0 - a) + s * a;
+    f_color = vec4(floor(clamp(v + 0.5, 0.0, 255.0)) / 255.0, 1.0);
+}
+"""
+
 
 class _Role:
     def __init__(self, spec: dict, notes, onset_loader, grid, scale: float, index: int):
@@ -172,19 +255,29 @@ class _Role:
             raise ValueError(f"cast role {index}: act {self.act!r} (use one of {ACTS})")
         if "plays" not in spec:
             raise ValueError(f"cast role {index}: plays: names its instrument ({{track: kick}})")
-        if self.act in ("punch", "shake") and self.who == "background":
+        if self.act in ("punch", "shake", "rings", "echo") and self.who == "background":
             raise ValueError(f"cast role {index}: the background cannot {self.act}")
         events = _layer_events(spec["plays"], notes, onset_loader, grid)
+        self.events = events
         self.times = np.array([e.time for e in events], float)
         self.env = EnvelopeOpacity(self.times, float(spec.get("envelope", ENVELOPE[self.act]) or 1e-3))
-        default = {"punch": 0.12, "shake": 10.0, "tint": 0.7, "glow": 1.0, "presence": 1.0}[self.act]
+        default = {"punch": 0.12, "shake": 10.0, "tint": 0.7, "glow": 1.0, "presence": 1.0,
+                   "rings": 1.0, "echo": 0.6}[self.act]
         self.amount = float(spec.get("amount", default))
         if self.act == "shake":
             self.amount *= scale
-        self.width = float(spec.get("width", 8)) * scale
+        self.width = float(spec.get("width", 3 if self.act == "rings" else 8)) * scale
         self.hold = float(spec.get("hold", 2.0))
         self.fade = max(1e-3, float(spec.get("fade", 0.3)))
-        self.color = spec.get("color", [255, 220, 120] if self.act == "glow" else [255, 60, 60])
+        self.speed = float(spec.get("speed", 300)) * scale
+        self.life = max(1e-3, float(spec.get("life", 1.0)))
+        self.every = float(spec.get("every", 0.08))
+        self.trail = float(spec.get("trail", 3.0))
+        colour = {"glow": [255, 220, 120], "rings": "pitch", "echo": None}.get(self.act, [255, 60, 60])
+        self.color = spec.get("color", colour)
+        self.ghosts: List[dict] = []         # echo: what it has left behind
+        self._spare: List[tuple] = []        # echo: GPU textures of ghosts gone, for new ones
+        self._caught, self._caught_at, self._shot, self._last_t = None, 0.0, None, None
         self._chords, self._chord_times, self._hue_of_root = [], np.array([]), VeilsLayer.hue_of_root
         if self.color == "chord":
             h = spec.get("harmony")
@@ -194,7 +287,10 @@ class _Role:
             self._chord_times = np.array([e.time for e in self._chords], float)
         self._seed = 1000 + index
 
-    def colour(self, t: float) -> np.ndarray:
+    def colour(self, t: float, pitch: Optional[int] = None) -> np.ndarray:
+        if self.color == "pitch":
+            hue = self._hue_of_root(60 if pitch is None else pitch)
+            return np.array(colorsys.hsv_to_rgb(hue, 0.8, 1.0), np.float32) * 255.0
         if self.color == "chord":
             i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
             hue = self._hue_of_root(self._chords[i].pitch) if i >= 0 else 0.0
@@ -204,6 +300,55 @@ class _Role:
     def last_hit(self, t: float) -> Optional[int]:
         i = int(np.searchsorted(self.times, t, side="right")) - 1
         return i if i >= 0 else None
+
+    def rings(self, t: float) -> List[tuple]:
+        """The rings out at ``t``: (radius, thickness, strength, colour) for each note
+        younger than ``life``."""
+        lo = int(np.searchsorted(self.times, t - self.life, side="right"))
+        hi = int(np.searchsorted(self.times, t, side="right"))
+        out = []
+        for e in self.events[max(lo, hi - MAX_RINGS):hi]:
+            age = t - e.time
+            pitch = int(getattr(e, "pitch", 60))
+            thick = self.width * float(np.clip(2.0 ** ((60 - pitch) / 24.0), 0.5, 3.0))
+            k = self.amount * getattr(e, "velocity", 100) / 127.0 * (1.0 - age / self.life) ** 2
+            out.append((self.speed * age, thick, k, self.colour(t, pitch)))
+        return out
+
+    def forget(self, t: float, shot: int) -> None:
+        """Echo: ghosts past their life go, and all of them at a cut or a jump back in time."""
+        if shot != self._shot or (self._last_t is not None and t < self._last_t):
+            gone, self.ghosts, self._caught = self.ghosts, [], None
+        else:
+            gone = [g for g in self.ghosts if t - g["born"] >= g["life"]]
+            self.ghosts = [g for g in self.ghosts if t - g["born"] < g["life"]]
+        self._spare += [g["data"] for g in gone if g["side"] == "gpu"]
+        self._shot, self._last_t = shot, t
+
+    def capture(self, t: float) -> Optional[dict]:
+        """Echo: a ghost to leave now, or None. While a note sounds, one every ``every`` s
+        (and always one per note, however short)."""
+        i = self.last_hit(t)
+        if i is None:
+            return None
+        e = self.events[i]
+        dur = max(float(getattr(e, "duration", 0.0) or 0.0), 0.05)
+        if t - e.time > dur or (self._caught == i and t - self._caught_at < self.every):
+            return None
+        self._caught, self._caught_at = i, t
+        return {"born": t, "life": float(np.clip(dur * self.trail, 0.15, 3.0)),
+                "a0": self.amount * getattr(e, "velocity", 100) / 127.0}
+
+    def keep(self, ghost: dict) -> None:
+        self.ghosts.append(ghost)
+        while len(self.ghosts) > MAX_GHOSTS:
+            old = self.ghosts.pop(0)
+            if old["side"] == "gpu":
+                self._spare.append(old["data"])
+
+    @staticmethod
+    def fading(ghost: dict, t: float) -> float:
+        return ghost["a0"] * max(0.0, 1.0 - (t - ghost["born"]) / ghost["life"])
 
     def presence(self, t: float) -> float:
         """1 while the instrument is playing (a hit within ``hold`` s), fading in/out over ``fade``."""
@@ -285,11 +430,16 @@ class CastLayer:
         ranked = sorted(objs, key=lambda o: sign * o[key])
         return [ranked[0]["id"]] if ranked else []
 
-    def _mask(self, labels: np.ndarray, ids: Optional[List[int]]) -> np.ndarray:
-        m = (labels == 0) if ids is None else np.isin(labels, ids)
-        if m.shape != (self.H, self.W):
-            m = cv2.resize(m.astype(np.uint8), (self.W, self.H), interpolation=cv2.INTER_NEAREST) > 0
-        return m
+    def _mask(self, sel: np.ndarray) -> np.ndarray:
+        """The objects picked at the track's size, stretched to the frame."""
+        if sel.shape != (self.H, self.W):
+            return cv2.resize(sel.astype(np.uint8), (self.W, self.H), interpolation=cv2.INTER_NEAREST) > 0
+        return sel
+
+    @staticmethod
+    def _distance(sel: np.ndarray) -> np.ndarray:
+        """Rings: how far each pixel is from the objects, at the track's size."""
+        return cv2.distanceTransform((~sel).astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
 
     def _lookup(self, shape):
         """For the track's size: the track column each frame column takes and the track row
@@ -310,10 +460,20 @@ class CastLayer:
         return self._lookups[shape]
 
     # ----------------------------------------------------------------- acts
-    def _step(self, role: _Role, t: float, centre) -> Optional[tuple]:
+    def _step(self, role: _Role, t: float, centre, shot: int) -> Optional[tuple]:
         """What ``role`` does to its object at ``t``, whichever side paints it: (kind, params),
         or None when it leaves the picture alone. ``centre()`` gives the object's centre
         (asked for by a punch only)."""
+        if role.act == "rings":
+            live = role.rings(t)
+            return ("rings", {"rings": live}) if live else None
+        if role.act == "echo":
+            role.forget(t, shot)
+            cap = role.capture(t)
+            if cap is None and not role.ghosts:
+                return None
+            return "echo", {"capture": cap, "role": role,
+                            "tint": None if role.color is None else role.colour(t)}
         if role.act == "presence":
             p = role.presence(t)
             return None if p >= 1.0 else ("presence", {"p": p})
@@ -349,7 +509,8 @@ class CastLayer:
         res = res * (1.0 - a) + warped.astype(np.float32) * a
         return np.clip(res + 0.5, 0, 255).astype(np.uint8)
 
-    def _play(self, role: _Role, out: np.ndarray, m: np.ndarray, t: float) -> np.ndarray:
+    def _play(self, role: _Role, out: np.ndarray, sel: np.ndarray, t: float, shot: int) -> np.ndarray:
+        m = self._mask(sel)
         if not m.any():
             return out
 
@@ -357,13 +518,40 @@ class CastLayer:
             ys, xs = np.nonzero(m)
             return float(xs.mean()), float(ys.mean())
 
-        step = self._step(role, t, centre)
+        step = self._step(role, t, centre, shot)
         if step is None:
             return out
         kind, a = step
         if kind == "paste":
             return self._paste(out, out.copy(), m, a["M"], a["shadow"])
         res = out.astype(np.float32)
+        if kind == "rings":
+            d = self._distance(sel)
+            if d.shape != (self.H, self.W):
+                d = cv2.resize(d, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
+            d = d * np.float32(self.H / sel.shape[0])
+            away = ~m
+            for r, thick, k, c in a["rings"]:
+                x = (d - np.float32(r)) / np.float32(thick)
+                k = np.minimum(np.float32(1.0), np.float32(k) * np.exp(-x * x))[..., None]
+                res = np.where(away[..., None], res * (1.0 - k) + c[None, None, :] * k, res)
+            return np.clip(res + 0.5, 0, 255).astype(np.uint8)
+        if kind == "echo":
+            am = cv2.GaussianBlur(m.astype(np.float32), (0, 0), 0.8)
+            if a["capture"] is not None:
+                role.keep({**a["capture"], "side": "cpu", "data": (out.copy(), am)})
+            for g in role.ghosts:
+                if g["side"] != "cpu":
+                    continue
+                img, gm = g["data"]
+                img = img.astype(np.float32)
+                if a["tint"] is not None:
+                    L = img.dot(np.array(LUMA, np.float32))[..., None] / 255.0
+                    img = np.clip(a["tint"][None, None, :] * (0.25 + 1.1 * L), 0, 255)
+                k = (np.float32(role.fading(g, t)) * gm)[..., None]
+                res = res * (1.0 - k) + img * k
+            res = res * (1.0 - am[..., None]) + out.astype(np.float32) * am[..., None]
+            return np.clip(res + 0.5, 0, 255).astype(np.uint8)
         if kind == "presence":
             p = a["p"]
             res[m] = res[m] * p + np.array(FLAT, np.float32) * (1.0 - p)
@@ -379,10 +567,46 @@ class CastLayer:
             res += a["c"][None, None, :] * (halo * a["k"])[..., None]
         return np.clip(res + 0.5, 0, 255).astype(np.uint8)
 
-    def _play_gpu(self, g, kind: str, a: dict, out, m):
+    def _play_gpu(self, g, kind: str, a: dict, out, m, sel, t: float):
         """``_play`` on the GPU: ``out`` the Frame below, ``m`` the objects' mask texture."""
         from core.video.gpu_compose import Frame
         src = out.tex()
+        if kind == "rings":
+            ring = np.zeros((MAX_RINGS, 4), np.float32)
+            col = np.zeros((MAX_RINGS, 4), np.float32)
+            for n, (r, thick, k, c) in enumerate(a["rings"]):
+                ring[n, :3] = r, thick, k
+                col[n, :3] = c
+            tex = g.run("cast_rings", g.texture(), {"u_src": src, "u_m": m,
+                        "u_dist": g.small(self._distance(sel), "cast_dist")}, fs=_RINGS_FS,
+                        u_size=(float(self.W), float(self.H)), u_scale=float(np.float32(self.H / sel.shape[0])),
+                        u_n=len(a["rings"]), u_ring=ring, u_col=col)
+            return Frame(g, tex=tex)
+        if kind == "echo":
+            role = a["role"]
+            am = g.blur(m, 0.8)
+            if a["capture"] is not None:
+                spare = [d for d in role._spare if d[2] is g]
+                if spare:
+                    data = spare[0]
+                    role._spare.remove(data)
+                else:
+                    data = (g.keep(3, "f1"), g.keep(1, "f4"), g)
+                g.copy(src, data[0])
+                g.copy(am, data[1])
+                role.keep({**a["capture"], "side": "gpu", "data": data})
+            acc = None
+            tint = {"u_tint": int(a["tint"] is not None),
+                    "u_c": tuple(float(c) for c in (a["tint"] if a["tint"] is not None else (0, 0, 0)))}
+            for gh in role.ghosts:
+                if gh["side"] != "gpu" or gh["data"][2] is not g:
+                    continue
+                layers = {"u_acc": src if acc is None else acc, "u_ghost": gh["data"][0], "u_gm": gh["data"][1]}
+                acc = g.run("cast_ghost", g.texture(4, "f4"), layers, fs=_GHOST_FS, u_first=int(acc is None),
+                            u_a=float(np.float32(role.fading(gh, t))), **tint)
+            tex = g.run("cast_echo", g.texture(), {"u_acc": src if acc is None else acc, "u_src": src, "u_am": am},
+                        fs=_ECHO_FS, u_first=int(acc is None))
+            return Frame(g, tex=tex)
         if kind == "presence":
             tex = g.run("cast_presence", g.texture(), {"u_src": src, "u_m": m}, fs=_PRESENCE_FS,
                         u_p=float(a["p"]), u_flat=tuple(float(c) for c in FLAT))
@@ -402,7 +626,8 @@ class CastLayer:
             sh = alpha
             if a["shadow"] > 0:
                 off = max(2, self.H // 90)
-                sh = g.blur(g.run("cast_warp_mask", g.texture(1, "f4"), {"u_m": m}, u_shift=(off, off), **rows), off)
+                shifted = g.run("cast_warp_mask", g.texture(1, "f4"), {"u_m": m}, u_shift=(off, off), **rows)
+                sh = g.blur(shifted, off)
             tex = g.run("cast_paste", g.texture(), {"u_src": src, "u_alpha": alpha, "u_sh": sh}, fs=_PASTE_FS,
                         u_shadow=float(a["shadow"]), **rows)
         return Frame(g, tex=tex)
@@ -415,6 +640,7 @@ class CastLayer:
             return frame
         labels = self.track.labels(i)
         lk = self._lookup(labels.shape)
+        shot = self._shot_of(i)
         tables = None
         out = frame
         for role in self.roles:
@@ -430,7 +656,7 @@ class CastLayer:
                 n = lk["yn"] @ s @ lk["xn"]
                 return float(lk["yn"] @ s @ lk["xs"] / n), float(lk["ys"] @ s @ lk["xn"] / n)
 
-            step = self._step(role, t, centre)
+            step = self._step(role, t, centre, shot)
             if step is None:
                 continue
             if tables is None:
@@ -438,7 +664,7 @@ class CastLayer:
                           "u_yo": g.small(lk["yo"][None, :].astype(np.float32), "cast_yo")}
             m = g.run("cast_near", g.texture(1, "f4"),
                       {"u_sel": g.small(sel.astype(np.uint8) * 255, "cast_sel"), **tables}, fs=_NEAR_FS)
-            out = self._play_gpu(g, step[0], step[1], out, m)
+            out = self._play_gpu(g, step[0], step[1], out, m, sel, t)
         return out
 
     def process(self, frame: np.ndarray, t: float) -> np.ndarray:
@@ -446,10 +672,12 @@ class CastLayer:
         if i is None:
             return frame
         labels = self.track.labels(i)
+        shot = self._shot_of(i)
         out = frame
         for role in self.roles:
             ids = self._cast(role.who, i)
             if ids is not None and not ids:
                 continue                     # nobody for that role in this shot
-            out = self._play(role, out, self._mask(labels, ids), t)
+            sel = (labels == 0) if ids is None else np.isin(labels, ids)
+            out = self._play(role, out, sel, t, shot)
         return out

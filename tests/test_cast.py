@@ -150,3 +150,70 @@ def test_the_gpu_leaves_a_quiet_frame_alone(track):
     g.begin()
     f = Frame(g, cpu=_frame(2))
     assert cast.process_gpu(f, START + 0.2, g) is f and g.uploads == 0
+
+
+def _held(name, t, dur, pitch=60):
+    return MidiNote(time=t, pitch=pitch, velocity=127, channel=0, duration=dur, track=name)
+
+
+def test_rings_ride_out_from_the_outline(track):
+    folder, _ = track
+    cast = _cast(folder, [{"who": "largest", "plays": {"track": "acid"}, "act": "rings", "width": 12,
+                           "color": [0, 0, 255], "speed": 300}], [_held("acid", START, 0.2)])
+    # radius at 0.2 s: 300 px/s at 720p -> 50 px/s here -> 10 px out of the red square,
+    # whose right edge is at x 57 on that frame
+    out = cast.process(_frame(2), START + 0.2).astype(int)
+    blue = out[60, :, 2] - out[60, :, 0]
+    assert blue[67] > 120 and blue[64] < blue[67] and blue[70] < blue[67]   # a ring, 10 px out
+    assert blue[90] == 0                                                   # nothing beyond it
+    assert (out[60, 40] == RED).all()                                      # the object is left alone
+    assert np.array_equal(cast.process(_frame(9), START + 1.5), _frame(9))   # the ring has died
+
+
+def test_echo_leaves_a_trail_while_the_note_is_held(track):
+    folder, _ = track
+    cast = _cast(folder, [{"who": "largest", "plays": {"track": "lead"}, "act": "echo", "amount": 1.0,
+                           "every": 0.05}], [_held("lead", START, 0.6)])
+    for i in range(6):                                           # the red square slides 4 px a frame
+        out = cast.process(_frame(i), START + i / FPS)
+    assert out[60, 15, 0] > out[60, 15, 2] + 40                  # where it was at frame 0: a red ghost
+    assert (out[60, 50] == RED).all()                            # where it is now: itself
+    assert (out[20, 130] == BLUE).all()                          # the others untouched
+    short = _cast(folder, [{"who": "largest", "plays": {"track": "lead"}, "act": "echo"}],
+                  [_held("lead", START, 0.05)])
+    for i in range(6):
+        out = short.process(_frame(i), START + i / FPS)
+    assert np.array_equal(out, _frame(5))                        # staccato: its trail is already gone
+
+
+@pytest.mark.parametrize("role", [
+    {"act": "rings", "plays": {"track": "acid"}},
+    {"act": "rings", "plays": {"track": "acid"}, "color": [255, 255, 0], "width": 6},
+    {"act": "echo", "plays": {"track": "lead"}},
+    {"act": "echo", "plays": {"track": "lead"}, "color": [80, 255, 120], "every": 0.1}])
+@pytest.mark.parametrize("size", [(W, H), (2 * W + 3, 2 * H - 1)])
+def test_the_gpu_keeps_step_with_numpy_over_time(track, role, size):
+    import cv2
+    from core.video.gpu_compose import Frame
+    folder, _ = track
+    rw, rh = size
+    g = _gpu(rw, rh)
+    notes = [_held("acid", START + 0.1, 0.2, 48), _held("acid", START + 0.3, 0.1, 67),
+             _held("lead", START, 0.5), _held("lead", START + 0.7, 0.1)]
+    spec = {"track": folder, "roles": [{"who": "largest", **role}]}
+    cpu, gpu = (CastLayer(spec, notes, rw, rh, FPS) for _ in range(2))
+    for i in range(14):                                          # across the cut at frame 10
+        frame = cv2.resize(_frame(i), (rw, rh))
+        t = START + i / FPS
+        want = cpu.process(frame, t)
+        g.begin()
+        got = gpu.process_gpu(Frame(g, cpu=frame), t, g).cpu()
+        d = np.abs(got.astype(int) - want.astype(int))
+        assert d.max() <= 2 and (d > 0).mean() < 0.01, (role, i, d.max(), (d > 0).mean())
+
+
+def test_the_background_has_no_outline_to_ring(track):
+    folder, _ = track
+    for act in ("rings", "echo"):
+        with pytest.raises(ValueError, match="background"):
+            _cast(folder, [{"who": "background", "plays": {"track": "acid"}, "act": act}])
