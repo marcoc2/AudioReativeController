@@ -234,6 +234,24 @@ class Shadertoy:
             tex.build_mipmaps()
         return tex
 
+    def _frame_texture(self, key, src):
+        """A "frame" channel from a compositor texture (numpy row order): flipped to GL's and
+        mipmapped on the GPU, as ``_upload`` does on the CPU."""
+        ctx, mgl = self._pass.ctx, self._pass._mgl
+        tex = self._tex.get(key)
+        if tex is None or tex.size != src.size or tex.components != 3:
+            if tex is not None:
+                tex.release()
+            with ctx:
+                tex = ctx.texture(src.size, 3)
+            tex.filter = (mgl.LINEAR_MIPMAP_LINEAR, mgl.LINEAR)
+            tex.repeat_x = tex.repeat_y = True
+            self._tex[key] = tex
+        self._pass.flip_copy(src, tex)
+        with ctx:
+            tex.build_mipmaps()
+        return tex
+
     def _inputs(self, pass_: str, frame, sound=None):
         """The textures a pass reads, bound to units 1..4, and their sizes."""
         textures, res = {}, [(0.0, 0.0, 1.0)] * CHANNELS
@@ -246,6 +264,9 @@ class Shadertoy:
                 img = sound if sound is not None else np.zeros((2, SOUND_BINS), np.uint8)
                 tex = self._upload((pass_, i), img, sound=True)
                 size = (img.shape[1], img.shape[0])
+            elif src == "frame" and frame is not None and not isinstance(frame, np.ndarray):
+                tex = self._frame_texture((pass_, i), frame)       # already on the GPU
+                size = frame.size
             else:
                 img = frame if src == "frame" else self._previous if src == "previous" else src
                 if img is None or isinstance(img, str):
@@ -256,9 +277,14 @@ class Shadertoy:
             res[i] = (float(size[0]), float(size[1]), 1.0)
         return textures, res
 
-    def render(self, time: float, dt: float = 1.0 / 30, frame=None, sound=None, **uniforms) -> np.ndarray:
-        """Draw at shader time ``time``; ``frame`` the picture for "frame" channels, ``sound`` the
-        texture for "sound" ones (``sound_texture``); ``uniforms`` the extra knobs."""
+    def render(self, time: float, dt: float = 1.0 / 30, frame=None, sound=None, target=None,
+               **uniforms):
+        """Draw at shader time ``time``; ``frame`` the picture for "frame" channels (numpy, or a
+        compositor texture), ``sound`` the texture for "sound" ones (``sound_texture``);
+        ``uniforms`` the extra knobs. With ``target`` (a compositor texture) the picture is
+        drawn into it and stays on the GPU — not for shaders that read "previous"."""
+        if target is not None and self.reads("previous"):
+            raise ValueError("shadertoy: a shader that reads its previous output renders on the CPU")
         now = _time.localtime(0)
         values = dict(iResolution=(float(self.RW), float(self.RH), 1.0), iTime=float(time),
                       iTimeDelta=float(dt), iFrameRate=1.0 / max(1e-6, float(dt)), iFrame=int(self._frame),
@@ -283,6 +309,10 @@ class Shadertoy:
                     self._tex_buf[b][nxt].build_mipmaps()
                 self._cur[b] = nxt
             textures, res = self._inputs("image", frame, sound)
+        if target is not None:
+            self._pass.draw_into(target, textures=textures, **values, iChannelResolution=res)
+            self._frame += 1
+            return target
         out = self._pass.draw(textures=textures, **values, iChannelResolution=res)
         self._previous = out
         self._frame += 1

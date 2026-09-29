@@ -173,6 +173,10 @@ class GpuComposer:
         """A new frame: the textures of the last one may be reused."""
         self._used = {}
 
+    def texture(self):
+        """A frame-sized RGB texture for a layer to draw into, this frame."""
+        return self._tex()
+
     def _tex(self, comps: int = 3, dtype: str = "f1"):
         key = (comps, dtype)
         pool = self._pool.setdefault(key, [])

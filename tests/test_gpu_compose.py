@@ -115,3 +115,50 @@ def test_numpy_only_when_asked_or_one_layer():
     one.add(SolidLayer(W, H, (1, 2, 3)))
     one.frame_at(0.0)
     assert one._g is None
+
+
+_GRADIENT_FS = """#version 330
+in vec2 v_uv; out vec4 f_color;
+void main(){ f_color = vec4(v_uv.x, v_uv.y, 0.25, 1.0); }"""
+
+
+def test_draw_into_is_the_picture_draw_brings_back():
+    from core.shader_pass import ShaderPass
+    g = _g()
+    sp = ShaderPass(_GRADIENT_FS, W, H, 2)
+    want = sp.draw()
+    got = g.download(sp.draw_into(g.texture()))
+    assert np.array_equal(got, want)                       # same rows, same order: top first
+    back = g.texture()
+    sp.flip_copy(g.upload(want), back)                     # numpy order -> GL order
+    assert np.array_equal(g.download(back), want[::-1])
+
+
+class _GpuSource:
+    """Draws a gradient on the GPU."""
+    on_gpu = True
+
+    def __init__(self):
+        from core.shader_pass import ShaderPass
+        self.sp = ShaderPass(_GRADIENT_FS, W, H, 1)
+
+    def frame_at(self, t):
+        return self.sp.draw()
+
+    def frame_gpu(self, t, g):
+        return self.sp.draw_into(g.texture())
+
+
+def test_gpu_layers_keep_the_frame_on_the_gpu():
+    g = _g()
+    c = Compositor()
+    c.add(SolidLayer(W, H, (40, 80, 120)))
+    c.add(_GpuSource(), "add", lambda t: 0.5)
+    c.add(_GpuSource(), "screen")
+    out = c.frame_at(0.0)
+    ref = Compositor(use_gpu=False)
+    ref.add(SolidLayer(W, H, (40, 80, 120)))
+    ref.add(_GpuSource(), "add", lambda t: 0.5)
+    ref.add(_GpuSource(), "screen")
+    assert np.abs(out.astype(int) - ref.frame_at(0.0).astype(int)).max() <= 1
+    assert (c._g.uploads, c._g.downloads) == (1, 1)        # the base up, the result down: nothing between

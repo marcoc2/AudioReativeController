@@ -168,6 +168,11 @@ class Compositor:
     the frame moving between CPU and GPU only when a layer needs the other side; layers keep
     taking and giving numpy frames. ``use_gpu``: None picks by itself, False keeps it all
     in numpy (the reference the GPU passes are checked against).
+
+    A layer can also work on the GPU side, and then its picture never leaves it: with
+    ``on_gpu`` true, a source's ``frame_gpu(t, g)`` returns a texture (``g.texture()``,
+    rows in numpy's order) and a post-op's ``process_gpu(frame, t, g)`` takes the ``Frame``
+    below and returns a ``Frame`` (the same one when it leaves the picture alone).
     """
 
     def __init__(self, use_gpu: Optional[bool] = None):
@@ -268,6 +273,7 @@ class Compositor:
         for k, (src, blend, opacity, matte) in enumerate(self._layers[1:], 1):
             below = out
             op = 1.0 if opacity is None else float(opacity(t))
+            on_gpu = getattr(src, "on_gpu", False)
             if hasattr(src, "process"):
                 if op <= 0.0:
                     if hasattr(src, "observe"):         # a post-op with memory keeps watching while gated
@@ -275,21 +281,30 @@ class Compositor:
                     if prof:
                         clock = self._spent(k, "work", clock)
                     continue
-                given = out.cpu()
-                done = src.process(given, t)
+                if on_gpu:
+                    done = src.process_gpu(out, t, g)
+                    changed = done is not out
+                else:
+                    given = out.cpu()
+                    done = src.process(given, t)
+                    changed = done is not given         # a post-op at rest hands the frame back
+                    done = Frame(g, cpu=done)
                 if prof:
                     clock = self._spent(k, "work", clock)
-                if done is not given:                   # a post-op at rest hands the frame back
-                    out = Frame(g, cpu=done) if op >= 1.0 else \
-                        Frame(g, tex=g.blend(below.tex(), g.upload(done), "normal", op))
+                if changed:
+                    out = done if op >= 1.0 else Frame(g, tex=g.blend(below.tex(), done.tex(), "normal", op))
             else:
                 if op <= 0.0:
                     continue
-                top = src.frame_at_over(out.cpu(), t) if hasattr(src, "frame_at_over") else src.frame_at(t)
+                if on_gpu:
+                    top = src.frame_gpu(t, g)
+                else:
+                    top = src.frame_at_over(out.cpu(), t) if hasattr(src, "frame_at_over") else src.frame_at(t)
+                    top = None if top is None else g.upload(top)
                 if prof:
                     clock = self._spent(k, "work", clock)
                 if top is not None:
-                    out = Frame(g, tex=g.blend(below.tex(), g.upload(top), blend, op))
+                    out = Frame(g, tex=g.blend(below.tex(), top, blend, op))
             if prof:
                 clock = self._spent(k, "blend", clock)
             if matte is not None and out is not below:
@@ -2013,7 +2028,7 @@ class ShadertoyLayer:
         self._last_t = None
         self._hears = self.toy.reads("sound")
 
-    def _draw(self, below, t: float) -> np.ndarray:
+    def _draw(self, below, t: float, target=None):
         dt = 1.0 / self.fps if self._last_t is None else max(0.0, t - self._last_t)
         if self._last_t is None:
             self._clock = t * self._speed if self._start is None else float(self._start)   # where the song is
@@ -2026,7 +2041,7 @@ class ShadertoyLayer:
             from core.shadertoy import sound_texture
             feats = (self.features_at(t) if self.features_at else None) or {}
             sound = sound_texture(feats.get("spectrum"), float(feats.get("nyquist", 22050.0)), feats.get("wave"))
-        return self.toy.render(self._clock, dt, frame=below, sound=sound,
+        return self.toy.render(self._clock, dt, frame=below, sound=sound, target=target,
                                **{k: f(t) for k, f in self._knobs.items()})
 
     @property
@@ -2037,17 +2052,26 @@ class ShadertoyLayer:
 class _ShadertoySource:
     def __init__(self, layer: ShadertoyLayer):
         self.layer = layer
+        self.on_gpu = not layer.toy.reads("previous")     # its picture can stay on the GPU
 
     def frame_at(self, t: float) -> np.ndarray:
         return self.layer._draw(None, t)
+
+    def frame_gpu(self, t: float, g):
+        return self.layer._draw(None, t, target=g.texture())
 
 
 class _ShadertoyPost:
     def __init__(self, layer: ShadertoyLayer):
         self.layer = layer
+        self.on_gpu = not layer.toy.reads("previous")
 
     def process(self, frame: np.ndarray, t: float) -> np.ndarray:
         return self.layer._draw(frame, t)
+
+    def process_gpu(self, frame, t: float, g):
+        from core.video.gpu_compose import Frame
+        return Frame(g, tex=self.layer._draw(frame.tex(), t, target=g.texture()))
 
 
 def drop_spot(frame: np.ndarray, rng, at: str = "random"):

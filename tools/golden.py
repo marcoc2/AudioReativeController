@@ -56,6 +56,7 @@ CASES = {
     "esfolado_shaders":      ("esfolado_shaders_inteira.yaml", ESFOLADO),
     "esfolado_prism":        ("esfolado_prism_liquid_musica.yaml", ESFOLADO),
     "world_melts":           ("esfolado_world_melts.yaml", ESFOLADO + CURADORIA + MASKS),
+    "shadertoy_lente":       ("shadertoy_exemplo_curadoria.yaml", ESFOLADO + CURADORIA),
     "esfolado_cast":         ("esfolado_cast.yaml", ESFOLADO + CURADORIA + MASKS),
     "kiss_veus":             ("kiss_veus.yaml", KISS),
     "kiss_areia":            ("kiss_areia.yaml", KISS),
@@ -77,7 +78,7 @@ def _missing(args) -> list:
     return [p for p in paths if not Path(p).exists()]
 
 
-def _render(name: str):
+def _render(name: str, numpy_only: bool = False):
     """The kept frames of a case, {index: uint8 RGB}, and the seconds it took."""
     from clip_generator import build_parser, prepare
     scene, extra = CASES[name]
@@ -94,6 +95,8 @@ def _render(name: str):
                                       "--fps", str(FPS), "--bars", "0", *extra])
     t0 = time.time()
     r = prepare(args)
+    if numpy_only:
+        r.stack.use_gpu = False              # the compositor's numpy path: the reference
     kept = {}
     for i in range(min(FRAMES, max(KEEP) + 1)):
         frame = r.stack.frame_at(r.start_sec + i / r.fps)
@@ -113,6 +116,8 @@ def main():
     ap.add_argument("--only", nargs="*", default=None, help="Just these cases")
     ap.add_argument("--tolerance", type=int, default=2, help="Levels a pixel may differ by")
     ap.add_argument("--allow", type=float, default=0.005, help="Share of pixels allowed past the tolerance")
+    ap.add_argument("--numpy", action="store_true",
+                    help="Compose in numpy only (the reference path), e.g. to make a new case's frames")
     args = ap.parse_args()
 
     names = args.only or list(CASES)
@@ -134,7 +139,7 @@ def main():
             continue
         folder = OUT / n
         try:
-            kept, secs = _render(n)
+            kept, secs = _render(n, args.numpy)
         except (Exception, SystemExit) as exc:          # a broken case is reported, the rest still run
             print(f"{n:26s} ERROR {type(exc).__name__}: {exc}")
             failed.append(n)
