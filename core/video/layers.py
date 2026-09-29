@@ -163,12 +163,20 @@ class Compositor:
 
     Set ``profile = {}`` to have ``frame_at`` add up, per layer, the seconds spent on its own
     work, on blending its result in and on its mask; ``profile_report(frames)`` prints them.
+
+    Hybrid: blends and masks run on the GPU (core/video/gpu_compose.py) when there is one,
+    the frame moving between CPU and GPU only when a layer needs the other side; layers keep
+    taking and giving numpy frames. ``use_gpu``: None picks by itself, False keeps it all
+    in numpy (the reference the GPU passes are checked against).
     """
 
-    def __init__(self):
+    def __init__(self, use_gpu: Optional[bool] = None):
         self._layers: List[tuple] = []
         self.names: List[str] = []           # one per layer, for the profile
         self.profile: Optional[dict] = None
+        self.use_gpu = use_gpu
+        self._g = None                        # GpuComposer, made at the first frame
+        self.size: Optional[tuple] = None     # (width, height) of the render, when known
 
     def add(self, source, blend: str = "normal",
             opacity: Optional[Callable[[float], float]] = None, matte=None) -> None:
@@ -192,14 +200,34 @@ class Compositor:
         row[part] += now - since
         return now
 
+    def _gpu(self, shape):
+        """The GPU composer for frames of ``shape``, or None when the stack stays in numpy."""
+        if self.use_gpu is False or len(self._layers) < 2:
+            return None
+        W, H = self.size or (shape[1], shape[0])
+        if self._g is None or (self._g.W, self._g.H) != (W, H):
+            try:
+                from core.video.gpu_compose import GpuComposer
+                self._g = GpuComposer(W, H)
+            except Exception:
+                if self.use_gpu:                  # asked for explicitly: say why not
+                    raise
+                self.use_gpu = False
+                return None
+        return self._g
+
     def frame_at(self, t: float) -> np.ndarray:
         if not self._layers:
             raise RuntimeError("compositor has no layers")
         prof = self.profile is not None
         clock = time.perf_counter() if prof else 0.0
-        out = self._layers[0][0].frame_at(t)
+        base = self._layers[0][0].frame_at(t)
         if prof:
             clock = self._spent(0, "work", clock)
+        g = self._gpu(base.shape)
+        if g is not None:
+            return self._frame_at_gpu(g, base, t, clock)
+        out = base
         for k, (src, blend, opacity, matte) in enumerate(self._layers[1:], 1):
             below = out
             op = 1.0 if opacity is None else float(opacity(t))
@@ -232,15 +260,67 @@ class Compositor:
                     clock = self._spent(k, "mask", clock)
         return out
 
+    def _frame_at_gpu(self, g, base: np.ndarray, t: float, clock: float) -> np.ndarray:
+        from core.video.gpu_compose import Frame
+        prof = self.profile is not None
+        g.begin()
+        out = Frame(g, cpu=base)
+        for k, (src, blend, opacity, matte) in enumerate(self._layers[1:], 1):
+            below = out
+            op = 1.0 if opacity is None else float(opacity(t))
+            if hasattr(src, "process"):
+                if op <= 0.0:
+                    if hasattr(src, "observe"):         # a post-op with memory keeps watching while gated
+                        src.observe(out.cpu(), t)
+                    if prof:
+                        clock = self._spent(k, "work", clock)
+                    continue
+                given = out.cpu()
+                done = src.process(given, t)
+                if prof:
+                    clock = self._spent(k, "work", clock)
+                if done is not given:                   # a post-op at rest hands the frame back
+                    out = Frame(g, cpu=done) if op >= 1.0 else \
+                        Frame(g, tex=g.blend(below.tex(), g.upload(done), "normal", op))
+            else:
+                if op <= 0.0:
+                    continue
+                top = src.frame_at_over(out.cpu(), t) if hasattr(src, "frame_at_over") else src.frame_at(t)
+                if prof:
+                    clock = self._spent(k, "work", clock)
+                if top is not None:
+                    out = Frame(g, tex=g.blend(below.tex(), g.upload(top), blend, op))
+            if prof:
+                clock = self._spent(k, "blend", clock)
+            if matte is not None and out is not below:
+                m = g.matte(matte.selection(t), matte.grow, matte.feather, matte.where == "outside")
+                out = Frame(g, tex=g.apply(below.tex(), out.tex(), m))
+                if prof:
+                    clock = self._spent(k, "mask", clock)
+        moved = g.moving
+        result = out.cpu()
+        if prof:
+            self._spent(-1, "work", clock)              # waiting for the GPU and the last download
+            self.profile["moving"] = self.profile.get("moving", 0.0) + (g.moving - moved)
+        return result
+
     def profile_report(self, frames: int) -> str:
         """Mean milliseconds per frame, per layer, from ``profile``."""
         lines = [f"  {'layer':32s} {'work':>8s} {'blend':>8s} {'mask':>8s} {'total':>8s}   (ms/frame)"]
         grand = 0.0
         for k, name in enumerate(self.names):
-            row = (self.profile or {}).get(k, {"work": 0.0, "blend": 0.0, "mask": 0.0})
+            row = (self.profile or {}).get(k) or {"work": 0.0, "blend": 0.0, "mask": 0.0}
             ms = [1000.0 * row[p] / max(1, frames) for p in ("work", "blend", "mask")]
             grand += sum(ms)
             lines.append(f"  {k}:{name:30s} {ms[0]:8.1f} {ms[1]:8.1f} {ms[2]:8.1f} {sum(ms):8.1f}")
+        if self.profile and -1 in self.profile:
+            ms = 1000.0 * self.profile[-1]["work"] / max(1, frames)
+            grand += ms
+            lines.append(f"  {'GPU finish + download':32s} {ms:8.1f}")
+        if self._g is not None:
+            lines.append(f"  (frames moved CPU<->GPU: {self._g.uploads / max(1, frames):.1f} up, "
+                         f"{self._g.downloads / max(1, frames):.1f} down per frame, "
+                         f"{1000.0 * self._g.moving / max(1, frames):.1f} ms)")
         lines.append(f"  {'layers, all':32s} {'':8s} {'':8s} {'':8s} {grand:8.1f}")
         return "\n".join(lines)
 
@@ -2300,6 +2380,7 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
     Layer triggers accept MIDI ``notes`` or ``audio`` onset sources.
     """
     comp = Compositor()
+    comp.size = (width, height)
     # no layers: section -> legacy single clips base; a layers: list is
     # used as-is (first layer = canvas), so pure-generative scenes work
     layers_cfg = video_cfg.get("layers") or [{"source": "clips"}]

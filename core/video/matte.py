@@ -58,6 +58,15 @@ class LayerMatte:
         self.W, self.H = width, height
         self._last = (None, None)
 
+    def selection(self, t: float) -> Optional[np.ndarray]:
+        """The objects picked at song time ``t``: uint8 0/1 at the track's own size (None
+        outside the track). The GPU compositor stretches, grows and feathers it itself."""
+        i = self.track.frame_at(t)
+        if i is None:
+            return None
+        lab = self.track.labels(i)
+        return (lab > 0 if self.objects is None else np.isin(lab, self.objects)).astype(np.uint8)
+
     def __call__(self, t: float) -> np.ndarray:
         i = self.track.frame_at(t)
         if self._last[0] == i and i is not None:
@@ -65,8 +74,7 @@ class LayerMatte:
         if i is None:
             m = np.zeros((self.H, self.W), np.float32)
         else:
-            lab = self.track.labels(i)
-            m = (lab > 0 if self.objects is None else np.isin(lab, self.objects)).astype(np.float32)
+            m = self.selection(t).astype(np.float32)
             if m.shape != (self.H, self.W):
                 m = cv2.resize(m, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
             if self.grow:
