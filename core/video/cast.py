@@ -14,6 +14,7 @@ not by id: in every shot the roles are filled again from what that shot holds.
         - {who: largest,    plays: {track: synth-voice}, act: presence, hold: 2.0}
         - {who: second,     plays: {track: acid},     act: rings, speed: 300}
         - {who: largest,    plays: {track: lead},     act: echo, trail: 3}
+        - {who: largest,    plays: {track: snare},    act: carry}
 
 who     largest | second | third | fourth (by their mean size in the shot) |
         leftmost | rightmost | topmost | bottommost (by where they sit) |
@@ -33,6 +34,10 @@ act     punch     the object jumps out of the paper on each hit, bigger, with a 
                   seconds, each fading over ``trail`` times the note's length: a long note
                   leaves a long trail, staccato a short one (amount: the ghosts' opacity;
                   color: tint them, onion-skin style)
+        carry     at a cut it stays: the object as last seen in the shot that ended, stuck
+                  over the new one like a sticker (with a shadow), until its instrument's
+                  next hit, then it dissolves (hold: seconds at most, fade: seconds to go,
+                  shadow: 0..1)
 envelope  seconds a hit takes to die away (default by act)
 color     [r, g, b] | chord (the chord's hue, needs harmony:) | pitch (the note's hue)
 
@@ -50,15 +55,16 @@ import numpy as np
 
 from core.segment.mask_track import MaskTrack
 
-ACTS = ("punch", "shake", "tint", "glow", "presence", "rings", "echo")
+ACTS = ("punch", "shake", "tint", "glow", "presence", "rings", "echo", "carry")
 RANKS = {"largest": 0, "second": 1, "third": 2, "fourth": 3}
 PLACES = {"leftmost": (1, 1), "rightmost": (1, -1), "topmost": (2, 1), "bottommost": (2, -1)}
 ENVELOPE = {"punch": 0.25, "shake": 0.15, "tint": 0.4, "glow": 0.3, "presence": 0.0,
-            "rings": 0.0, "echo": 0.0}
+            "rings": 0.0, "echo": 0.0, "carry": 0.0}
 FLAT = (28, 24, 34)                      # a silhouette's colour, for presence
 MAX_RINGS = 32                           # rings out at once, per role
 MAX_GHOSTS = 16                          # ghosts kept, per role
 LUMA = (0.299, 0.587, 0.114)
+IDENTITY = np.float32([[1, 0, 0], [0, 1, 0]])
 
 # --- the acts on the GPU: the numpy ones in _play, pixel for pixel (within a level)
 
@@ -109,18 +115,19 @@ void main(){
 }
 """
 
-# CastLayer._paste: the shadow darkens, then the carried object is laid over it
+# CastLayer._paste: the shadow darkens, then the object (from u_obj: the same picture, or
+# one kept from before) is carried by the map and laid over it
 _PASTE_FS = """
 #version 330
 out vec4 f_color;
-uniform sampler2D u_src, u_alpha, u_sh;
+uniform sampler2D u_src, u_obj, u_alpha, u_sh;
 uniform float u_shadow;
 """ + _WARP + """
 void main(){
     ivec2 p = ivec2(gl_FragCoord.xy);
     vec3 v = floor(texelFetch(u_src, p, 0).rgb * 255.0 + 0.5);
     if (u_shadow > 0.0) v *= 1.0 - u_shadow * texelFetch(u_sh, p, 0).r;
-    vec3 w = floor(warp(u_src, p, 255.0).rgb + 0.5);
+    vec3 w = floor(warp(u_obj, p, 255.0).rgb + 0.5);
     float a = texelFetch(u_alpha, p, 0).r;
     v = v * (1.0 - a) + w * a;
     f_color = vec4(floor(clamp(v + 0.5, 0.0, 255.0)) / 255.0, 1.0);
@@ -255,20 +262,21 @@ class _Role:
             raise ValueError(f"cast role {index}: act {self.act!r} (use one of {ACTS})")
         if "plays" not in spec:
             raise ValueError(f"cast role {index}: plays: names its instrument ({{track: kick}})")
-        if self.act in ("punch", "shake", "rings", "echo") and self.who == "background":
+        if self.act in ("punch", "shake", "rings", "echo", "carry") and self.who == "background":
             raise ValueError(f"cast role {index}: the background cannot {self.act}")
         events = _layer_events(spec["plays"], notes, onset_loader, grid)
         self.events = events
         self.times = np.array([e.time for e in events], float)
         self.env = EnvelopeOpacity(self.times, float(spec.get("envelope", ENVELOPE[self.act]) or 1e-3))
         default = {"punch": 0.12, "shake": 10.0, "tint": 0.7, "glow": 1.0, "presence": 1.0,
-                   "rings": 1.0, "echo": 0.6}[self.act]
+                   "rings": 1.0, "echo": 0.6, "carry": 1.0}[self.act]
         self.amount = float(spec.get("amount", default))
         if self.act == "shake":
             self.amount *= scale
         self.width = float(spec.get("width", 3 if self.act == "rings" else 8)) * scale
-        self.hold = float(spec.get("hold", 2.0))
-        self.fade = max(1e-3, float(spec.get("fade", 0.3)))
+        self.hold = float(spec.get("hold", 4.0 if self.act == "carry" else 2.0))
+        self.fade = max(1e-3, float(spec.get("fade", 0.4 if self.act == "carry" else 0.3)))
+        self.shadow = float(spec.get("shadow", 0.35))
         self.speed = float(spec.get("speed", 300)) * scale
         self.life = max(1e-3, float(spec.get("life", 1.0)))
         self.every = float(spec.get("every", 0.08))
@@ -278,6 +286,9 @@ class _Role:
         self.ghosts: List[dict] = []         # echo: what it has left behind
         self._spare: List[tuple] = []        # echo: GPU textures of ghosts gone, for new ones
         self._caught, self._caught_at, self._shot, self._last_t = None, 0.0, None, None
+        self.snap: Optional[dict] = None     # carry: the object as last seen in this shot
+        self.carried: Optional[dict] = None  # carry: the one brought over the cut
+        self._cut_t = 0.0
         self._chords, self._chord_times, self._hue_of_root = [], np.array([]), VeilsLayer.hue_of_root
         if self.color == "chord":
             h = spec.get("harmony")
@@ -345,6 +356,44 @@ class _Role:
             old = self.ghosts.pop(0)
             if old["side"] == "gpu":
                 self._spare.append(old["data"])
+
+    def _drop(self, kept: Optional[dict]) -> None:
+        if kept is not None and kept["side"] == "gpu":
+            self._spare.append(kept["data"])
+
+    def carrying(self, t: float, shot: int) -> float:
+        """Carry: at a cut, what was last seen of the object becomes the carried one; how
+        much of it shows at ``t`` (1 until the next hit after the cut, or ``hold`` s, then
+        fading out over ``fade``)."""
+        if self._last_t is not None and t < self._last_t:          # a jump back: start over
+            self._drop(self.snap)
+            self._drop(self.carried)
+            self.snap = self.carried = self._shot = None
+        if self._shot is not None and shot != self._shot:
+            self._drop(self.carried)
+            self.carried = self.snap if self.snap is not None and self.snap["shot"] == self._shot else None
+            if self.carried is None:
+                self._drop(self.snap)
+            self.snap, self._cut_t = None, t
+        self._shot, self._last_t = shot, t
+        if self.carried is None:
+            return 0.0
+        k = int(np.searchsorted(self.times, self._cut_t + 0.05))    # a hit on the cut itself doesn't count
+        end = min(self.times[k] if k < len(self.times) else np.inf, self._cut_t + self.hold)
+        a = 1.0 if t < end else 1.0 - (t - end) / self.fade
+        if a <= 0.0:
+            self._drop(self.carried)
+            self.carried = None
+            return 0.0
+        return a
+
+    def spare_for(self, g) -> tuple:
+        """Carry/echo: a picture and a mask texture on ``g`` for something to keep."""
+        for d in self._spare:
+            if d[2] is g:
+                self._spare.remove(d)
+                return d
+        return g.keep(3, "f1"), g.keep(1, "f4"), g
 
     @staticmethod
     def fading(ghost: dict, t: float) -> float:
@@ -617,20 +666,42 @@ class CastLayer:
             halo = g.blur(g.dilate(m, a["w"]), a["w"] / 2.0)
             tex = g.run("cast_glow", g.texture(), {"u_src": src, "u_m": m, "u_halo": halo}, fs=_GLOW_FS,
                         u_c=tuple(float(c) for c in a["c"]), u_k=float(a["k"]))
-        else:  # paste
-            inv = cv2.invertAffineTransform(np.float64(a["M"]))
-            rows = {"u_r0": tuple(float(v) for v in inv[0]), "u_r1": tuple(float(v) for v in inv[1])}
-            carried = g.run("cast_warp_mask", g.texture(1, "f4"), {"u_m": m}, fs=_WARP_MASK_FS,
-                            u_shift=(0, 0), **rows)
-            alpha = g.blur(carried, 0.8)
-            sh = alpha
-            if a["shadow"] > 0:
-                off = max(2, self.H // 90)
-                shifted = g.run("cast_warp_mask", g.texture(1, "f4"), {"u_m": m}, u_shift=(off, off), **rows)
-                sh = g.blur(shifted, off)
-            tex = g.run("cast_paste", g.texture(), {"u_src": src, "u_alpha": alpha, "u_sh": sh}, fs=_PASTE_FS,
-                        u_shadow=float(a["shadow"]), **rows)
+        else:
+            tex = self._paste_gpu(g, src, src, m, a["M"], a["shadow"])
         return Frame(g, tex=tex)
+
+    def _paste_gpu(self, g, below, obj, m, M: np.ndarray, shadow: float):
+        """``_paste`` on the GPU: the object of picture ``obj`` (mask ``m``) laid on ``below``."""
+        inv = cv2.invertAffineTransform(np.float64(M))
+        rows = {"u_r0": tuple(float(v) for v in inv[0]), "u_r1": tuple(float(v) for v in inv[1])}
+        carried = g.run("cast_warp_mask", g.texture(1, "f4"), {"u_m": m}, fs=_WARP_MASK_FS,
+                        u_shift=(0, 0), **rows)
+        alpha = g.blur(carried, 0.8)
+        sh = alpha
+        if shadow > 0:
+            off = max(2, self.H // 90)
+            shifted = g.run("cast_warp_mask", g.texture(1, "f4"), {"u_m": m}, u_shift=(off, off), **rows)
+            sh = g.blur(shifted, off)
+        return g.run("cast_paste", g.texture(), {"u_src": below, "u_obj": obj, "u_alpha": alpha, "u_sh": sh},
+                     fs=_PASTE_FS, u_shadow=float(shadow), **rows)
+
+    def _carry_gpu(self, g, role: _Role, out, m, t: float, shot: int):
+        """``_carry`` on the GPU (``m`` None: the object is not in this frame)."""
+        from core.video.gpu_compose import Frame
+        a = role.carrying(t, shot)
+        res = out
+        if a > 0.0 and role.carried["side"] == "gpu" and role.carried["data"][2] is g:
+            img, cm, _ = role.carried["data"]
+            pasted = self._paste_gpu(g, out.tex(), img, cm, IDENTITY, role.shadow)
+            res = Frame(g, tex=g.blend(out.tex(), pasted, "normal", a))
+        if m is not None:
+            snap = role.snap
+            data = snap["data"] if snap is not None and snap["side"] == "gpu" and snap["data"][2] is g \
+                else role.spare_for(g)
+            g.copy(out.tex(), data[0])
+            g.copy(m, data[1])
+            role.snap = {"shot": shot, "side": "gpu", "data": data}
+        return res
 
     def process_gpu(self, frame, t: float, g):
         """``process`` with the picture on the GPU: only the objects' masks, at the track's
@@ -642,13 +713,25 @@ class CastLayer:
         lk = self._lookup(labels.shape)
         shot = self._shot_of(i)
         tables = None
+
+        def mask(sel):
+            nonlocal tables
+            if tables is None:
+                tables = {"u_xo": g.small(lk["xo"][None, :].astype(np.float32), "cast_xo"),
+                          "u_yo": g.small(lk["yo"][None, :].astype(np.float32), "cast_yo")}
+            return g.run("cast_near", g.texture(1, "f4"),
+                         {"u_sel": g.small(sel.astype(np.uint8) * 255, "cast_sel"), **tables}, fs=_NEAR_FS)
+
         out = frame
         for role in self.roles:
             ids = self._cast(role.who, i)
-            if ids is not None and not ids:
+            sel = None if ids is not None and not ids else                 (labels == 0) if ids is None else np.isin(labels, ids)
+            if sel is not None and not sel[np.ix_(lk["rows"], lk["cols"])].any():
+                sel = None                                        # nothing of it lands on the frame
+            if role.act == "carry":
+                out = self._carry_gpu(g, role, out, None if sel is None else mask(sel), t, shot)
                 continue
-            sel = (labels == 0) if ids is None else np.isin(labels, ids)
-            if not sel[np.ix_(lk["rows"], lk["cols"])].any():   # nothing of it lands on the frame
+            if sel is None:
                 continue
 
             def centre():
@@ -659,13 +742,24 @@ class CastLayer:
             step = self._step(role, t, centre, shot)
             if step is None:
                 continue
-            if tables is None:
-                tables = {"u_xo": g.small(lk["xo"][None, :].astype(np.float32), "cast_xo"),
-                          "u_yo": g.small(lk["yo"][None, :].astype(np.float32), "cast_yo")}
-            m = g.run("cast_near", g.texture(1, "f4"),
-                      {"u_sel": g.small(sel.astype(np.uint8) * 255, "cast_sel"), **tables}, fs=_NEAR_FS)
-            out = self._play_gpu(g, step[0], step[1], out, m, sel, t)
+            out = self._play_gpu(g, step[0], step[1], out, mask(sel), sel, t)
         return out
+
+    def _carry(self, role: _Role, out: np.ndarray, sel: Optional[np.ndarray], t: float,
+               shot: int) -> np.ndarray:
+        """Carry: the object brought over the cut laid on the picture, and the object as it
+        is now kept for the next cut (``sel`` None: not in this frame)."""
+        from core.video.layers import blend_frames
+        a = role.carrying(t, shot)
+        res = out
+        if a > 0.0:
+            img, cm = role.carried["data"]
+            res = blend_frames(out, self._paste(out, img, cm, IDENTITY, role.shadow), "normal", a)
+        if sel is not None:
+            m = self._mask(sel)
+            if m.any():
+                role.snap = {"shot": shot, "side": "cpu", "data": (out.copy(), m)}
+        return res
 
     def process(self, frame: np.ndarray, t: float) -> np.ndarray:
         i = self.track.frame_at(t)
@@ -676,8 +770,10 @@ class CastLayer:
         out = frame
         for role in self.roles:
             ids = self._cast(role.who, i)
-            if ids is not None and not ids:
-                continue                     # nobody for that role in this shot
-            sel = (labels == 0) if ids is None else np.isin(labels, ids)
-            out = self._play(role, out, sel, t, shot)
+            sel = None if ids is not None and not ids else \
+                (labels == 0) if ids is None else np.isin(labels, ids)
+            if role.act == "carry":
+                out = self._carry(role, out, sel, t, shot)
+            elif sel is not None:            # else nobody plays that role in this shot
+                out = self._play(role, out, sel, t, shot)
         return out

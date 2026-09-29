@@ -30,8 +30,8 @@ os.chdir(ROOT)
 
 OUT = Path("render_output/golden")
 SIZE, FPS = "854x480", 24
-FRAMES = 48                    # rendered in order (effects with memory need the run-up) ...
-KEEP = (0, 12, 24, 36, 47)     # ... and these are kept
+KEEP = (0, 12, 24, 36, 47)     # the frames kept; all before them are rendered, in order
+                               # (effects with memory need the run-up)
 
 ESFOLADO = ["--file", "input/esfolado/esfolado_mix_20_09_2026.mp3", "--midi", "input/esfolado/esfolado.mid",
             "--midi-offset", "0.018", "--start-time", "13.351"]
@@ -59,6 +59,7 @@ CASES = {
     "shadertoy_lente":       ("shadertoy_exemplo_curadoria.yaml", ESFOLADO + CURADORIA),
     "esfolado_cast":         ("esfolado_cast.yaml", ESFOLADO + CURADORIA + MASKS),
     "esfolado_melodia":      ("esfolado_melodia.yaml", ESFOLADO + CURADORIA + MASKS),
+    "esfolado_colagem":      ("esfolado_colagem.yaml", ESFOLADO + CURADORIA + MASKS),
     "kiss_veus":             ("kiss_veus.yaml", KISS),
     "kiss_areia":            ("kiss_areia.yaml", KISS),
     "kiss_chama":            ("kiss_chama.yaml", KISS),
@@ -72,6 +73,9 @@ CASES = {
 }
 # scenes that draw lots on every render (no seed): the case renders a copy with one fixed
 SEEDED = {"enxame_cubos": 11}
+# cases whose effect shows later than the usual frames: their own (the collage acts at the
+# cut, 64 frames in, and lets go on the next snare)
+OWN_KEEP = {"esfolado_colagem": (0, 64, 70, 76, 82)}
 
 
 def _missing(args) -> list:
@@ -99,9 +103,10 @@ def _render(name: str, numpy_only: bool = False):
     if numpy_only:
         r.stack.use_gpu = False              # the compositor's numpy path: the reference
     kept = {}
-    for i in range(min(FRAMES, max(KEEP) + 1)):
+    keep = OWN_KEEP.get(name, KEEP)
+    for i in range(max(keep) + 1):
         frame = r.stack.frame_at(r.start_sec + i / r.fps)
-        if i in KEEP:
+        if i in keep:
             kept[i] = np.array(frame, copy=True)
     return kept, time.time() - t0
 
@@ -171,7 +176,7 @@ def main():
     if args.action == "make":
         rev = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
         (OUT / "cases.json").write_text(json.dumps(
-            {"commit": rev, "size": SIZE, "fps": FPS, "keep": KEEP,
+            {"commit": rev, "size": SIZE, "fps": FPS, "keep": KEEP, "own_keep": OWN_KEEP,
              "cases": {n: {"scene": CASES[n][0], "args": CASES[n][1]} for n in CASES}}, indent=1),
             encoding="utf-8")
     print(f"\n{len(names) - len(failed) - len(skipped)} ok, {len(failed)} failed {failed or ''}, "

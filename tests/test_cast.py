@@ -217,3 +217,40 @@ def test_the_background_has_no_outline_to_ring(track):
     for act in ("rings", "echo"):
         with pytest.raises(ValueError, match="background"):
             _cast(folder, [{"who": "background", "plays": {"track": "acid"}, "act": act}])
+
+
+def test_carry_brings_the_lead_over_the_cut_until_the_snare(track):
+    folder, _ = track
+    cast = _cast(folder, [{"who": "largest", "plays": {"track": "snare"}, "act": "carry", "fade": 0.1}],
+                 _notes(("snare", START + 1.4)))
+    for i in range(12):                                          # the cut is at frame 10
+        out = cast.process(_frame(i), START + i / FPS)
+        if i == 9:
+            assert np.array_equal(out, _frame(9))                # nothing carried before a cut
+    # the red square as last seen (frame 9: x 46..85, y 40..79) over the dark shot
+    assert (out[60, 70] == RED).all() and (out[60, 100] == GREEN).all()
+    for i in range(12, 17):
+        out = cast.process(_frame(i), START + i / FPS)
+    assert np.array_equal(out, _frame(16))                       # the snare at 1.4 s, 0.1 s fade: gone
+
+
+@pytest.mark.parametrize("size", [(W, H), (2 * W + 3, 2 * H - 1)])
+def test_the_gpu_carries_what_numpy_carries(track, size):
+    import cv2
+    from core.video.gpu_compose import Frame
+    folder, _ = track
+    rw, rh = size
+    g = _gpu(rw, rh)
+    spec = {"track": folder, "roles": [
+        {"who": "largest", "plays": {"track": "snare"}, "act": "carry", "fade": 0.3},
+        {"who": "largest", "plays": {"track": "kick"}, "act": "punch"}]}
+    notes = _notes(("snare", START + 1.3), ("kick", START + 1.1))
+    cpu, gpu = (CastLayer(spec, notes, rw, rh, FPS) for _ in range(2))
+    for i in range(20):
+        frame = cv2.resize(_frame(i), (rw, rh))
+        t = START + i / FPS
+        want = cpu.process(frame, t)
+        g.begin()
+        got = gpu.process_gpu(Frame(g, cpu=frame), t, g).cpu()
+        d = np.abs(got.astype(int) - want.astype(int))
+        assert d.max() <= 2 and (d > 0).mean() < 0.01, (i, d.max(), (d > 0).mean())
