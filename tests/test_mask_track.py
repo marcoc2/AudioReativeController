@@ -123,3 +123,17 @@ def test_song_time(track):
     assert mt.frame_at(13.0) == 0 and mt.frame_at(13.5) == 5 and mt.frame_at(12.9) is None
     assert mt.frame_at(13.0 + 2.0) is None
     assert np.array_equal(mt.labels_at(13.5), mt.labels(5))
+
+
+def test_cuts_known_from_the_render_replace_guessing(tmp_path):
+    """A strobing clip: the picture changes a lot every few frames, but the render says
+    where it changed clip — only there do shots start."""
+    def strobe(i):
+        f = _frame(i if i < 10 else 10)
+        return 255 - f if i % 3 == 1 else f                   # a flash on every third frame
+    guessed = write_mask_track("fake.mp4", lambda: (strobe(i) for i in range(20)), _ColourSegmenter(),
+                               str(tmp_path / "a"), FPS, reseed=0, log=lambda m: None)
+    told = write_mask_track("fake.mp4", lambda: (strobe(i) for i in range(20)), _ColourSegmenter(),
+                            str(tmp_path / "b"), FPS, reseed=0, log=lambda m: None, cuts=[10])
+    assert len(guessed["shots"]) > 5
+    assert [(s["first"], s["last"]) for s in told["shots"]] == [(0, 9), (10, 19)]

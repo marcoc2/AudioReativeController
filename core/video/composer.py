@@ -4,6 +4,10 @@ Configured by the ``video:`` section of the scene YAML:
 
     video:
       clip_per_bar: true          # pick a new clip at every bar start
+      bars_per_clip: 1            # ... or every N bars (counted from the song's bar 1),
+                                  #     e.g. 2 to cut on two-bar phrases
+      clip_end: bounce            # a clip shorter than its turn: bounce (play it back
+                                  #     and forth) | loop (start it over)
       clip_order: sequential      # sequential | random | shuffle
       seed: 42
 
@@ -179,7 +183,12 @@ class ClipComposer:
         self.library = library
         self.grid = grid
         self.transport = ClipTransport(len(library))
+        clip_end = cfg.get("clip_end", "bounce")
+        if clip_end not in ("bounce", "loop"):
+            raise ValueError(f"video: clip_end {clip_end!r} (use bounce or loop)")
+        self.transport.loop = clip_end == "loop"
         self.clip_per_bar: bool = bool(cfg.get("clip_per_bar", True))
+        self.bars_per_clip: int = max(1, int(cfg.get("bars_per_clip", 1)))
         self.clip_order: str = cfg.get("clip_order", "sequential")
         self._rng = random.Random(cfg.get("seed"))
         self.frame_ops: List[Callable] = []
@@ -379,7 +388,7 @@ class ClipComposer:
         """
         bar = self._bar_index(t)
         if bar != self._last_bar:
-            if self.clip_per_bar or self._first_selection:
+            if (self.clip_per_bar and bar % self.bars_per_clip == 0) or self._first_selection:
                 self._select_clip()
             self._last_bar = bar
 

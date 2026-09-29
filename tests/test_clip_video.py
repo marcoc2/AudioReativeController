@@ -126,6 +126,16 @@ def test_new_clip_each_bar():
     assert comp.transport.clip_idx == 2
 
 
+def test_new_clip_every_two_bars():
+    cfg = {"clip_per_bar": True, "bars_per_clip": 2, "triggers": {}}
+    comp = make_composer([], cfg, n_clips=3)
+    seen = []
+    for t in (0.0, 4.0, 8.0, 12.0, 16.0):   # bars 0..4
+        comp.frame_at(t)
+        seen.append(comp.transport.clip_idx)
+    assert seen == [0, 0, 1, 1, 2]
+
+
 def test_snare_switches_clip():
     cfg = {"clip_per_bar": False,
            "triggers": {"snare": {"notes": [38, 40], "actions": ["next_clip"]}}}
@@ -627,3 +637,41 @@ def test_shuffle_reshuffles_instead_of_repeating_order():
             differing = True
             break
     assert differing
+
+
+def test_loop_starts_a_short_clip_over():
+    tp = ClipTransport(n_clips=1)
+    tp.loop = True
+    seen = []
+    for _ in range(9):
+        seen.append(tp.frame_index)
+        tp.advance(clip_len=4)
+    assert seen == [0, 1, 2, 3, 0, 1, 2, 3, 0]
+    tp.reverse()                                # backwards, it wraps to the end
+    tp.pos = 0.0
+    tp.advance(clip_len=4)
+    assert tp.frame_index == 3
+
+
+def test_clip_end_loop_in_the_scene():
+    comp = make_composer([], {"clip_per_bar": False, "clip_end": "loop", "triggers": {}}, clip_len=4)
+    vals = [frame_val(comp, i * 0.25) for i in range(9)]
+    assert vals == [0, 1, 2, 3, 0, 1, 2, 3, 0]
+    with pytest.raises(ValueError, match="clip_end"):
+        make_composer([], {"clip_end": "pingpong"})
+
+
+def test_wide_clips_turn_for_a_portrait_frame(tmp_path):
+    import subprocess
+    from core.video.clip_library import ClipLibrary
+    folder = tmp_path / "clips"
+    folder.mkdir()
+    # 64x32, left half red, right half blue
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=red:s=32x32:d=0.5:r=10",
+                    "-f", "lavfi", "-i", "color=blue:s=32x32:d=0.5:r=10", "-filter_complex", "hstack",
+                    "-pix_fmt", "yuv444p", "-c:v", "libx264", "-qp", "0", str(folder / "wide.mp4")], check=True)
+    turned = ClipLibrary(folder, 20, 40, 10, fit="cover", turn_wide=True).get(0).frame(0).astype(int)
+    assert turned[5, 10, 0] > 200 and turned[5, 10, 2] < 60          # clockwise: the left edge is on top
+    assert turned[35, 10, 2] > 200 and turned[35, 10, 0] < 60
+    kept = ClipLibrary(folder, 20, 40, 10, fit="cover").get(0).frame(0).astype(int)
+    assert kept[20, 2, 0] > 200 and kept[20, 17, 2] > 200              # not turned: red left, blue right

@@ -108,10 +108,13 @@ def write_mask_track(video: str, frames: Callable[[], Iterable[np.ndarray]], seg
                      min_share: float = 0.005, max_share: float = 0.6, granularity: str = "whole",
                      reseed: float = 2.0, cut: float = 40.0, points_per_side: int = 32,
                      min_iou: float = 0.6, min_stability: float = 0.7, preview=None,
-                     model: str = "", log: Callable[[str], None] = print) -> dict:
+                     model: str = "", log: Callable[[str], None] = print,
+                     cuts: Optional[List[int]] = None) -> dict:
     """Find and follow the objects of a video; write the folder described above.
 
     ``frames()`` gives a fresh pass over the frames (called twice: cuts, then masks);
+    ``cuts``, the frames where shots start when they are known (the render wrote them),
+    replaces finding them from the picture;
     ``segmenter`` is a RegionTracker (or anything with its set_frame/add/step/forget/
     auto_masks); ``preview``, when given, gets ``.stdin.write`` of each tinted frame."""
     out = Path(out_dir)
@@ -119,7 +122,11 @@ def write_mask_track(video: str, frames: Callable[[], Iterable[np.ndarray]], seg
     for old in (out / "labels").glob("*.png"):
         old.unlink()
 
-    starts, n = find_cuts(frames(), cut)
+    if cuts is None:
+        starts, n = find_cuts(frames(), cut)
+    else:
+        n = sum(1 for _ in frames())
+        starts = sorted({0} | {int(c) for c in cuts if 0 < int(c) < n})
     ends = starts[1:] + [n]
     shot_of = np.zeros(n, int)
     for s, (a, b) in enumerate(zip(starts, ends)):

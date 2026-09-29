@@ -13,6 +13,7 @@ Usage examples
 """
 
 import argparse
+import json
 import subprocess
 import time
 from dataclasses import dataclass
@@ -68,6 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--midi-offset", type=float, default=0.0)
     ap.add_argument("--clip-fit", choices=["contain", "cover"], default="contain",
                     help="contain: letterbox clips of another aspect; cover: fill the frame and crop")
+    ap.add_argument("--clip-turn-wide", action="store_true",
+                    help="Turn landscape clips 90 degrees clockwise (for a portrait render)")
     ap.add_argument("--stems", action="store_true",
                     help="Separate stems (demucs, GPU; cached in stems_output/) so layers can read features['stems']")
     ap.add_argument("--meter", default=None, metavar="BAR:N/D,...",
@@ -144,7 +147,8 @@ def prepare(args) -> Render:
         if not args.clips:
             raise SystemExit("--clips is required (this scene uses clip layers)")
         print(f"Loading clips from {args.clips}")
-        library = ClipLibrary(args.clips, W, H, fps, cache_size=args.cache_size, fit=args.clip_fit)
+        library = ClipLibrary(args.clips, W, H, fps, cache_size=args.cache_size, fit=args.clip_fit,
+                              turn_wide=args.clip_turn_wide)
         composer = ClipComposer(library, grid, midi_notes, video_cfg)
 
     # generator and post-op layers need per-frame audio features
@@ -202,6 +206,7 @@ def main() -> None:
     if args.profile:
         stack.profile = {}
     t_render = t_write = 0.0
+    cuts, shown = [], None            # frames where the clip changes: written beside the video
 
     # Encode by piping raw frames straight into ffmpeg (no temp files).
     enc = subprocess.Popen(
@@ -226,6 +231,10 @@ def main() -> None:
             t = start_sec + fi / fps
             t0 = time.perf_counter()
             frame = stack.frame_at(t)
+            if composer is not None:
+                if shown is not None and composer.transport.clip_idx != shown:
+                    cuts.append(fi)
+                shown = composer.transport.clip_idx
             t1 = time.perf_counter()
             enc.stdin.write(frame.tobytes())
             t_render += t1 - t0
@@ -251,6 +260,21 @@ def main() -> None:
         print(f"  whole frame: {1000 * t_render / n_frames:8.1f} ms   "
               f"to the encoder: {1000 * t_write / n_frames:6.1f} ms")
     print(f"\nDone! -> {output_path}")
+    if composer is not None:
+        write_cuts(output_path, cuts, fps, start_sec, n_frames)
+
+
+def cuts_path(video: str) -> Path:
+    """Where a render keeps its cuts: ``<video stem>_cuts.json`` beside it."""
+    p = Path(video)
+    return p.with_name(p.stem + "_cuts.json")
+
+
+def write_cuts(video: str, cuts, fps: float, start_sec: float, n_frames: int) -> None:
+    """The frames where the render changed clip, so segment_video.py knows the shots
+    without guessing them from the picture (a strobing clip looks like a cut every flash)."""
+    cuts_path(video).write_text(json.dumps({"fps": fps, "start_time": start_sec, "frames": n_frames,
+                                            "cuts": [int(c) for c in cuts]}), encoding="utf-8")
 
 
 if __name__ == "__main__":

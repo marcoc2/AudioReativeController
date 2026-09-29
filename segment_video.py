@@ -12,6 +12,7 @@ for the masks by song time. ``--sam2-weights`` may also come from ARC_SAM2_WEIGH
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -33,6 +34,9 @@ def main():
                     help="whole: characters and things; parts: their pieces (eyes, hands...)")
     ap.add_argument("--reseed", type=float, default=2.0, help="Look for new objects every N s (0: only at cuts)")
     ap.add_argument("--cut", type=float, default=40.0, help="Picture change that starts a new shot (0..255)")
+    ap.add_argument("--cuts", default="auto",
+                    help="auto: the cuts the render wrote beside the video (<stem>_cuts.json), if any, "
+                         "else found from the picture | detect: always from the picture | a _cuts.json path")
     ap.add_argument("--points", type=int, default=32, help="SAM2 automatic grid: points per side")
     ap.add_argument("--min-iou", type=float, default=0.6,
                     help="SAM2's own score a found object needs (lower: more, rougher objects)")
@@ -47,6 +51,15 @@ def main():
     W, H, fps = probe_video(args.video)
     out = Path(args.output) if args.output else default_folder(args.video)
     print(f"SAM2 {args.sam2_model} on {args.video} ({W}x{H} @ {fps:g}) -> {out}", flush=True)
+    cuts = None
+    if args.cuts != "detect":
+        path = Path(args.video).with_name(Path(args.video).stem + "_cuts.json") if args.cuts == "auto" \
+            else Path(args.cuts)
+        if path.is_file():
+            cuts = json.loads(path.read_text(encoding="utf-8"))["cuts"]
+            print(f"cuts from {path}: {len(cuts)}", flush=True)
+        elif args.cuts != "auto":
+            ap.error(f"no cuts file {path}")
     tracker = RegionTracker(args.sam2_weights, args.sam2_model)
     preview = None
     if args.preview:
@@ -58,7 +71,7 @@ def main():
                          granularity=args.granularity, reseed=args.reseed, cut=args.cut,
                          points_per_side=args.points, min_iou=args.min_iou,
                          min_stability=args.min_stability, preview=preview, model=args.sam2_model,
-                         log=lambda m: print(m, flush=True))
+                         log=lambda m: print(m, flush=True), cuts=cuts)
     finally:
         if preview is not None:
             preview.stdin.close()
