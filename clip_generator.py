@@ -165,7 +165,8 @@ def prepare(args) -> Render:
     if len(stack) > 1:
         print(f"layers: {len(stack)} (compositing enabled)")
 
-    start_sec = float(grid.start_offset) if grid.start_offset else 0.0
+    # A negative --midi-offset (the master lost its first bars) puts the grid before the audio.
+    start_sec = max(0.0, float(grid.start_offset)) if grid.start_offset else 0.0
     if args.start_time > 0.0:
         start_sec = args.start_time
     if composer is not None:
