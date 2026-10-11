@@ -239,6 +239,77 @@ atravessa o desenho.
 
 ---
 
+## Família "as figuras do vídeo" (máscaras SAM2)
+
+O render base vira uma **trilha de máscaras**: o SAM2 separa cada plano em objetos
+(as figuras) e grava isso uma vez só, quadro a quadro. Os efeitos leem as máscaras pelo
+tempo da música. As figuras viram a banda: cada instrumento ganha um corpo na tela.
+
+Pipeline (o comando completo fica no cabeçalho de cada cena):
+
+```
+clip_generator.py (só "- source: clips")  →  render base + <stem>_cuts.json (os cortes)
+segment_video.py --video <base>           →  <base>_segments/ (máscaras; --preview pra ver)
+clip_generator.py --scene <cena> --masks <base>_segments
+```
+
+As máscaras são PNGs de 16 bits com o id de cada objeto. Num visualizador de imagem
+parecem pretas; para vê-las, use o `_segments_preview.mp4`. Os cortes vêm do
+`_cuts.json` que o render grava. Detectar cortes pela imagem confunde clipes que
+piscam com cortes.
+
+### 21. [x] Trilha de máscaras → `core/segment/mask_track.py`, `segment_video.py`
+SAM2 por plano: objetos acompanhados pelo plano inteiro. Cada objeto tem id, tamanho
+médio e posição.
+
+### 22. [x] `mask:` em qualquer camada → `core/video/matte.py`, `examples/esfolado_world_melts.yaml`
+`where: inside | outside`, `objects`, `grow`, `feather`. O mundo derrete (feedback,
+shader, slitscan `outside`) e as figuras ficam nítidas, ou o contrário.
+
+### 23. [x] `cast`: elenco por papel → `core/video/cast.py` (GPU + numpy)
+Os papéis são preenchidos de novo em cada plano. `who` aceita:
+- tamanho: `largest`, `second`, `third`, `fourth`;
+- posição: `leftmost`, `rightmost`, `topmost`, `bottommost`;
+- `all`, `background` ou uma lista de ids.
+
+O papel toca com `plays`, que é um trigger comum (`track`, `notes`, `audio`, `score`).
+
+| Ato | Gesto | Cena |
+|---|---|---|
+| `punch` | salta do papel na batida, maior, com sombra | `esfolado_cast` |
+| `shake` | tranco lateral, deixa o fantasma | `esfolado_cast` |
+| `tint` | ganha cor mantendo o sombreado (acorde ou cor fixa) | `esfolado_cast` |
+| `glow` | halo no contorno | `esfolado_cast` |
+| `presence` | silhueta chapada até o instrumento tocar | `esfolado_cast` |
+| `rings` | anéis saem do contorno como sonar (grave grosso, forte brilhante) | `esfolado_melodia` |
+| `echo` | fantasmas enquanto a nota soa, rastro proporcional à duração | `esfolado_melodia` |
+| `carry` | atravessa o corte como adesivo até a próxima batida | `esfolado_colagem` |
+| `wake` | rastro temporal: onde a figura passou fica e se apaga | `esfolado_rastro*` |
+
+Detalhes do `wake`:
+- **`hold`**: quanto tempo o rastro fica ligado. `note` = enquanto a nota soa; `bar` = até o fim do compasso; um número = segundos.
+- **`length`**: segundos até o rastro cair a ~5%.
+- **`every`**: amostragem, em segundos ou como valor de nota na grade (`1/16`). Vira um estroboscópio de cópias; sem ele, o rastro carimba todo quadro.
+- **`shift` + `direction`**: o rastro deriva em pixels/s, e a cada clipe a direção gira pelo ângulo áureo.
+- **`amount`**: opacidade. **`color`**: tinge o rastro.
+- Um corte apaga o rastro.
+
+Todas as cenas juntas: `esfolado_completo`, `carrossel_completo`, `carrossel_retrato`,
+`carrossel_abstrato` e `me_diz_capa`.
+
+### 24. [ ] Próximos atos e ideias
+- [ ] `stutter`: a figura engasga (repete alguns quadros) na batida. É o mais barato.
+- [ ] O acorde escolhe quem acende (cada figura com uma nota do acorde).
+- [ ] Wipe pela silhueta: a troca de clipe acontece através do contorno da figura.
+- [ ] Parallax 2.5D: figuras e fundo em planos que se deslocam na batida.
+- [ ] Partículas que saem do contorno.
+- [ ] Repintura mascarada no ComfyUI (só o fundo, ou só as figuras; ver `esfolado_repaint`).
+- [ ] Filtro de balões de fala, que hoje às vezes viram personagens.
+- [ ] Escolher figuras por classe (`who: person`): caixas do YOLO como prompts do SAM2. Fica para quando houver vídeo com pessoas.
+- [ ] `wake` atravessando o corte (como o `carry`), para rastros mais longos que o plano.
+
+---
+
 ## Ordem sugerida
 
 ```
@@ -255,6 +326,8 @@ atravessa o desenho.
 4 + 10 → 17 ferrofluid pintado  (resultado rápido: o motor já existe)
 18 ripples                      (independente; par natural da 11)
 20 shockwave                    (independente; cartoon invertido + a onda da areia)
+
+21 máscaras → 22 mask: → 23 cast (feitos) → 24 stutter primeiro
 ```
 
 A ordem cede à próxima música: se o clipe da vez for **Deserto de lama**,

@@ -4,7 +4,7 @@ Público-alvo: agentes LLM (e humanos) estendendo o sistema sem quebrar a
 arquitetura. Leia inteiro antes de escrever código. Em caso de conflito
 entre este documento e o código, o código vence — atualize este arquivo.
 
-## 1. O mapa: quatro pontos de extensão
+## 1. O mapa: cinco pontos de extensão
 
 Todo efeito novo entra por exatamente UM destes seams. Escolher o seam
 certo é a decisão mais importante.
@@ -13,8 +13,13 @@ certo é a decisão mais importante.
 |------|---------|-------------|----------------------|
 | **Layer source** | Gerador de imagem: produz um frame RGB por chamada | O efeito desenha conteúdo próprio (fractais, partículas, geometria) | `core/cells.py`, `core/fractal.py`, `core/mandelbulb.py`, `core/mandelbox.py` + wrappers em `core/video/layers.py` |
 | **Post-op** | Transforma o composto acumulado (pixels) | O efeito modifica a imagem existente (aberração, feedback/túnel, hue shift, blur) | `RgbSplit` em `core/video/layers.py` |
+| **Ato do elenco** (`cast`) | Um gesto que um instrumento faz com uma figura do vídeo (objeto da trilha de máscaras SAM2) | O efeito é sobre *uma figura*, escolhida por papel (`who`), não sobre o quadro todo | `ACTS`, `_Role` e `CastLayer._step/_play/_play_gpu` em `core/video/cast.py` |
 | **Transport action / GravityWarp** | Muda o playback dos clipes (tempo) | O efeito é temporal: direção, velocidade, salto de clipe | `ACTIONS` e `GravityWarp` em `core/video/composer.py` |
 | **Legado (congelado)** | `generators/*.py`, `core/particles*.py`, `core/visual.py` | **Nunca estenda.** São modos standalone antigos, despachados pela GUI. Efeitos deles migram virando layer source | — |
+
+Qualquer camada também aceita `mask:` (`core/video/matte.py`): ela só aparece
+dentro ou fora das figuras. Antes de criar um efeito "só no fundo" ou "só nas
+figuras", veja se `mask:` sobre um efeito existente já resolve.
 
 Fluxo de dados (não altere): `clip_generator.py` monta grid+notes+
 features → `build_compositor()` (único ponto de registro) → loop chama
@@ -44,7 +49,16 @@ mudança para efeitos novos: cenas YAML aparecem de graça.
    deve ser periódica no período (posição de mundo, não acumuladores).
    Prove com teste de costura (`test_mandelbox_infinite_zoom_loops_seamlessly`).
 7. **Orçamentos**: CPU ≤ ~50ms/frame a 480²; GPU via moderngl standalone
-   (modelo: `mandelbulb.py`), supersample opcional. RAM de post-ops com
+   (modelo: `mandelbulb.py`), supersample opcional. O compositor é
+   **híbrido** (`core/video/gpu_compose.py`): blends e máscaras rodam na GPU
+   e o quadro só desce para a CPU quando uma camada pede. Uma camada pode
+   trabalhar do lado da GPU: `on_gpu = True`, e então `frame_gpu(t, g)`
+   (fonte, devolve textura) ou `process_gpu(frame, t, g)` (post-op, recebe
+   e devolve `Frame`). O caminho numpy (`frame_at`/`process`) continua
+   obrigatório: é a **referência** e o fallback sem GPU. Os dois têm que
+   bater pixel a pixel (±2 níveis) em teste (modelo: `test_cast.py`,
+   `test_the_gpu_*`). GPU-first, não GPU-only: camadas só CPU (numpy,
+   modelos) continuam cabendo. RAM de post-ops com
    histórico (feedback/ecos): declare e limite o buffer (N frames × H×W×3;
    cap N no spec). Nada de vazamento por frame — RSS deve ficar plano.
 8. **YAML**: chaves snake_case com defaults seguros; **cena antiga nunca
@@ -64,7 +78,10 @@ mudança para efeitos novos: cenas YAML aparecem de graça.
 - resposta a controls (frame muda quando o áudio muda);
 - consumo de trigger (hit produz o efeito no instante certo);
 - determinismo com seed; costura de loop quando aplicável;
-- GPU: `pytest.skip` gracioso quando não há contexto GL.
+- GPU: `pytest.skip` gracioso quando não há contexto GL; GPU × numpy
+  quadro a quadro, de preferência atravessando um corte (estado por plano);
+- cenas que já existem não mudam: `tools/golden.py` compara quadros de
+  referência de várias cenas (`--numpy` gera a referência).
 Rode `pytest tests/ -q` (tudo verde) e um render curto real de validação
 (6 compassos, 480²) com estatística de pixel provando o efeito (ex.:
 brilho no hit vs fora dele — ver histórico de commits por exemplos).
