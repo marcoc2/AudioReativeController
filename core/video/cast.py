@@ -15,6 +15,7 @@ not by id: in every shot the roles are filled again from what that shot holds.
         - {who: second,     plays: {track: acid},     act: rings, speed: 300}
         - {who: largest,    plays: {track: lead},     act: echo, trail: 3}
         - {who: largest,    plays: {track: snare},    act: carry}
+        - {who: second,     plays: {track: pad},      act: wake, hold: bar, length: 2}
 
 who     largest | second | third | fourth (by their mean size in the shot) |
         leftmost | rightmost | topmost | bottommost (by where they sit) |
@@ -38,6 +39,17 @@ act     punch     the object jumps out of the paper on each hit, bigger, with a 
                   over the new one like a sticker (with a shadow), until its instrument's
                   next hit, then it dissolves (hold: seconds at most, fade: seconds to go,
                   shadow: 0..1)
+        wake      while it is on, the object paints a wake of itself as it moves: where it
+                  has been stays on screen and fades over ``length`` seconds (to ~5%); it is
+                  on while a note sounds (hold: note), from a hit to the end of its bar
+                  (hold: bar) or for ``hold`` seconds after a hit; off, the wake fades
+                  away; a cut wipes it (amount: the wake's opacity; color: tint it;
+                  every: stamp the object only every so often, in seconds or as a note
+                  value on the song's grid, e.g. 1/16 — a strobe of copies instead of a
+                  smear; unset: every frame; shift: the wake drifts away at that many
+                  pixels/s at 720p, in a new direction on every clip — ``direction``, in
+                  degrees (0 right, 90 down), sets the first, each clip turns it by the
+                  golden angle)
 envelope  seconds a hit takes to die away (default by act)
 color     [r, g, b] | chord (the chord's hue, needs harmony:) | pitch (the note's hue)
 
@@ -55,11 +67,11 @@ import numpy as np
 
 from core.segment.mask_track import MaskTrack
 
-ACTS = ("punch", "shake", "tint", "glow", "presence", "rings", "echo", "carry")
+ACTS = ("punch", "shake", "tint", "glow", "presence", "rings", "echo", "carry", "wake")
 RANKS = {"largest": 0, "second": 1, "third": 2, "fourth": 3}
 PLACES = {"leftmost": (1, 1), "rightmost": (1, -1), "topmost": (2, 1), "bottommost": (2, -1)}
 ENVELOPE = {"punch": 0.25, "shake": 0.15, "tint": 0.4, "glow": 0.3, "presence": 0.0,
-            "rings": 0.0, "echo": 0.0, "carry": 0.0}
+            "rings": 0.0, "echo": 0.0, "carry": 0.0, "wake": 0.0}
 FLAT = (28, 24, 34)                      # a silhouette's colour, for presence
 MAX_RINGS = 32                           # rings out at once, per role
 MAX_GHOSTS = 16                          # ghosts kept, per role
@@ -248,6 +260,63 @@ void main(){
 }
 """
 
+# wake: the memory (premultiplied colour, coverage) fades, then the object as it is now
+# is painted into it while the wake is on
+_WAKE_KEEP_FS = """
+#version 330
+out vec4 f_color;
+uniform sampler2D u_prev, u_src, u_am;
+uniform float u_decay; uniform int u_add, u_reset;
+uniform ivec2 u_shift;              // whole pixels the memory drifts this frame
+void main(){
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    ivec2 q = p - u_shift;
+    ivec2 n = textureSize(u_prev, 0);
+    bool inside = q.x >= 0 && q.y >= 0 && q.x < n.x && q.y < n.y;
+    vec4 w = (u_reset == 1 || !inside) ? vec4(0.0) : texelFetch(u_prev, q, 0) * u_decay;
+    if (u_add == 1){
+        float a = texelFetch(u_am, p, 0).r;
+        vec3 s = floor(texelFetch(u_src, p, 0).rgb * 255.0 + 0.5);
+        w = vec4(w.rgb * (1.0 - a) + s * a, w.a * (1.0 - a) + a);
+    }
+    f_color = w;
+}
+"""
+
+# and laid under the object
+_WAKE_FS = """
+#version 330
+out vec4 f_color;
+uniform sampler2D u_src, u_w, u_am;
+uniform float u_k; uniform int u_tint; uniform vec3 u_c;
+void main(){
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    vec3 s = floor(texelFetch(u_src, p, 0).rgb * 255.0 + 0.5);
+    vec4 w = texelFetch(u_w, p, 0);
+    vec3 v = s;
+    if (w.a > 1e-6){
+        vec3 c = w.rgb / w.a;
+        if (u_tint == 1) c = clamp(u_c * (0.25 + 1.1 * dot(c, vec3(0.299, 0.587, 0.114)) / 255.0), 0.0, 255.0);
+        float k = u_k * w.a;
+        v = v * (1.0 - k) + c * k;
+    }
+    float a = texelFetch(u_am, p, 0).r;
+    v = v * (1.0 - a) + s * a;
+    f_color = vec4(floor(clamp(v + 0.5, 0.0, 255.0)) / 255.0, 1.0);
+}
+"""
+
+
+def _drift(img: np.ndarray, step) -> np.ndarray:
+    """``img`` moved ``step`` = (dx, dy) whole pixels; what comes in is empty."""
+    dx, dy = step
+    out = np.zeros_like(img)
+    H, W = img.shape[:2]
+    if abs(dx) < W and abs(dy) < H:
+        out[max(dy, 0):H + min(dy, 0), max(dx, 0):W + min(dx, 0)] = \
+            img[max(-dy, 0):H + min(-dy, 0), max(-dx, 0):W + min(-dx, 0)]
+    return out
+
 
 class _Role:
     def __init__(self, spec: dict, notes, onset_loader, grid, scale: float, index: int):
@@ -262,26 +331,33 @@ class _Role:
             raise ValueError(f"cast role {index}: act {self.act!r} (use one of {ACTS})")
         if "plays" not in spec:
             raise ValueError(f"cast role {index}: plays: names its instrument ({{track: kick}})")
-        if self.act in ("punch", "shake", "rings", "echo", "carry") and self.who == "background":
+        if self.act in ("punch", "shake", "rings", "echo", "carry", "wake") and self.who == "background":
             raise ValueError(f"cast role {index}: the background cannot {self.act}")
         events = _layer_events(spec["plays"], notes, onset_loader, grid)
         self.events = events
         self.times = np.array([e.time for e in events], float)
         self.env = EnvelopeOpacity(self.times, float(spec.get("envelope", ENVELOPE[self.act]) or 1e-3))
         default = {"punch": 0.12, "shake": 10.0, "tint": 0.7, "glow": 1.0, "presence": 1.0,
-                   "rings": 1.0, "echo": 0.6, "carry": 1.0}[self.act]
+                   "rings": 1.0, "echo": 0.6, "carry": 1.0, "wake": 0.85}[self.act]
         self.amount = float(spec.get("amount", default))
         if self.act == "shake":
             self.amount *= scale
         self.width = float(spec.get("width", 3 if self.act == "rings" else 8)) * scale
-        self.hold = float(spec.get("hold", 4.0 if self.act == "carry" else 2.0))
+        hold = spec.get("hold", {"carry": 4.0, "wake": "note"}.get(self.act, 2.0))
+        if self.act == "wake":
+            self._wake_spans(hold, grid, index)
+            hold = 0.0
+        self.hold = float(hold)
         self.fade = max(1e-3, float(spec.get("fade", 0.4 if self.act == "carry" else 0.3)))
         self.shadow = float(spec.get("shadow", 0.35))
         self.speed = float(spec.get("speed", 300)) * scale
         self.life = max(1e-3, float(spec.get("life", 1.0)))
-        self.every = float(spec.get("every", 0.08))
+        self.every = self._period(spec.get("every", None if self.act == "wake" else 0.08), grid, index)
+        self._origin = float(grid.start_offset) if grid is not None and isinstance(spec.get("every"), str) else 0.0
+        self._stamp = None                   # wake: the grid step last stamped
+        self._was_on = False
         self.trail = float(spec.get("trail", 3.0))
-        colour = {"glow": [255, 220, 120], "rings": "pitch", "echo": None}.get(self.act, [255, 60, 60])
+        colour = {"glow": [255, 220, 120], "rings": "pitch", "echo": None, "wake": None}.get(self.act, [255, 60, 60])
         self.color = spec.get("color", colour)
         self.ghosts: List[dict] = []         # echo: what it has left behind
         self._spare: List[tuple] = []        # echo: GPU textures of ghosts gone, for new ones
@@ -289,6 +365,13 @@ class _Role:
         self.snap: Optional[dict] = None     # carry: the object as last seen in this shot
         self.carried: Optional[dict] = None  # carry: the one brought over the cut
         self._cut_t = 0.0
+        self.length = max(1e-3, float(spec.get("length", 1.5)))
+        self.shift = float(spec.get("shift", 0.0)) * scale
+        self.direction = float(spec.get("direction",
+                                        np.random.default_rng(1000 + index).uniform(0.0, 360.0)))
+        self._moved = np.zeros(2)            # wake: how far it has drifted in this shot
+        self.wake: Optional[dict] = None     # wake: its memory
+        self.level = 0.0                     # wake: how much of it is left (1 while on)
         self._chords, self._chord_times, self._hue_of_root = [], np.array([]), VeilsLayer.hue_of_root
         if self.color == "chord":
             h = spec.get("harmony")
@@ -297,6 +380,76 @@ class _Role:
             self._chords = _layer_events(h, notes, onset_loader, grid)
             self._chord_times = np.array([e.time for e in self._chords], float)
         self._seed = 1000 + index
+
+    def _wake_spans(self, hold, grid, index: int) -> None:
+        """Wake: when it is on, as (start, end) per hit; ``ends`` a running max, so whether
+        any span holds ``t`` is one lookup."""
+        starts, ends = [], []
+        for e in self.events:
+            if hold == "note":
+                end = e.time + max(float(getattr(e, "duration", 0.0) or 0.0), 0.05)
+            elif hold == "bar":
+                if grid is None:
+                    raise ValueError(f"cast role {index}: hold: bar needs the song's bars (--midi)")
+                end = grid.bar_start(grid.bar_index(e.time + 1e-6) + 1)
+            else:
+                try:
+                    end = e.time + float(hold)
+                except (TypeError, ValueError):
+                    raise ValueError(f"cast role {index}: hold {hold!r} (use note, bar or seconds)")
+            starts.append(e.time)
+            ends.append(end)
+        order = np.argsort(starts, kind="stable")
+        self._on_from = np.array(starts, float)[order]
+        self._on_to = np.maximum.accumulate(np.array(ends, float)[order]) if ends else np.array([])
+
+    @staticmethod
+    def _period(every, grid, index: int) -> Optional[float]:
+        """``every`` in seconds: a number, or a note value ("1/16": a sixteenth note,
+        "3/8": three eighths) on the song's grid, a quarter note being its beat."""
+        if every is None:
+            return None
+        if isinstance(every, str):
+            num, _, den = every.partition("/")
+            try:
+                frac = float(num) / float(den or 1)
+            except ValueError:
+                raise ValueError(f"cast role {index}: every {every!r} (seconds, or a note value like 1/16)")
+            if grid is None:
+                raise ValueError(f"cast role {index}: every: {every} needs the song's tempo (--midi)")
+            return max(1e-3, frac * 4.0 * grid.beat_duration)
+        return max(1e-3, float(every))
+
+    def stamping(self, t: float, fresh: bool) -> bool:
+        """Wake: whether this frame stamps the object (always, without ``every``; else the
+        first frame in each step of ``every``)."""
+        if self.every is None:
+            return True
+        k = int(np.floor((t - self._origin) / self.every + 1e-6))
+        if fresh or k != self._stamp:
+            self._stamp = k
+            return True
+        return False
+
+    def waking(self, t: float, shot: int) -> tuple:
+        """Wake, frame by frame: (on, how much of the memory survives since the last frame,
+        start it afresh). A cut, a jump back in time or a wake gone by wipe it."""
+        fresh = (self._last_t is None or shot != self._shot or t < self._last_t or self.level < 0.01)
+        dt = 0.0 if fresh else t - self._last_t
+        self._shot, self._last_t = shot, t
+        i = int(np.searchsorted(self._on_from, t, side="right")) - 1
+        on = i >= 0 and t < self._on_to[i]
+        decay = float(np.exp(-3.0 * dt / self.length))
+        self.level = 1.0 if on else (0.0 if fresh else self.level * decay)
+        step = (0, 0)
+        if fresh:
+            self._moved = np.zeros(2)
+        elif self.shift:
+            ang = np.radians(self.direction + 137.50776 * shot)       # a new way on each clip
+            before = np.round(self._moved)
+            self._moved = self._moved + self.shift * dt * np.array([np.cos(ang), np.sin(ang)])
+            step = tuple(int(v) for v in np.round(self._moved) - before)
+        return on, decay, fresh, step
 
     def colour(self, t: float, pitch: Optional[int] = None) -> np.ndarray:
         if self.color == "pitch":
@@ -523,6 +676,15 @@ class CastLayer:
                 return None
             return "echo", {"capture": cap, "role": role,
                             "tint": None if role.color is None else role.colour(t)}
+        if role.act == "wake":
+            was_on = role._was_on
+            on, decay, fresh, step = role.waking(t, shot)
+            role._was_on = on
+            if role.level < 0.01:
+                return None
+            on = on and role.stamping(t, fresh or not was_on)         # switched on: stamp at once
+            return "wake", {"role": role, "on": on, "decay": decay, "fresh": fresh, "step": step,
+                            "tint": None if role.color is None else role.colour(t)}
         if role.act == "presence":
             p = role.presence(t)
             return None if p >= 1.0 else ("presence", {"p": p})
@@ -601,6 +763,29 @@ class CastLayer:
                 res = res * (1.0 - k) + img * k
             res = res * (1.0 - am[..., None]) + out.astype(np.float32) * am[..., None]
             return np.clip(res + 0.5, 0, 255).astype(np.uint8)
+        if kind == "wake":
+            role = a["role"]
+            src = out.astype(np.float32)
+            am = cv2.GaussianBlur(m.astype(np.float32), (0, 0), 0.8)
+            w = role.wake
+            if a["fresh"] or w is None or w["side"] != "cpu" or w["A"].shape != am.shape:
+                P, A = np.zeros_like(src), np.zeros_like(am)
+            else:
+                P, A = w["P"] * np.float32(a["decay"]), w["A"] * np.float32(a["decay"])
+                if a["step"] != (0, 0):
+                    P, A = _drift(P, a["step"]), _drift(A, a["step"])
+            if a["on"]:
+                P = P * (1.0 - am[..., None]) + src * am[..., None]
+                A = A * (1.0 - am) + am
+            role.wake = {"side": "cpu", "P": P, "A": A}
+            c = P / np.maximum(A, np.float32(1e-6))[..., None]
+            if a["tint"] is not None:
+                L = c.dot(np.array(LUMA, np.float32))[..., None] / 255.0
+                c = np.clip(a["tint"][None, None, :] * (0.25 + 1.1 * L), 0, 255)
+            k = np.where(A > 1e-6, np.float32(role.amount) * A, np.float32(0.0))[..., None]
+            res = src * (1.0 - k) + c * k
+            res = res * (1.0 - am[..., None]) + src * am[..., None]
+            return np.clip(res + 0.5, 0, 255).astype(np.uint8)
         if kind == "presence":
             p = a["p"]
             res[m] = res[m] * p + np.array(FLAT, np.float32) * (1.0 - p)
@@ -655,6 +840,25 @@ class CastLayer:
                             u_a=float(np.float32(role.fading(gh, t))), **tint)
             tex = g.run("cast_echo", g.texture(), {"u_acc": src if acc is None else acc, "u_src": src, "u_am": am},
                         fs=_ECHO_FS, u_first=int(acc is None))
+            return Frame(g, tex=tex)
+        if kind == "wake":
+            role = a["role"]
+            am = g.blur(m, 0.8)
+            w = role.wake
+            fresh = a["fresh"]
+            if w is None or w["side"] != "gpu" or w["g"] is not g:
+                w = {"side": "gpu", "g": g, "tex": [g.keep(4, "f4"), g.keep(4, "f4")], "cur": 0}
+                fresh = True
+            prev, nxt = w["tex"][w["cur"]], w["tex"][1 - w["cur"]]
+            g.run("cast_wake_keep", nxt, {"u_prev": prev, "u_src": src, "u_am": am}, fs=_WAKE_KEEP_FS,
+                  u_decay=float(np.float32(a["decay"])), u_add=int(a["on"]), u_reset=int(fresh),
+                  u_shift=a["step"])
+            w["cur"] = 1 - w["cur"]
+            role.wake = w
+            tint = a["tint"] if a["tint"] is not None else (0, 0, 0)
+            tex = g.run("cast_wake", g.texture(), {"u_src": src, "u_w": nxt, "u_am": am}, fs=_WAKE_FS,
+                        u_k=float(np.float32(role.amount)), u_tint=int(a["tint"] is not None),
+                        u_c=tuple(float(c) for c in tint))
             return Frame(g, tex=tex)
         if kind == "presence":
             tex = g.run("cast_presence", g.texture(), {"u_src": src, "u_m": m}, fs=_PRESENCE_FS,

@@ -190,7 +190,11 @@ def test_echo_leaves_a_trail_while_the_note_is_held(track):
     {"act": "rings", "plays": {"track": "acid"}},
     {"act": "rings", "plays": {"track": "acid"}, "color": [255, 255, 0], "width": 6},
     {"act": "echo", "plays": {"track": "lead"}},
-    {"act": "echo", "plays": {"track": "lead"}, "color": [80, 255, 120], "every": 0.1}])
+    {"act": "echo", "plays": {"track": "lead"}, "color": [80, 255, 120], "every": 0.1},
+    {"act": "wake", "plays": {"track": "lead"}},
+    {"act": "wake", "plays": {"track": "lead"}, "color": [80, 255, 120], "hold": 0.2, "length": 0.4},
+    {"act": "wake", "plays": {"track": "lead"}, "every": 0.25, "length": 2.0},
+    {"act": "wake", "plays": {"track": "lead"}, "length": 2.0, "shift": 170, "direction": 30}])
 @pytest.mark.parametrize("size", [(W, H), (2 * W + 3, 2 * H - 1)])
 def test_the_gpu_keeps_step_with_numpy_over_time(track, role, size):
     import cv2
@@ -214,7 +218,7 @@ def test_the_gpu_keeps_step_with_numpy_over_time(track, role, size):
 
 def test_the_background_has_no_outline_to_ring(track):
     folder, _ = track
-    for act in ("rings", "echo"):
+    for act in ("rings", "echo", "wake"):
         with pytest.raises(ValueError, match="background"):
             _cast(folder, [{"who": "background", "plays": {"track": "acid"}, "act": act}])
 
@@ -254,3 +258,70 @@ def test_the_gpu_carries_what_numpy_carries(track, size):
         got = gpu.process_gpu(Frame(g, cpu=frame), t, g).cpu()
         d = np.abs(got.astype(int) - want.astype(int))
         assert d.max() <= 2 and (d > 0).mean() < 0.01, (i, d.max(), (d > 0).mean())
+
+
+def test_wake_paints_where_it_has_been_while_on(track):
+    folder, _ = track
+    cast = _cast(folder, [{"who": "largest", "plays": {"track": "pad"}, "act": "wake", "amount": 1.0,
+                           "length": 0.25}], [_held("pad", START, 0.6)])
+    for i in range(6):                                           # the red square slides 4 px a frame
+        out = cast.process(_frame(i), START + i / FPS)
+    assert int(out[60, 27, 0]) > int(out[60, 27, 2]) + 40        # where it was a frame ago: its wake
+    assert (out[60, 50] == RED).all()                            # where it is now: itself
+    assert (out[20, 130] == BLUE).all()                          # the others untouched
+    for i in range(6, 9):                                        # off since 0.6 s: fading
+        out = cast.process(_frame(i), START + i / FPS)
+    assert np.abs(out.astype(int) - _frame(8).astype(int)).max() <= 12   # ~3% of 210 levels
+    out = cast.process(_frame(9), START + 0.9)
+    assert np.array_equal(out, _frame(9))                        # gone below 1%: left alone
+
+
+def test_wake_held_for_the_bar(track):
+    from core.rhythm.grid import RhythmGrid
+    folder, _ = track
+    roles = [{"who": "largest", "plays": {"track": "pad"}, "act": "wake", "hold": "bar"}]
+    with pytest.raises(ValueError, match="bars"):
+        _cast(folder, roles, [_held("pad", START + 0.1, 0.1)])
+    grid = RhythmGrid(bpm=120.0, time_signature=(4, 4), start_offset=0.0)     # bars of 2 s
+    cast = CastLayer({"track": folder, "roles": roles}, [_held("pad", START + 0.1, 0.1)], W, H, FPS, grid=grid)
+    assert cast.roles[0]._on_to[0] == pytest.approx(14.0)        # the hit's bar (12..14) to its end
+    with pytest.raises(ValueError, match="hold"):
+        _cast(folder, [{**roles[0], "hold": "forever"}], [_held("pad", START, 0.1)])
+
+
+def test_wake_every_stamps_copies_on_the_grid(track):
+    from core.rhythm.grid import RhythmGrid
+    folder, _ = track
+    grid = RhythmGrid(bpm=150.0, time_signature=(4, 4), start_offset=0.0)     # a 1/16 lasts 0.1 s
+    role = {"who": "largest", "plays": {"track": "pad"}, "act": "wake", "every": "1/8", "amount": 1.0,
+            "length": 5.0}
+    cast = CastLayer({"track": folder, "roles": [role]}, [_held("pad", START, 0.9)], W, H, FPS, grid=grid)
+    assert cast.roles[0].every == pytest.approx(0.2)
+    for i in range(7):                                           # stamps at frames 0, 2, 4, 6
+        out = cast.process(_frame(i), START + i / FPS)
+    row = out[60].astype(int)
+    red = row[:, 0] - row[:, 2]
+    assert red[12] > 100 and red[20] > 100                       # frame 0 (x 10..49), frame 2 (18..57)
+    cast.process(_frame(1), START + 1 / FPS)                     # a jump back starts afresh
+    assert np.array_equal(cast.process(_frame(2), START + 0.25)[60, :14], _frame(2)[60, :14])
+    with pytest.raises(ValueError, match="tempo"):
+        _cast(folder, [role], [_held("pad", START, 0.9)])
+    with pytest.raises(ValueError, match="note value"):
+        CastLayer({"track": folder, "roles": [{**role, "every": "a/b"}]}, [_held("pad", START, 0.9)], W, H, FPS,
+                  grid=grid)
+
+
+def test_wake_shift_drifts_it_a_new_way_each_clip(track):
+    folder, _ = track
+    cast = _cast(folder, [{"who": "rightmost", "plays": {"track": "pad"}, "act": "wake", "amount": 1.0,
+                           "length": 5.0, "shift": 300, "direction": 90}], [_held("pad", START, 3.0)])
+    for i in range(5):                                # the blue square stands still; 5 px a frame down
+        out = cast.process(_frame(i), START + i / FPS)
+    col = out[:, 130].astype(int)
+    assert col[45, 2] - col[45, 0] > 100              # its wake below it (it ends at y 29)
+    assert (out[5, 130] == 240).all()                 # nothing above
+    assert cast.roles[0]._moved[1] == pytest.approx(20.0) and abs(cast.roles[0]._moved[0]) < 1e-9
+    for i in range(10, 13):                           # the next clip: wiped, and another way
+        cast.process(_frame(i), START + i / FPS)
+    moved = cast.roles[0]._moved
+    assert np.degrees(np.arctan2(moved[1], moved[0])) == pytest.approx(90 + 137.50776 - 360, abs=0.01)
