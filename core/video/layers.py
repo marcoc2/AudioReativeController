@@ -1841,7 +1841,29 @@ class SandLinesLayer:
         return self.sand.render(dt, rings, hue=self.hue, sat=self._sat)
 
 
-def _music_knob(name: str, how, notes: Sequence, features_at=None, onset_loader=None, grid=None):
+def _chord_part(part: str, root: int, quality: str, tones: tuple, tone: int = 0) -> float:
+    """One number about a chord (see ``_music_knob``'s ``chord:``)."""
+    if part == "root":
+        return float(root)
+    if part == "tone":
+        return float(tones[tone % len(tones)])
+    if part == "size":
+        return float(len(tones))
+    steps = {(p - root) % 12 for p in tones}
+    if part == "mode":
+        return 1.0 if 4 in steps else 0.0 if 3 in steps else 0.5
+    # tension: nothing for a plain major or minor triad; dim/aug and sus add some, each
+    # note past the triad a quarter more
+    odd = 0.5 if (6 in steps or 8 in steps) else 0.25 if quality.startswith("sus") else 0.0
+    return float(min(1.0, odd + 0.25 * max(0, len(tones) - 3)))
+
+
+CHORD_PARTS = ("root", "tone", "size", "mode", "tension")
+CUT_PARTS = ("count", "since", "until", "phase")
+
+
+def _music_knob(name: str, how, notes: Sequence, features_at=None, onset_loader=None, grid=None,
+                cuts=None):
     """A value that follows the music, as ``t -> float`` (called once a frame, in time order):
 
         0.5                                       a constant
@@ -1857,6 +1879,21 @@ def _music_knob(name: str, how, notes: Sequence, features_at=None, onset_loader=
                                                   the short way round the colour wheel
         {since: <trigger>, nth: 0}                seconds since the latest hit (nth: 1 the one before, ...);
                                                   1000 before there was one
+        {chord: {score: ..., snap: auto}, part: root, glide: 0}   the chord sounding now (held through
+                                                  no-chord stretches; the first one before it starts):
+                                                  root   its root, 0..11 (C = 0)
+                                                  tone   its ``tone``-th note (0 root, 1 third, 2 fifth, 3 the
+                                                         seventh..), 0..11; a smaller chord wraps round
+                                                  size   how many notes (3 a triad, 4 a seventh chord..)
+                                                  mode   1 a major third, 0 a minor one, 0.5 neither (sus, 5)
+                                                  tension  0 a plain triad, up to 1 (dim/aug, sus, added notes)
+                                                  glide: seconds to slide there (root and tones the short
+                                                  way round the 12); 0 jumps
+        {cut: count, morph: 0}                    the clip cuts (``cuts``: the composer's schedule, so a
+                                                  cut is known before it comes): count  cuts so far (0 in
+                                                  the first shot; ``morph`` seconds to step up) | since
+                                                  seconds since the last one | until  seconds to the next
+                                                  (1000 when there is none) | phase  0 -> 1 across the shot
     """
     if isinstance(how, (int, float)):
         return lambda t, v=float(how): v
@@ -1903,7 +1940,7 @@ def _music_knob(name: str, how, notes: Sequence, features_at=None, onset_loader=
             return state["v"]
         return pitch
     if isinstance(how, dict) and "rate" in how:
-        src = _music_knob(name, how.get("from", 1.0), notes, features_at, onset_loader, grid)
+        src = _music_knob(name, how.get("from", 1.0), notes, features_at, onset_loader, grid, cuts)
         rate, base = float(how["rate"]), float(how.get("base", 0.0))
         state = {"v": 0.0, "t": None}
 
@@ -1959,7 +1996,66 @@ def _music_knob(name: str, how, notes: Sequence, features_at=None, onset_loader=
             state["t"] = t
             return state["h"]
         return hue
-    raise ValueError(f"uniform {name!r}: use a number, a feature path, or {{feature|hits|count|pitch|rate|bar|harmony|since: ...}}")
+    if isinstance(how, dict) and "chord" in how:
+        from core.score.sheetsage_reader import parse_chord
+        from core.video.composer import load_score
+        part, tone = how.get("part", "root"), int(how.get("tone", 0))
+        if part not in CHORD_PARTS:
+            raise ValueError(f"uniform {name!r}: chord part {part!r} (use {', '.join(CHORD_PARTS)})")
+        times, vals = [], []
+        for span in load_score(how["chord"], grid).chords:
+            root, quality, tones = parse_chord(span.label)
+            if root is not None:                       # a no-chord stretch keeps the last chord
+                times.append(span.start)
+                vals.append(_chord_part(part, root, quality, tones, tone))
+        if not vals:
+            raise ValueError(f"uniform {name!r}: the score has no chords")
+        times, vals = np.array(times), np.array(vals)
+        glide, wheel = float(how.get("glide", 0.0)), part in ("root", "tone")
+        state = {"v": None, "t": None}
+
+        def chord(t):
+            target = float(vals[max(0, int(np.searchsorted(times, t, side="right")) - 1)])
+            if glide <= 0 or state["v"] is None:
+                state["v"] = target
+            else:
+                gap = ((target - state["v"] + 6.0) % 12.0 - 6.0) if wheel else target - state["v"]
+                state["v"] += gap * (1 - math.exp(-max(0.0, t - state["t"]) / glide))
+                if wheel:
+                    state["v"] %= 12.0
+            state["t"] = t
+            return state["v"]
+        return chord
+    if isinstance(how, dict) and "cut" in how:
+        part = how["cut"]
+        if part not in CUT_PARTS:
+            raise ValueError(f"uniform {name!r}: cut {part!r} (use {', '.join(CUT_PARTS)})")
+        if cuts is None:
+            raise ValueError(f"uniform {name!r}: cut needs the clips (a scene with - source: clips)")
+        morph = float(how.get("morph", 0.0))
+        known = {"to": -np.inf, "times": np.zeros(0)}
+
+        def cut(t):
+            if t + 600.0 > known["to"]:               # the schedule, a good stretch ahead
+                known["to"] = t + 3600.0
+                known["times"] = np.asarray(cuts(known["to"]), dtype=float)
+            ts = known["times"]
+            i = int(np.searchsorted(ts, t, side="right"))     # cuts so far
+            last = float(ts[i - 1]) if i > 0 else None
+            nxt = float(ts[i]) if i < len(ts) else None
+            if part == "since":
+                return t - last if last is not None else 1000.0
+            if part == "until":
+                return nxt - t if nxt is not None else 1000.0
+            if part == "phase":
+                return (t - last) / (nxt - last) if last is not None and nxt is not None else 0.0
+            if morph > 0 and last is not None:
+                x = min(1.0, (t - last) / morph)
+                return i - 1 + x * x * (3 - 2 * x)
+            return float(i)
+        return cut
+    raise ValueError(f"uniform {name!r}: use a number, a feature path, or "
+                     f"{{feature|hits|count|pitch|rate|bar|harmony|since|chord|cut: ...}}")
 
 
 class ShadertoyLayer:
@@ -1983,13 +2079,16 @@ class ShadertoyLayer:
             u_note: {pitch: {track: bass}, low: 36, high: 60, glide: 0.1}   # the last note's pitch, 0..1
             u_spin: {rate: 2.0, base: 0.3, from: {hits: {track: bass}, envelope: 0.2}}
                                     # an angle that keeps turning: base + rate * (a knob as above) per second
+            u_third: {chord: {score: input/song/sheetsage}, part: tone, tone: 1, glide: 0.5}
+                                    # the chord's third, 0..11 (also root, size, mode, tension)
+            u_cut: {cut: until}     # seconds to the next clip cut (also count, since, phase)
 
     When any pass reads ``frame`` it is a post-op (the picture under it goes in);
     otherwise a source, blended like any other.
     """
 
     def __init__(self, spec: dict, notes: Sequence, width: int, height: int, fps: int,
-                 features_at=None, onset_loader=None, grid=None):
+                 features_at=None, onset_loader=None, grid=None, cuts=None):
         from core.shadertoy import BUFFERS, Shadertoy, load
         if not spec.get("file"):
             raise ValueError("shadertoy: needs file: (a .glsl or a folder in shaders/shadertoy/)")
@@ -2013,7 +2112,7 @@ class ShadertoyLayer:
             return np.asarray(Image.open(src).convert("RGB"))
         channels = {p: {i: resolve(src) for i, src in chans.items() if resolve(src) is not None}
                     for p, chans in channels.items()}
-        self._knobs = {name: _music_knob(name, how, notes, features_at, onset_loader, grid)
+        self._knobs = {name: _music_knob(name, how, notes, features_at, onset_loader, grid, cuts)
                        for name, how in (spec.get("uniforms") or {}).items()}
         self.toy = Shadertoy(shader["image"], width, height, supersample=int(spec.get("supersample", 1)),
                              extra=tuple(self._knobs), buffers={b: shader.get(b) for b in BUFFERS},
@@ -2504,7 +2603,7 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             continue
         if src_name == "shadertoy":
             toy = ShadertoyLayer(spec, notes, width, height, fps, features_at=features_at,
-                                 onset_loader=onset_loader, grid=grid)
+                                 onset_loader=onset_loader, grid=grid, cuts=getattr(base, "cut_times", None))
             if toy.is_post:
                 comp.add(_ShadertoyPost(toy), "normal", None)
             else:

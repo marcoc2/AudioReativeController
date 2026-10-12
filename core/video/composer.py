@@ -141,11 +141,20 @@ def _grid_is_real(grid) -> bool:
 
 
 def _default_score_loader(spec: dict, grid):
-    from core.score import read_score  # lazy: keeps the composer import light
-
     events = spec.get("events", "chord_changes")
     if events not in SCORE_EVENTS:
         raise ValueError(f"score trigger: unknown events {events!r}; expected {sorted(SCORE_EVENTS)}")
+    score = load_score(spec, grid, melody=events == "melody")
+    if events == "melody":
+        return score.melody(spec.get("voice", "instrumental"))
+    return getattr(score, events)()
+
+
+def load_score(spec: dict, grid, melody: bool = False):
+    """The transcription a ``score:`` spec names, snapped onto ``grid`` as ``snap`` says
+    (auto: to the bars when the grid is real)."""
+    from core.score import read_score  # lazy: keeps the composer import light
+
     snap = spec.get("snap", "auto")
     if snap not in SCORE_SNAPS:
         raise ValueError(f"score trigger: unknown snap {snap!r}; expected {sorted(SCORE_SNAPS)}")
@@ -156,10 +165,8 @@ def _default_score_loader(spec: dict, grid):
     if snap != "off":
         # melody is rhythm: snapping it to bars would flatten it, so it follows
         # sixteenths of the grid while chords and sections follow ``snap``
-        score = score.snap_to(grid, unit=snap, melody_division=4 if events == "melody" else None)
-    if events == "melody":
-        return score.melody(spec.get("voice", "instrumental"))
-    return getattr(score, events)()
+        score = score.snap_to(grid, unit=snap, melody_division=4 if melody else None)
+    return score
 
 
 class ClipComposer:
@@ -377,6 +384,26 @@ class ClipComposer:
                 self.transport.set_clip(self._rng.choice(choices))
         else:
             getattr(self.transport, action)()
+
+    def cut_times(self, until: float) -> np.ndarray:
+        """When the clip changes, up to ``until``, known before rendering: the bars that pick
+        a new clip, the triggers' clip actions and the pinned bars (what ``_cuts.json``
+        records afterwards). Effects use it to see a cut coming."""
+        if len(self.library) < 2:
+            return np.zeros(0)
+        cuts = []
+        bar = 1
+        while True:
+            t = float(self.grid.bar_start(bar))
+            if t > until:
+                break
+            if self._bar_index(t) == bar and ((self.clip_per_bar and bar % self.bars_per_clip == 0)
+                                              or bar in self.overrides):
+                cuts.append(t)
+            bar += 1
+        cuts += [e.time for e in self.events
+                 if e.time <= until and any(a in ("next_clip", "random_clip") for a in e.actions)]
+        return np.unique(np.round(cuts, 6))
 
     # ------------------------------------------------------------------
 

@@ -310,6 +310,94 @@ Todas as cenas juntas: `esfolado_completo`, `carrossel_completo`, `carrossel_ret
 
 ---
 
+## Da pesquisa de out/2026: outros visualizadores e fractais
+
+Três levantamentos foram feitos:
+- visualizadores audio-reactive: MilkDrop/Butterchurn, Hydra, Synesthesia, parseq e TouchDesigner;
+- fractais 2D: flames, Julia/Newton/Lyapunov, Droste e Kleinianos;
+- fractais 3D: Mandelbulber, Fragmentarium, KIFS e Marble Marcher.
+
+As ideias abaixo são as que **não** estavam no backlog. Elas estão agrupadas pelo papel
+da música, e não pela técnica.
+
+**Licenças.**
+- Mandelbulber, Fragmentarium, Marble Marcher, flam3/Fractorium e XaoS são GPL.
+- A Hydra é AGPL.
+- Os shaders do Shadertoy são CC BY-NC-SA por padrão.
+
+Em todos esses casos, escrever do zero a partir da matemática. Butterchurn (MIT) e
+jsexp (BSD) podem ser aproveitados com atribuição.
+
+**Caminho rápido.** A maioria cabe num `.glsl` nosso (`_arc`) no adaptador shadertoy,
+ligado à música por `uniforms:`, sem Python novo. Depois vira camada própria, se valer.
+
+### 25. A base: como a música vira número
+- [x] Knob `chord:` → `core/video/layers.py`. É o acorde que soa agora: `root`, `tone` (terça, quinta…), `size`, `mode` (maior/menor/sus) e `tension`, com `glide`.
+- [x] Knob `cut:` → `layers.py` + `ClipComposer.cut_times`. É o corte de clipe, conhecido **antes** de chegar: `count`, `since`, `until` e `phase`.
+- [ ] `channel: mask` no shadertoy: a máscara do SAM2 (ou o campo de distância dela) como textura do shader.
+- [ ] **Intensidade relativa.** Hoje cada banda é medida contra o máximo da música, o que deixa a estrofe parada e satura o refrão. Medir contra a média recente, com ataque rápido e soltura lenta, como faz o `audioLevels.js` do Butterchurn. Somar "presença" (atividade sustentada) e "intensidade" (a construção lenta da música), como no Synesthesia.
+- [ ] **Envelope ADSR com note-off.** Hoje o `EnvelopeOpacity` só decai a partir do ataque. O envelope deveria segurar enquanto a nota soa e soltar no fim dela, com a velocity escalando o pico, como o Trigger CHOP do TouchDesigner.
+- [ ] **Antecipação.** O render é offline: um efeito pode começar antes da batida, como o pré-corte ou a tensão no último tempo. O `cut: until` já abre esse caminho para os cortes.
+- [ ] **Moduladores em qualquer parâmetro**, não só nos `uniforms:` do shadertoy. Exemplos: `max_rotate: {tri: 2b}` e `hue_shift: {random_on: {track: snare}, ease: 0.1}`. Modelos: os osciladores em batidas do parseq e o `syn_RandomOnBeat` do Synesthesia.
+
+### 26. O corte como gesto (transições)
+Hoje o corte é seco. O knob `cut:` dá ao efeito o tempo até o corte. Para misturar dois
+clipes, o efeito precisa segurar o último quadro do plano que sai, como o `carry` faz.
+- [ ] **Padrões do MilkDrop:** o clipe novo entra por uma frente que varre num ângulo, sai do centro ou vem em manchas de plasma. Fórmula: `clamp(p*(1+b)/b - (1-t)/b, 0, 1)` (Butterchurn `blendPattern.js`, MIT). O avanço segue o último tempo antes do corte, e a bateria escolhe o padrão. Variante ARC: o campo é a distância às figuras, então elas trocam primeiro e o mundo depois. É mais geral que o wipe pela silhueta do item 24.
+- [ ] **Portal Menger:** o último quadro vira uma face de Menger, e a cada batida abre mais um nível de buracos por onde o clipe novo aparece.
+- [ ] **Wipe pelas curvas de nível de um fractal** (Julia ou Lyapunov), com o `c` vindo do acorde do corte.
+- [ ] **Droste como transição:** o clipe novo mora na cópia interna da espiral, e o corte cai quando a câmera chega nela.
+- [ ] **Datamosh:** os pixels do plano velho são arrastados pelo movimento do novo, até a caixa "limpar" a imagem. O fluxo ótico é calculado na CPU (OpenCV DIS) e guardado por clipe; o tamanho do bloco vem da velocity. Dá muito trabalho e também muito resultado.
+
+### 27. A harmonia como cor e forma
+- [ ] **Paleta pelo acorde** (pós-efeito): a luminância do quadro passa por uma rampa feita das notas do acorde. A qualidade define luz e saturação: maior mais claro, saturado e amarelo; menor mais escuro e azul (Palmer et al., PNAS 2013). A rampa troca em um tempo. Usar a cor do baixo no fundo e a do acorde nas figuras, via `mask:`.
+- [ ] **Newton/Nova cujas raízes são as notas do acorde**, nos ângulos da roda de 12. Numa troca de acorde as raízes deslizam e as bordas se retrançam. Cada bacia ganha a cor da sua nota. Variante: cada bacia mostra o clipe girado (um caleidoscópio do acorde).
+- [ ] **KIFS 3D com simetria pelo acorde:** icosaédrica para maior, octaédrica para menor, tetraédrica para dim/aug. A tônica gira as dobras e o kick infla a escala.
+- [ ] **Orbit traps harmônicos** (um include GLSL para todo fractal, inclusive `mandelbulb` e `mandelbox`): tônica, terça e quinta em três canais de trap, e uma nota da melodia acende uma quarta.
+- [ ] **Notas como luzes dentro do fractal:** cada nota é um ponto de trap brilhante, com velocity e duração (névoa por iteração e "fake lights" do Mandelbulber). A partitura vira luz dentro do objeto.
+- [ ] **Julia quaterniônico:** o acorde move `c` e a melodia percorre a fatia 4D.
+
+### 28. A bateria como estrutura
+- [ ] **Lyapunov:** a sequência A/B é a bateria do compasso em semicolcheias (bumbo = A, caixa = B). Cada levada tem a sua paisagem, e uma virada a muda. Num compasso de outro tamanho a sequência muda (Deserto: 5/4 → 6/4).
+- [ ] **Fractal 3D híbrido:** os 16 passos do compasso escolhem a fórmula de cada iteração (bumbo = dobra Mandelbox, caixa = bulb, hi-hat = dobra KIFS). Cada levada vira uma "espécie".
+
+### 29. O fractal deformando o clipe
+- [ ] **Variações do flame como lente sobre o vídeo:** swirl, bubble, spherical e outras, cada peso vindo de um stem. Reaproveita `core/flame.py`.
+- [ ] **Droste:** o quadro contém a si mesmo numa espiral, com uma volta por compasso, o que dá um loop perfeito. A cópia interna fica na caixa da figura.
+- [ ] **Julia com orbit trap feita da figura** (o campo de distância da máscara) ou do próprio quadro: o personagem se repete em todas as escalas.
+- [ ] **MRCM, a "copiadora":** um IFS cujo atrator é feito de cópias do clipe. Cada trilha MIDI é uma lente, e a batida reforça a cópia dela.
+- [ ] **Ladrilhamento hiperbólico {p,q}** (Escher, *Circle Limit*): `p` vem do numerador do compasso e `q` do tamanho do acorde, com um ladrilho de translação por tempo.
+- [ ] **Kleinianos / Indra's Pearls:** o clipe dentro de cada pérola, com a melodia movendo `µ`.
+- [ ] **Domain warp** (fbm∘fbm∘fbm do iq) como deslocamento do vídeo: baixo no primeiro estágio, voz no segundo.
+- [ ] **Modulação cruzada** (`modulate`/`modulateHue` da Hydra): uma imagem entorta a outra. Por exemplo, o clipe que entra entorta o que sai no último tempo.
+- [ ] **Campo de warp do MilkDrop:** zoom por raio, rotação por ângulo e turbulência, com o centro no centróide da figura principal (o vórtice segue quem canta). Hoje o `feedback` é só um zoom global.
+- [ ] **Fractal 3D com o clipe como textura:** projeção triplanar, ou o UV vindo da última iteração. Com a máscara, as figuras viram estátuas repetidas na superfície.
+
+### 30. Mundos de fundo (atrás das figuras, com `mask: outside`)
+- [ ] **Star Nest** (Kali): nuvens volumétricas. É quase só o `.glsl`, com licença MIT a confirmar.
+- [ ] **Fatiador:** um plano corta o fractal uma vez por compasso, como uma tomografia.
+- [ ] **"Fases" do Marble Marcher:** o fractal muda de forma a cada corte (`cut: count`), e as animações senoidais andam presas ao compasso.
+- [ ] **Voo por waypoints:** pseudo-Kleiniano ou Amazing Surf, um waypoint por compasso e um galho novo a cada corte.
+- [ ] **Bolhas apolonianas:** o kick infla a inversão e as notas acendem as cascas. Combina com o `soap_bubble.glsl`.
+- [ ] **Nebulabrot pelos stems** (baixo, bateria e voz em três tetos de iteração): reaproveita o caminho de histograma do flame.
+- [ ] **Zoom profundo ao longo da música inteira** (perturbação): uma década a cada N compassos, chegando a um minibrot no refrão.
+- [ ] **Gray-Scott** semeado pelo quadro: o acorde salta (f, k) entre manchas, vermes e labirintos.
+- [ ] **Melhorias no flame:** um xform por trilha MIDI e a estimativa de densidade do flam3.
+- [ ] **Desfoque de movimento e profundidade de campo por sub-quadros** em qualquer fractal da GPU.
+
+### 31. Pós-efeitos musicais
+- [ ] **Mapa de deslocamento no tempo** (Time Machine TOP do TouchDesigner): cada pixel lê um quadro passado escolhido por um mapa (distância à figura, luminância ou ruído), com o atraso em valores de nota. Inclui o split RGB no tempo: R agora, G uma colcheia atrás, B uma semínima atrás.
+- [ ] **Bloom musical** (blur1/2/3 do MilkDrop): a batida baixa o limiar e sobe o ganho, e o acorde tinge o brilho.
+- [ ] **Pixel sorting:** o rastro cresce enquanto a nota soa e derrete no note-off, com o limiar seguindo a tensão do acorde.
+
+Novos atos do elenco, pelo item 24:
+- [ ] `clock`: a figura só anda enquanto o instrumento dela toca e congela nas pausas (como o `syn_BassTime` do Synesthesia, mas com o MIDI exato).
+- [ ] `sing`: a figura sobe e desce com a melodia, deslizando no legato.
+- [ ] `scope`: o contorno vira um osciloscópio, com ondas sintetizadas das notas MIDI. Um acorde dá interferência no estilo Lissajous.
+- [ ] Reação-difusão crescendo dentro da figura: cada nota semeia um ponto dentro da máscara.
+
+---
+
 ## Ordem sugerida
 
 ```
@@ -328,6 +416,12 @@ Todas as cenas juntas: `esfolado_completo`, `carrossel_completo`, `carrossel_ret
 20 shockwave                    (independente; cartoon invertido + a onda da areia)
 
 21 máscaras → 22 mask: → 23 cast (feitos) → 24 stutter primeiro
+
+25 knobs chord + cut (feitos) → 27 paleta pelo acorde (pós, muda tudo de uma vez)
+                             → 26 transições no corte (padrões MilkDrop + variante pelas figuras)
+                             → 29 lente de variações do flame (reaproveita o flame)
+                             → 27 KIFS pelo acorde + orbit traps harmônicos
+25 intensidade relativa + ADSR  (melhora todos os efeitos que já existem)
 ```
 
 A ordem cede à próxima música: se o clipe da vez for **Deserto de lama**,
