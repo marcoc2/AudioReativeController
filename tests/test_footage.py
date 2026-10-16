@@ -210,3 +210,37 @@ def test_spill_lets_what_an_fx_spreads_show():
     assert kept[1, 1, 0] == 200 and kept[1, 2, 0] == 40             # no spill: the trail goes
     assert spilled[1, 2, 0] == 100                                  # spill: the trail covers it
     assert (kept[3, 3] == 40).all() and (spilled[3, 3] == 40).all()
+
+
+def test_lanes_bg_spliced_fg_on_its_own(tmp_path):
+    still = tmp_path / "dot.png"
+    cv2.imwrite(str(still), np.full((16, 16, 3), 200, np.uint8))
+    noise = {"source": "rgb_noise", "amount": 0.6, "seed": 2}
+    bg = [{"source": "solid", "color": [40, 40, 40]}]
+    flat = build_compositor(None, {"layers": bg + [noise]}, [], 64, 32).frame_at(1.0)
+    grouped = build_compositor(None, {"layers": [bg[0], {"source": "group", "name": "BG", "canvas": "below",
+                                                         "layers": [], "fx": [noise]}]}, [], 64, 32).frame_at(1.0)
+    assert (flat == grouped).all()                                    # the background lane: spliced in
+    fg = {"source": "group", "name": "FG", "fx": [noise],
+          "layers": [{"source": "footage", "file": str(still), "scale": 0.25, "x": 0.25},
+                     {"source": "footage", "file": str(still), "scale": 0.25, "x": 0.75}]}
+    out = build_compositor(None, {"layers": bg + [fg]}, [], 64, 32).frame_at(1.0).astype(int)
+    left, right, between = (slice(13, 19), slice(13, 19)), (slice(13, 19), slice(45, 51)), (slice(0, 6), slice(29, 35))
+    assert (out[between] == 40).all()                                 # the FG's FX leave the BG alone
+    assert np.abs(out[left] - 200).mean() > 5 and np.abs(out[right] - 200).mean() > 5
+    off = build_compositor(None, {"layers": bg + [{**fg, "enabled": False}]}, [], 64, 32).frame_at(1.0)
+    assert (off == 40).all()
+
+
+def test_drop_leaves_out_the_unnamed_edge_but_not_a_hole(clip, tmp_path):
+    track = _mask_track(tmp_path / "seg")
+    lab = np.zeros((32, 64), np.uint16)
+    lab[:, :32], lab[:, 32:62] = 1, 2                    # backdrop, the figure; the last 2 columns: unnamed
+    lab[14:18, 44:48] = 0                                # and a hole SAM missed inside the figure
+    for i in range(48):
+        cv2.imwrite(str(tmp_path / "seg" / "labels" / f"{i:06d}.png"), lab)
+    f = Footage({"file": clip, "cues": [[0.0, 1.0, 1.0]],
+                 "cutout": {"track": track, "drop": [1], "feather": 0}}, 64, 32)
+    out = f.frame_at_over(np.zeros((32, 64, 3), np.uint8), 0.0)
+    assert (out[:, 63] == 0).all()                       # the unnamed edge: backdrop, not drawn
+    assert _index(out[15:17, 45:47]) == 24               # the hole stays with the figure

@@ -231,7 +231,12 @@ class Footage:
     def _matte(self, i: int, w: int, h: int) -> np.ndarray:
         lab = self.track.labels(min(i, self.track.frames - 1))
         if self.drop is not None:                       # all but these (a backdrop): what SAM
-            m = ~np.isin(lab, self.drop)                # left unnamed stays with the figure
+            m = ~np.isin(lab, self.drop)                # left unnamed stays with the figure,
+            unnamed = (lab == 0).astype(np.uint8)       # but not where it touches the frame's edge:
+            if unnamed.any():                           # that is backdrop SAM missed (a line there)
+                _, cc = cv2.connectedComponents(unnamed)
+                edge = np.unique(np.concatenate([cc[0], cc[-1], cc[:, 0], cc[:, -1]]))
+                m &= ~np.isin(cc, edge[edge > 0])
         else:
             m = lab > 0 if self.objects is None else np.isin(lab, self.objects)
         m = cv2.resize(m.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
