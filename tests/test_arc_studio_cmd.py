@@ -19,6 +19,9 @@ def _reset_state():
     S.grav_enable = False
     S.midi_offset = 0.0
     S.meter = ""
+    S.masks_dir = ""
+    S.clip_turn_wide = False
+    S.profile = False
 
 
 def test_clips_mode_dispatches_to_clip_generator():
@@ -31,6 +34,18 @@ def test_clips_mode_dispatches_to_clip_generator():
     assert cmd[cmd.index("--midi") + 1] == "song.mid"
     assert "--clip-order" not in cmd       # "(scene)" keeps the YAML's order
     assert "--gravity-peak" not in cmd
+
+
+def test_clips_masks_turn_wide_and_profile_reach_the_render():
+    _reset_state()
+    cmd = _build_render_cmd()
+    assert "--masks" not in cmd and "--clip-turn-wide" not in cmd and "--profile" not in cmd
+    S.masks_dir = "render_output/x_base_segments"
+    S.clip_turn_wide = True
+    S.profile = True
+    cmd = _build_render_cmd()
+    assert cmd[cmd.index("--masks") + 1] == "render_output/x_base_segments"
+    assert "--clip-turn-wide" in cmd and "--profile" in cmd
 
 
 def test_clips_full_song_renders_bars_zero():
@@ -308,3 +323,104 @@ def test_bars_counted_from_a_start_rounded_just_before_the_downbeat():
     assert span_of_bars(grid, 2 * bar - 0.0003, 1, 30) == pytest.approx(bar, abs=1e-3)
     assert span_of_bars(grid, 2 * bar, 4, 30) == pytest.approx(4 * bar)
     assert span_of_bars(grid, 2 * bar + 1.0, 1, 30) == pytest.approx(bar - 1.0)   # mid-bar: to its end
+
+
+def test_the_preview_keeps_the_render_aspect():
+    import numpy as np
+
+    from arc_studio import PREV_H, PREV_W, _np_to_dpg, _preview_size
+    pw, ph = _preview_size(480, 854)
+    assert ph <= PREV_H and pw < PREV_W and abs(pw / ph - 480 / 854) < 0.02
+    assert _preview_size(854, 480)[0] <= PREV_W
+    frame = np.full((ph, pw, 3), 255, np.uint8)
+    rgba = _np_to_dpg(frame).reshape(PREV_H, PREV_W, 4)
+    assert rgba[:, :, 3].min() == 1.0                 # opaque bars
+    assert rgba[PREV_H // 2, PREV_W // 2, 0] == 1.0     # the picture in the middle
+    assert rgba[PREV_H // 2, 2, 0] == 0.0               # black at the sides
+
+
+def test_the_start_can_be_written_as_bar_dot_beat():
+    import numpy as np
+    import pytest
+
+    from arc_studio import _bar_beat_to_time, _time_to_bar_beat
+    from core.rhythm.grid import RhythmGrid
+    # me diz: 105 BPM 4/4, the MIDI's bar 1 4.007 s before the trimmed master
+    beat = 60 / 105
+    grid = RhythmGrid(bpm=105.0, fps=30, beats=np.arange(120) * beat - 4.007,
+                      downbeats=np.arange(30) * 4 * beat - 4.007)
+    assert _bar_beat_to_time("18.3", grid) == pytest.approx(35.993, abs=1e-3)
+    assert _bar_beat_to_time("18", grid) == pytest.approx(35.993 - 2 * beat, abs=1e-3)
+    assert _time_to_bar_beat(35.993, grid) == "18.3"
+    for bad in ("18.5", "0.1", "x", "18.3.1"):
+        with pytest.raises(ValueError):
+            _bar_beat_to_time(bad, grid)
+
+
+def test_the_scene_video_widgets_write_only_what_differs():
+    from arc_studio import _set_scene_video
+    S._scene_video_base = {"clip_per_bar": True}
+    S._scene_extra_video = {}
+    _set_scene_video("bars_per_clip", 1)        # the default, not in the file: stays out
+    _set_scene_video("clip_end", "loop")
+    _set_scene_video("seed", "7")
+    assert S._scene_extra_video == {"clip_end": "loop", "seed": 7}
+    _set_scene_video("seed", "")
+    _set_scene_video("clip_end", "bounce")
+    assert S._scene_extra_video == {}
+    S._scene_video_base = {"bars_per_clip": 2}  # the file had it: the default is written
+    _set_scene_video("bars_per_clip", 1)
+    assert S._scene_extra_video == {"bars_per_clip": 1}
+
+
+def test_trigger_exclude_has_its_own_fields():
+    video = {"triggers": {"snare": {"audio": "s.wav", "threshold": 0.3, "min_gap": 0.08,
+                                    "exclude": {"trigger": "kick", "window": 0.04},
+                                    "actions": ["next_clip"]}}}
+    rows = _video_cfg_to_rows(video)
+    assert rows[0]["exclude"] == "kick" and rows[0]["_extra"] == {}
+    back = _rows_to_video_cfg(rows, True, "shuffle")
+    assert back["triggers"]["snare"]["exclude"] == {"trigger": "kick", "window": 0.04}
+    rows[0]["exclude"] = ""
+    assert "exclude" not in _rows_to_video_cfg(rows, True, "shuffle")["triggers"]["snare"]
+
+
+def test_a_new_scene_gets_a_safe_name(tmp_path):
+    import pytest
+    import yaml
+
+    from arc_studio import NEW_SCENE, _new_scene_path
+    path = _new_scene_path("me diz: ideia!", str(tmp_path))
+    assert path.name == "me_diz_ideia.yaml"
+    path.write_text(NEW_SCENE.format(name=path.stem), encoding="utf-8")
+    assert yaml.safe_load(path.read_text())["video"]["layers"] == [{"source": "clips"}]
+    with pytest.raises(ValueError, match="already exists"):
+        _new_scene_path("me_diz_ideia", str(tmp_path))
+    with pytest.raises(ValueError):
+        _new_scene_path("  ", str(tmp_path))
+
+
+def test_a_uniform_goes_at_the_end_of_the_uniforms_block():
+    import pytest
+
+    from arc_studio import _text_with_uniform
+    text = "uniforms:\n    u_s: 1.2   # strength\n    u_kick: &kick {hits: [36]}\nseed: 3\n"
+    assert _text_with_uniform(text, "u_zoom", 0.9) == (
+        "uniforms:\n    u_s: 1.2   # strength\n    u_kick: &kick {hits: [36]}\n    u_zoom: 0.9\nseed: 3\n")
+    assert _text_with_uniform("", "u_zoom", 0.9) == "uniforms:\n  u_zoom: 0.9\n"
+    assert _text_with_uniform("seed: 3", "u_zoom", 1.0) == "seed: 3\nuniforms:\n  u_zoom: 1.0\n"
+    with pytest.raises(ValueError):
+        _text_with_uniform("uniforms: {u_s: 1}", "u_zoom", 1.0)
+
+
+def test_every_shader_lists_its_uniforms():
+    from pathlib import Path
+
+    from core.shadertoy import uniforms_of
+    unis = uniforms_of("shaders/shadertoy/droste_arc.glsl")
+    assert [u["name"] for u in unis] == ["u_phase", "u_ratio", "u_twist", "u_kick", "u_cx", "u_cy"]
+    assert unis[1]["default"] == 0.3 and "cópia interna" in unis[1]["about"]
+    assert "por compasso" in unis[0]["about"]                    # the line under it, too
+    assert unis[4]["about"] == unis[5]["about"]                  # "u_cx, u_cy  ..."
+    for f in Path("shaders/shadertoy").glob("*.glsl"):
+        uniforms_of(f)

@@ -95,6 +95,13 @@ class _State:
     # layers editor: one dict per scene layer (see _layers_to_rows)
     layer_rows: list = []
     _layer_counter: int = 0
+    # the scene file as loaded (core.scene_doc: saving patches it, comments and anchors
+    # stay) and what the editor said right after loading it (what a save diffs against)
+    scene_doc = None
+    _scene_video_base: dict = {}
+    # the knob editor: {"row", "path" (keys to the knob in the row's params), "state"
+    # (core.knob_forms), "shared" (the anchor it aliases, if any)}
+    knob_ctx = None
 
     # preview playback
     preview_frames:   list  = []
@@ -115,6 +122,9 @@ class _State:
     start_time: float = 0.0     # where the render starts in the song (0 = first downbeat)
     render_stems: bool = False  # separate stems for the layers' features (--stems; slow)
     clip_fit: str = "contain"   # how clips fill the frame: contain (bars) or cover (crop)
+    clip_turn_wide: bool = False  # portrait render: turn landscape clips a quarter (--clip-turn-wide)
+    masks_dir: str = ""         # the mask track (segment_video.py's *_segments) for cast / mask:
+    profile: bool = False       # time each layer and print the table (--profile)
     last_render: str = ""       # the last full render's MP4 (the repaint's default input)
     last_render_start: float = 0.0
 
@@ -179,12 +189,25 @@ def _blank_frame() -> np.ndarray:
 
 
 def _np_to_dpg(arr: np.ndarray) -> np.ndarray:
-    """(H, W, 3) uint8 RGB -> flat float32 RGBA for a dpg raw texture."""
+    """(H, W, 3) uint8 RGB -> flat float32 RGBA for a dpg raw texture; a frame smaller
+    than the preview pane is centred on black (a portrait render between bars)."""
     rgb = arr.astype(np.float32) / 255.0
     H, W = rgb.shape[:2]
+    if (W, H) != (PREV_W, PREV_H) and W <= PREV_W and H <= PREV_H:
+        y0, x0 = (PREV_H - H) // 2, (PREV_W - W) // 2
+        rgba = np.zeros((PREV_H, PREV_W, 4), dtype=np.float32)
+        rgba[:, :, 3] = 1.0
+        rgba[y0:y0 + H, x0:x0 + W, :3] = rgb
+        return rgba.flatten()
     rgba = np.ones((H, W, 4), dtype=np.float32)
     rgba[:, :, :3] = rgb
     return rgba.flatten()
+
+
+def _preview_size(width: int, height: int) -> tuple:
+    """The render's frame scaled to fit the preview pane, its aspect kept (even sides)."""
+    k = min(PREV_W / max(1, width), PREV_H / max(1, height))
+    return (max(2, int(width * k) // 2 * 2), max(2, int(height * k) // 2 * 2))
 
 
 def _set_status(msg: str):
@@ -564,7 +587,7 @@ def _clear_stem_rows():
 # ---------------------------------------------------------------------------
 
 _TRIG_KNOWN_KEYS = {"notes", "audio", "actions", "until", "min_velocity",
-                    "gravity", "threshold", "min_gap",
+                    "gravity", "threshold", "min_gap", "exclude",
                     "track", "score", "events", "snap", "voice"}
 TRIG_SOURCES = ["notes", "track", "audio", "score"]
 SCORE_EVENTS_UI = ["chord_changes", "section_changes", "melody"]
@@ -584,8 +607,8 @@ def _trig_source(spec: dict) -> str:
 
 def _parse_tracks(text: str):
     """"kick, kick-2" -> ["kick", "kick-2"]; one name stays a plain string; digits are indexes."""
-    items = [t.strip() for t in str(text).split(",") if t.strip()]
-    items = [int(t) if t.isdigit() else t for t in items]
+    from core.knob_forms import split_tracks
+    items = [int(t) if t.isdigit() else t for t in split_tracks(text)]
     return items[0] if len(items) == 1 else items
 
 
@@ -616,6 +639,8 @@ def _video_cfg_to_rows(video_cfg: dict) -> list:
             "floor": float(g.get("floor", 0.3)),
             "radius": float(g.get("radius", 0.45)),
             "curve": float(g.get("curve", 2.0)),
+            "exclude": str((spec.get("exclude") or {}).get("trigger", "") or ""),
+            "exclude_win": float((spec.get("exclude") or {}).get("window", 0.04)),
             "_extra": {k: v for k, v in spec.items() if k not in _TRIG_KNOWN_KEYS},
         })
     return rows
@@ -624,9 +649,15 @@ def _video_cfg_to_rows(video_cfg: dict) -> list:
 def _rows_to_video_cfg(rows: list, clip_per_bar: bool, clip_order: str,
                        extra: Optional[dict] = None) -> dict:
     """Editor row dicts -> scene video config (round-trip safe)."""
-    video = dict(extra or {})
-    video["clip_per_bar"] = bool(clip_per_bar)
-    video["clip_order"]   = clip_order
+    extra = dict(extra or {})
+    video = {"clip_per_bar": bool(clip_per_bar)}          # in the order a new key lands
+    if "bars_per_clip" in extra:
+        video["bars_per_clip"] = extra.pop("bars_per_clip")
+    video["clip_order"] = clip_order
+    for k in ("clip_end", "seed"):
+        if k in extra:
+            video[k] = extra.pop(k)
+    video.update(extra)
     triggers = {}
     for r in rows:
         name = (r.get("name") or "").strip()
@@ -668,6 +699,9 @@ def _rows_to_video_cfg(rows: list, clip_per_bar: bool, clip_order: str,
         if r.get("grav_on"):
             spec["gravity"] = {"peak": float(r["peak"]), "floor": float(r["floor"]),
                                "radius": float(r["radius"]), "curve": float(r["curve"])}
+        if str(r.get("exclude", "")).strip():
+            spec["exclude"] = {"trigger": str(r["exclude"]).strip(),
+                               "window": float(r.get("exclude_win", 0.04))}
         triggers[name] = spec
     video["triggers"] = triggers
     return video
@@ -742,7 +776,7 @@ def _add_trigger_row(cfg: Optional[dict] = None) -> None:
            "snap": "auto", "voice": "",
            "threshold": 0.3, "min_gap": 0.05, "actions": "next_clip", "until": "",
            "min_vel": 0, "grav_on": False, "peak": 3.0, "floor": 0.3,
-           "radius": 0.45, "curve": 2.0, "_extra": {}}
+           "radius": 0.45, "curve": 2.0, "exclude": "", "exclude_win": 0.04, "_extra": {}}
     if cfg:
         row.update(cfg)
     row["_rid"] = rid
@@ -759,7 +793,8 @@ def _add_trigger_row(cfg: Optional[dict] = None) -> None:
                 dpg.configure_item(f"trig_{src}_{rid}", show=(src == v))
 
     def _add_track(s, v, u=row):
-        names = [t.strip() for t in u["track"].split(",") if t.strip()]
+        from core.knob_forms import split_tracks
+        names = split_tracks(u["track"])
         if v and v not in names:
             names.append(v)
         u["track"] = ", ".join(names)
@@ -828,6 +863,12 @@ def _add_trigger_row(cfg: Optional[dict] = None) -> None:
                 dpg.add_text(lbl)
                 dpg.add_input_float(default_value=row[key], width=52, step=0,
                                     format="%.2f", callback=_set(key))
+            dpg.add_text("  drop hits near:")
+            dpg.add_input_text(default_value=row["exclude"], width=70, hint="kick",
+                               callback=_set("exclude"))
+            dpg.add_text("within (s)")
+            dpg.add_input_float(default_value=row["exclude_win"], width=52, step=0,
+                                format="%.3f", callback=_set("exclude_win"))
         dpg.add_spacer(height=3)
 
 
@@ -867,17 +908,23 @@ def _shader_choices() -> list:
 
 def _yaml_flow(value) -> str:
     import yaml
-    return yaml.safe_dump(value, default_flow_style=True, allow_unicode=True).strip()
+    return yaml.safe_dump(value, default_flow_style=True, allow_unicode=True,
+                          sort_keys=False).strip()
 
 
-def _layers_to_rows(video_cfg: dict) -> list:
-    """Scene ``layers:`` -> editor row dicts (params YAML keeps what the row has no widget for)."""
+def _layers_to_rows(video_cfg: dict, doc=None) -> list:
+    """Scene ``layers:`` -> editor row dicts (params YAML keeps what the row has no widget for).
+
+    With the scene's ``doc`` (core.scene_doc.SceneDoc) a row's params are the file's own
+    text: its comments, and the anchors other layers share shown as ``*name``."""
     import yaml
     rows = []
-    for spec in video_cfg.get("layers") or []:
+    nodes = doc.layers() if doc is not None else []
+    for i, spec in enumerate(video_cfg.get("layers") or []):
         spec = spec or {}
         params = {k: v for k, v in spec.items() if k not in _LAYER_KEYS}
         op = spec.get("opacity", 1.0)
+        node = nodes[i] if i < len(nodes) else None
         rows.append({
             "source":  spec.get("source", "clips"),
             "enabled": spec.get("enabled", True) is not False,
@@ -885,43 +932,77 @@ def _layers_to_rows(video_cfg: dict) -> list:
             "blend":   spec.get("blend", "normal"),
             "opacity": float(op) if isinstance(op, (int, float)) else 1.0,
             "bars":    _yaml_flow(spec["bars"]) if "bars" in spec else "",
-            "params":  yaml.safe_dump(params, allow_unicode=True, sort_keys=False)
-                       if params else "",
+            "params":  doc.layer_text(i) if node is not None else
+                       yaml.safe_dump(params, allow_unicode=True, sort_keys=False) if params else "",
+            "_node":   node,
         })
     return rows
 
 
-def _rows_to_layers(rows: list) -> list:
-    """Editor rows -> scene ``layers:``; raises ValueError naming the row whose YAML is wrong."""
+def _flow(value):
+    """Plain lists/dicts as flow-style ruamel containers ([[21, 33]] stays on one line)."""
+    from core.scene_doc import flow
+    return flow(value)
+
+
+def _rows_to_layer_items(rows: list, doc=None) -> list:
+    """Editor rows -> one ``(node, base, layer)`` per row, in stack order: the layer the row
+    says now (ruamel types, aliases tied to the anchors they name), the file's node it came
+    from and what it said when loaded (``SceneDoc.set_layers`` patches the difference).
+    Raises ValueError naming the row whose YAML is wrong."""
     import yaml
-    layers = []
-    for i, r in enumerate(rows, 1):
-        spec = {"source": r["source"]}
-        if not r.get("enabled", True):
-            spec["enabled"] = False
-        if r.get("file"):
-            spec["file"] = r["file"]
-        if r.get("blend", "normal") != "normal":
-            spec["blend"] = r["blend"]
-        if abs(float(r.get("opacity", 1.0)) - 1.0) > 1e-6:
-            spec["opacity"] = round(float(r["opacity"]), 3)
-        bars = str(r.get("bars", "")).strip()
-        if bars:
+    from ruamel.yaml.comments import CommentedMap
+
+    from core.scene_doc import SceneDoc, anchors_in
+    doc = doc if doc is not None else SceneDoc()
+    built: dict = {}
+    extra: dict = {}                # anchors the rows' texts define, for the others' aliases
+    pending = list(enumerate(rows, 1))
+    while pending:
+        unresolved = []
+        for i, r in pending:
+            text = str(r.get("params", "")).strip()
             try:
-                spec["bars"] = yaml.safe_load(bars)
-            except yaml.YAMLError as exc:
-                raise ValueError(f"layer {i} ({r['source']}): bars is not valid YAML: {exc}")
-        text = str(r.get("params", "")).strip()
-        if text:
-            try:
-                params = yaml.safe_load(text)
-            except yaml.YAMLError as exc:
+                params = doc.parse_text(text, extra)
+            except KeyError as exc:
+                unresolved.append((i, r, exc))
+                continue
+            except ValueError as exc:
+                raise ValueError(f"layer {i} ({r['source']}): params must be 'key: value' lines") from exc
+            except Exception as exc:          # ruamel's parser and scanner errors
                 raise ValueError(f"layer {i} ({r['source']}): params are not valid YAML: {exc}")
-            if not isinstance(params, dict):
-                raise ValueError(f"layer {i} ({r['source']}): params must be 'key: value' lines")
-            spec.update({k: v for k, v in params.items() if k not in _LAYER_KEYS})
-        layers.append(spec)
-    return layers
+            extra.update(anchors_in(params))
+            spec = CommentedMap([("source", r["source"])])
+            if not r.get("enabled", True):
+                spec["enabled"] = False
+            if r.get("file"):
+                spec["file"] = r["file"]
+            if r.get("blend", "normal") != "normal":
+                spec["blend"] = r["blend"]
+            if abs(float(r.get("opacity", 1.0)) - 1.0) > 1e-6:
+                spec["opacity"] = round(float(r["opacity"]), 3)
+            bars = str(r.get("bars", "")).strip()
+            if bars:
+                try:
+                    spec["bars"] = _flow(yaml.safe_load(bars))
+                except yaml.YAMLError as exc:
+                    raise ValueError(f"layer {i} ({r['source']}): bars is not valid YAML: {exc}")
+            for k, v in params.items():
+                if k not in _LAYER_KEYS:
+                    spec[k] = v
+            built[i] = spec
+        if len(unresolved) == len(pending):
+            i, r, exc = unresolved[0]
+            raise ValueError(f"layer {i} ({r['source']}): no anchor for {exc.args[0]}")
+        pending = [(i, r) for i, r, _ in unresolved]
+    return [(r.get("_node"), r.get("_base"), built[i]) for i, r in enumerate(rows, 1)]
+
+
+def _rows_to_layers(rows: list, doc=None) -> list:
+    """Editor rows -> scene ``layers:`` as plain dicts; raises ValueError naming the row
+    whose YAML is wrong."""
+    from core.scene_doc import plain
+    return [plain(layer) for _, _, layer in _rows_to_layer_items(rows, doc)]
 
 
 def _add_layer_row(cfg: Optional[dict] = None) -> None:
@@ -934,11 +1015,586 @@ def _add_layer_row(cfg: Optional[dict] = None) -> None:
     S.layer_rows.append(row)
 
 
+def _row_params(row: dict) -> dict:
+    """What a layer row's params text says (plain), {} while it does not parse."""
+    from core.scene_doc import SceneDoc, plain
+    try:
+        return plain((S.scene_doc or SceneDoc()).parse_text(str(row.get("params", ""))))
+    except Exception:
+        return {}
+
+
+def _text_with_uniform(text: str, name: str, value) -> str:
+    """A layer's params text with ``name: value`` added at the end of its ``uniforms:``
+    block (the block is made when there is none). Raises ValueError for a one-line
+    ``uniforms: {...}``, which is left for the text editor."""
+    import re
+    lines = str(text or "").rstrip("\n").splitlines() if str(text or "").strip() else []
+    head = next((j for j, ln in enumerate(lines) if re.match(r"^uniforms\s*:", ln)), None)
+    if head is None:
+        return "\n".join(lines + ["uniforms:", f"  {name}: {value}"]) + "\n"
+    if any(re.match(rf"^\s+{re.escape(name)}\s*:", ln) for ln in lines[head + 1:]):
+        raise ValueError("already in the scene")
+    if not re.match(r"^uniforms\s*:\s*(#.*)?$", lines[head]):
+        raise ValueError("uniforms is written on one line: add it in the text")
+    end, indent = head + 1, "  "
+    for j in range(head + 1, len(lines)):
+        ln = lines[j]
+        if ln.strip() and not ln[0].isspace():
+            break
+        if ln.strip():
+            if end == head + 1:
+                indent = ln[:len(ln) - len(ln.lstrip())]
+            end = j + 1
+    lines.insert(end, f"{indent}{name}: {value}")
+    return "\n".join(lines) + "\n"
+
+
+def _add_uniform(row: dict, name: str, value) -> None:
+    try:
+        row["params"] = _text_with_uniform(row.get("params", ""), name, value)
+    except ValueError as exc:
+        _set_status(f"{name}: {exc}")
+        return
+    row["_open_params"] = True
+    _draw_layer_rows()
+
+
+def _draw_uniforms(row: dict) -> None:
+    """The shader's knobs: each uniform, what the scene gives it (or its default) and
+    what it does, from the shader's notes; + puts one in the scene at its default."""
+    from core.shadertoy import uniforms_of
+    try:
+        unis = uniforms_of(row["file"]) if row.get("file") else []
+    except Exception as exc:
+        dpg.add_text(f"     (shader not read: {exc})", color=(200, 120, 120))
+        return
+    if not unis:
+        return
+    given = _row_params(row).get("uniforms") or {}
+    with dpg.tree_node(label=f"     uniforms ({len(unis)}: {len(given)} set)",
+                       default_open=row.get("_open_unis", False), tag=f"layer_unis_{row['_rid']}"):
+        for u in unis:
+            with dpg.group(horizontal=True):
+                name, set_ = u["name"], u["name"] in given
+                dpg.add_button(label="knob", width=40,
+                               callback=lambda s, a, u=(row, ("uniforms", name), u["default"]):
+                                   _open_knob_editor(*u))
+                dpg.add_text(f"{name:<10}", color=(230, 210, 140) if set_ else (150, 150, 150))
+                if set_:
+                    v = given[name]
+                    dpg.add_text(_yaml_flow(v)[:70] if isinstance(v, (dict, list)) else str(v),
+                                 color=(170, 210, 170))
+                else:
+                    dpg.add_button(label="+", width=20,
+                                   callback=lambda s, a, u=(row, name, u["default"]): _add_uniform(*u))
+                    dpg.add_text(f"default {u['default']:g}", color=(110, 110, 110))
+            if u["about"]:
+                dpg.add_text(f"   {u['about']}", wrap=560, color=(120, 120, 140))
+
+
+# ---------------------------------------------------------------------------
+# Knob editor: what in the music moves a number (core/knob_forms.py)
+# ---------------------------------------------------------------------------
+
+def _feature_names() -> list:
+    """The audio features a knob can follow (features_at's keys)."""
+    names = ["centroid", "flux"]
+    try:
+        from core.feature_extractor import AudioFeatureExtractor
+        from core.texture import TEXTURE_NAMES
+        names += [f"subbands.{n}" for n in AudioFeatureExtractor.SUBBAND_RANGES]
+        names += [f"texture.{n}" for n in TEXTURE_NAMES]
+    except Exception:
+        names += ["subbands.bass", "subbands.mid", "subbands.presence"]
+    if S.extractor is not None:
+        names += [f"stems.{n}" for n in getattr(S.extractor, "stems_energy", {}) or {}]
+    return names
+
+
+_TRIGGER_KEYS = {"track", "notes", "audio", "threshold", "min_gap", "score", "events", "snap", "voice"}
+
+
+def _signal_kind(value) -> str:
+    """What a shared value is: a knob, a trigger (who plays), a score, or other."""
+    from core.knob_forms import form_of
+    if isinstance(value, dict) and value and set(value) <= _TRIGGER_KEYS:
+        return "score" if "score" in value and "events" not in value else "trigger"
+    return "knob" if form_of(value) is not None else "other"
+
+
+def _rows_anchors() -> dict:
+    """name -> object for every anchor the layer rows hold now (their texts as edited), the
+    first by stack order; the scene file's where the rows do not parse."""
+    from core.scene_doc import SceneDoc, anchors_in
+    doc = S.scene_doc or SceneDoc()
+    out = dict(anchors_in(doc.data))
+    try:
+        items = _rows_to_layer_items(S.layer_rows, doc)
+    except ValueError:
+        return out
+    found: dict = {}
+    for _, _, layer in items:
+        for name, obj in anchors_in(layer).items():
+            found.setdefault(name, obj)
+    out.update(found)
+    return out
+
+
+def _scene_signals() -> list:
+    """The scene's shared values (its YAML anchors), as the editor shows them: one
+    {name, kind, value, def: (row, path), uses: [(row, path)]} each, in stack order. The
+    first place one appears defines it; every other place uses it."""
+    from core.scene_doc import SceneDoc, _anchor_name, occurrences, plain
+    try:
+        items = _rows_to_layer_items(S.layer_rows, S.scene_doc or SceneDoc())
+    except ValueError:
+        return []
+    sig: dict = {}
+    for row, (_, _, layer) in zip(S.layer_rows, items):
+        for path, obj in occurrences(layer):
+            name = _anchor_name(obj)
+            if not name:
+                continue
+            if name not in sig:
+                sig[name] = {"name": name, "value": plain(obj), "def": (row, path), "uses": []}
+            else:
+                sig[name]["uses"].append((row, path))
+    for v in sig.values():
+        v["kind"] = _signal_kind(v["value"])
+    return list(sig.values())
+
+
+def _where(row: dict, path: tuple) -> str:
+    i = S.layer_rows.index(row) + 1 if row in S.layer_rows else "?"
+    return f"{i}. {row['source']} > " + " > ".join(map(str, path))
+
+
+def _knob_value(row: dict, path: tuple):
+    """(the knob at ``path`` in a row's params as plain, "&name" when the row defines that
+    anchor there, "*name" when it uses one defined elsewhere, else None)."""
+    from core.scene_doc import SceneDoc, _anchor_name, get_path, plain
+    extra = _rows_anchors()
+    node = get_path((S.scene_doc or SceneDoc()).parse_text(str(row.get("params", "")), extra), path)
+    shared = None
+    if node is not None and _anchor_name(node):
+        outside = any(o is node for o in extra.values())
+        shared = ("*" if outside else "&") + _anchor_name(node)
+    return plain(node), shared
+
+
+def _open_knob_editor(row: dict, path: tuple, default=0.0, mode: str = "knob") -> None:
+    """Edit the knob at ``path`` in a layer row (``mode`` trigger / score: only a source,
+    the who-plays or the transcription a signal shares)."""
+    from core.knob_forms import new_state, state_of
+    try:
+        value, shared = _knob_value(row, path)
+    except Exception as exc:
+        _set_status(f"knob: the layer's params do not parse ({exc})")
+        return
+    if mode == "trigger":
+        state = state_of({"hits": value or {"notes": [36]}})
+    elif mode == "score":
+        state = state_of({"harmony": value or {"score": _default_score_path()}})
+    else:
+        state = state_of(value) if value is not None else new_state("constant")
+        if value is None:
+            state["main"] = float(default)
+    link = shared[1:] if shared and shared[0] == "*" else None
+    S.knob_ctx = {"row": row, "path": tuple(path), "state": state, "shared": shared,
+                  "mode": mode, "link": link, "anchor": ""}
+    where = " > ".join(map(str, path))
+    dpg.set_value("knob_title", f"{row['source']} · {where}")
+    if shared and shared[0] == "*":
+        note = (f"this is {shared}, a signal another layer defines: unlink it to give this "
+                f"layer its own")
+    elif shared:
+        note = f"this knob is {shared}: the layers that use *{shared[1:]} follow what you set here"
+    else:
+        note = ""
+    dpg.set_value("knob_shared", note)
+    _knob_draw()
+    dpg.show_item("knob_win")
+    dpg.focus_item("knob_win")
+
+
+def _knob_draw() -> None:
+    if not dpg.does_item_exist("knob_form") or S.knob_ctx is None:
+        return
+    dpg.delete_item("knob_form", children_only=True)
+    ctx = S.knob_ctx
+    if ctx["mode"] == "knob":
+        _draw_knob_link("knob_form", ctx)
+    if not ctx.get("link"):
+        _draw_knob_state("knob_form", ctx["state"], 0, only_source=ctx["mode"] != "knob")
+    _knob_show_yaml()
+
+
+def _draw_knob_link(parent, ctx: dict) -> None:
+    """Use a signal (a knob another place defines) or name this one so others can."""
+    from core.knob_forms import state_of
+    sigs = {v["name"]: v for v in _scene_signals() if v["kind"] == "knob"}
+    own = ctx["shared"][1:] if ctx["shared"] and ctx["shared"][0] == "&" else None
+    others = [n for n in sigs if n != own]
+
+    def use(s, v, ctx=ctx):
+        if v in sigs:
+            ctx["link"] = v
+            ctx["state"] = state_of(sigs[v]["value"])
+            _knob_draw()
+
+    def unlink(s, a, ctx=ctx):
+        ctx["link"] = None
+        _knob_draw()
+
+    with dpg.group(parent=parent, horizontal=True):
+        if ctx.get("link"):
+            dpg.add_text(f"uses the signal *{ctx['link']}", color=(230, 210, 140))
+            dpg.add_button(label="unlink (its own copy)", callback=unlink)
+        else:
+            dpg.add_text("use a signal")
+            dpg.add_combo(others, width=120, callback=use)
+            dpg.add_text("or name this one")
+            dpg.add_input_text(default_value=own or ctx.get("anchor", ""), width=110,
+                               hint="kick", enabled=own is None,
+                               callback=lambda s, v, ctx=ctx: ctx.update({"anchor": v}))
+
+
+def _knob_spec(ctx: dict):
+    """What Apply writes: the knob (or, in trigger/score mode, its source)."""
+    from core.knob_forms import spec_of
+    spec = spec_of(ctx["state"])
+    if ctx["mode"] == "trigger":
+        return spec["hits"]
+    if ctx["mode"] == "score":
+        return spec["harmony"]
+    return spec
+
+
+def _knob_links(st: dict, prefix: tuple, anchors: dict) -> dict:
+    """{path in the knob: anchored object} for the sources tied to a signal."""
+    out = {}
+    src = st.get("source")
+    if isinstance(src, dict) and src.get("link") in anchors:
+        out[prefix + (st["form"],)] = anchors[src["link"]]
+    if st.get("from"):
+        out.update(_knob_links(st["from"], prefix + ("from",), anchors))
+    return out
+
+
+def _knob_show_yaml() -> None:
+    ctx = S.knob_ctx
+    try:
+        text = f"*{ctx['link']}" if ctx.get("link") else _yaml_flow(_knob_spec(ctx))
+    except Exception as exc:
+        text = f"({exc})"
+    dpg.set_value("knob_yaml", text)
+
+
+def _draw_knob_source_link(st: dict, kind: str, pad: str) -> bool:
+    """A source tied to a signal (who plays, the transcription): shows it and an unlink;
+    else a menu of the signals of that kind. True when it is tied (no fields to draw)."""
+    from core.knob_forms import _trigger_state
+    src = st["source"]
+    sigs = {v["name"]: v for v in _scene_signals() if v["kind"] == kind}
+
+    def use(s, v, src=src):
+        if v not in sigs:
+            return
+        value = sigs[v]["value"]
+        if kind == "trigger":
+            src.update(_trigger_state(value))
+        else:
+            src.update({"score": str(value.get("score", "")), "snap": value.get("snap", "auto"),
+                        "keep_snap": "snap" in value,
+                        "extra": {k: x for k, x in value.items() if k not in ("score", "snap")}})
+        src["link"] = v
+        _knob_draw()
+
+    def unlink(s, a, src=src):
+        src.pop("link", None)
+        _knob_draw()
+
+    if src.get("link"):
+        with dpg.group(horizontal=True):
+            dpg.add_text(f"{pad}  from the signal *{src['link']}", color=(230, 210, 140))
+            dpg.add_button(label="unlink", callback=unlink)
+        return True
+    if sigs:
+        with dpg.group(horizontal=True):
+            dpg.add_text(f"{pad}  or from a signal")
+            dpg.add_combo(list(sigs), width=120, callback=use)
+    return False
+
+
+def _draw_knob_state(parent, st: dict, depth: int, only_source: bool = False) -> None:
+    """The widgets for one knob state (and, for ``rate``, its ``from`` knob under it);
+    ``only_source``: just where it comes from (a trigger or score signal)."""
+    from core.knob_forms import FORMS, SHAPING, SNAPS, TRIGGER_KINDS, choices, new_state
+    pad = "    " * depth
+    labels = dict(choices())
+    by_label = {v: k for k, v in labels.items()}
+
+    def upd(d, key):
+        def cb(s, v):
+            d[key] = v
+            _knob_show_yaml()
+        return cb
+
+    def on_form(s, v, st=st):
+        st.update(new_state(by_label[v], like=st))
+        _knob_draw()
+
+    with dpg.group(parent=parent):
+        if st["form"] == "custom":
+            dpg.add_text(f"{pad}(a form the editor does not know: edit it in the text)")
+            return
+        if not only_source:
+            with dpg.group(horizontal=True):
+                dpg.add_text(f"{pad}what in the music")
+                dpg.add_combo(list(labels.values()), default_value=labels[st["form"]], width=440,
+                              callback=on_form)
+        f = FORMS[st["form"]]
+        if "main" in f and not only_source:
+            name, _, kind, about = f["main"]
+            with dpg.group(horizontal=True):
+                dpg.add_text(f"{pad}  {name}")
+                _knob_setting(st, "main", st["main"], kind, about)
+        src = st["source"]
+        tied = (f["source"] in ("trigger", "score") and not only_source
+                and _draw_knob_source_link(st, f["source"], pad))
+        if tied:
+            pass
+        elif f["source"] == "trigger":
+            def on_kind(s, v, src=src):
+                src["kind"] = v
+                _knob_draw()
+            with dpg.group(horizontal=True):
+                dpg.add_text(f"{pad}  from")
+                dpg.add_combo(TRIGGER_KINDS, default_value=src["kind"], width=80, callback=on_kind)
+                if src["kind"] == "track":
+                    def add_track(s, v, src=src):
+                        from core.knob_forms import split_tracks
+                        names = split_tracks(src["track"])
+                        if v and v not in names:
+                            names.append(v)
+                        src["track"] = ", ".join(names)
+                        _knob_draw()
+                    dpg.add_input_text(default_value=src["track"], width=150, hint="kick, kick-2",
+                                       callback=upd(src, "track"))
+                    dpg.add_combo(_midi_track_names(), width=110, callback=add_track)
+                elif src["kind"] == "audio":
+                    dpg.add_input_text(default_value=src["audio"], width=300, hint="stems/snare.wav",
+                                       callback=upd(src, "audio"))
+                elif src["kind"] == "melody":
+                    dpg.add_input_text(default_value=src["score"] or _default_score_path(), width=200,
+                                       hint="input/song/sheetsage", callback=upd(src, "score"))
+                    dpg.add_input_text(default_value=src["voice"], width=70, hint="voice",
+                                       callback=upd(src, "voice"))
+                if src["kind"] != "audio":
+                    dpg.add_text("notes")
+                    dpg.add_input_text(default_value=src["notes"], width=80, hint="36, 38 (all)",
+                                       callback=upd(src, "notes"))
+        elif f["source"] == "score":
+            if not src.get("score"):
+                src["score"] = _default_score_path()
+            with dpg.group(horizontal=True):
+                dpg.add_text(f"{pad}  score")
+                dpg.add_input_text(default_value=src["score"], width=250, hint="input/song/sheetsage",
+                                   callback=upd(src, "score"))
+                dpg.add_text("snap")
+                dpg.add_combo(SNAPS, default_value=src.get("snap", "auto"), width=60,
+                              callback=upd(src, "snap"))
+        elif f["source"] == "feature":
+            def on_feature(s, v, st=st):
+                st["source"] = v
+                _knob_show_yaml()
+            with dpg.group(horizontal=True):
+                dpg.add_text(f"{pad}  feature")
+                feats = _feature_names()
+                dpg.add_combo(feats if st["source"] in feats else [st["source"]] + feats,
+                              default_value=st["source"], width=220, callback=on_feature)
+        if only_source:
+            return
+        for name, default, kind, about in f["params"]:
+            with dpg.group(horizontal=True):
+                dpg.add_text(f"{pad}  {name}")
+                _knob_setting(st["params"], name, st["params"].get(name, default), kind, about)
+        if st["form"] != "constant":
+            with dpg.group(horizontal=True):
+                dpg.add_text(f"{pad}  value = bias + gain x it:")
+                for name, default, kind, _ in SHAPING:
+                    dpg.add_text(name)
+                    _knob_setting(st, name, st.get(name, default), kind, "")
+        if st["form"] == "rate":
+            if st.get("from") is None:
+                def follow(s, a, st=st):
+                    st["from"] = new_state("hits")
+                    _knob_draw()
+                with dpg.group(horizontal=True):
+                    dpg.add_text(f"{pad}  rate x 1 (a steady drift)")
+                    dpg.add_button(label="make the rate follow the music", callback=follow)
+            else:
+                def steady(s, a, st=st):
+                    st["from"] = None
+                    _knob_draw()
+                with dpg.group(horizontal=True):
+                    dpg.add_text(f"{pad}  rate x (what follows):")
+                    dpg.add_button(label="steady instead", callback=steady)
+                _draw_knob_state(parent, st["from"], depth + 1)
+
+
+def _knob_setting(d: dict, key: str, value, kind, about: str) -> None:
+    """One setting's widget: a number, a switch, a word or one of a few."""
+    def cb(s, v):
+        d[key] = v
+        _knob_show_yaml()
+    if isinstance(kind, tuple):
+        w = dpg.add_combo(kind, default_value=str(value), width=110, callback=cb)
+    elif kind == "bool":
+        w = dpg.add_checkbox(default_value=bool(value), callback=cb)
+    elif kind == "int":
+        w = dpg.add_input_int(default_value=int(value), width=90, callback=cb)
+    elif kind == "text":
+        w = dpg.add_input_text(default_value=str(value), width=90, callback=cb)
+    else:
+        w = dpg.add_input_float(default_value=float(value), width=90, step=0, format="%.3f",
+                                callback=cb)
+    if about:
+        dpg.add_text(about, color=(120, 120, 140))
+    return w
+
+
+def _knob_cut_times():
+    segs = S.resolved_segments or []
+    return [float(seg.t0) for seg in segs[1:]] if len(segs) > 1 else None
+
+
+def _knob_span() -> tuple:
+    """The stretch a knob curve covers: what the timeline shows (its zoom), else 16 s
+    around the scrubber."""
+    t = float(dpg.get_value("scrubber") or 0.0)
+    if _full_duration() > 0:
+        v0, vd = _view_window()
+        if vd > 1.0:
+            return v0, v0 + vd
+    return t - 4.0, t + 12.0
+
+
+def btn_knob_curve() -> None:
+    """Draw the knob over the stretch of song the timeline shows."""
+    from core.knob_forms import sample, spec_of
+    if S.knob_ctx is None:
+        return
+    if not S.loaded:
+        _set_status("knob curve: Load Project first (it needs the MIDI, the grid and the audio)")
+        return
+    t = float(dpg.get_value("scrubber") or 0.0)
+    features_at = None
+    if S.extractor is not None:
+        features_at = lambda u: S.extractor.get_features_at_time(u, apply_gate=False)  # as a render
+    t0, t1 = _knob_span()
+    if S.knob_ctx["mode"] != "knob":
+        _set_status("a trigger or a score has no curve: draw the knobs that use it")
+        return
+    try:
+        ts, vs = sample(spec_of(S.knob_ctx["state"]), t0, t1, 600,
+                        notes=S.midi_notes, features_at=features_at, grid=S.grid,
+                        cuts=_knob_cut_times())
+    except Exception as exc:
+        _set_status(f"knob curve: {exc}")
+        return
+    dpg.set_value("knob_series", [list(map(float, ts)), list(map(float, vs))])
+    db = S.grid.downbeats if S.grid is not None and S.grid.downbeats is not None else []
+    bars = [float(d) for d in db if t0 <= d <= t1]
+    dpg.set_value("knob_bars", [bars])
+    dpg.set_value("knob_now", [[t]])
+    dpg.fit_axis_data("knob_x")
+    dpg.fit_axis_data("knob_y")
+    _set_status(f"knob: {vs.min():.3f} .. {vs.max():.3f} between {t0:.1f}s and {t1:.1f}s")
+
+
+def btn_knob_apply() -> None:
+    from core.knob_forms import spec_of
+    from core.scene_doc import SceneDoc, set_knob
+    ctx = S.knob_ctx
+    if ctx is None:
+        return
+    import re
+    row = ctx["row"]
+    anchors = _rows_anchors()
+    anchor = str(ctx.get("anchor", "") or "").strip() or None
+    if anchor and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", anchor):
+        _set_status(f"signal name {anchor!r}: letters, digits, - and _ (a letter first)")
+        return
+    if anchor and anchor in anchors:
+        _set_status(f"there is a signal {anchor!r} already: pick it under 'use a signal'")
+        return
+    if ctx.get("link"):
+        links = {(): anchors[ctx["link"]]} if ctx["link"] in anchors else {}
+        if not links:
+            _set_status(f"no signal *{ctx['link']} any more")
+            return
+        anchor = None
+    elif ctx["mode"] == "knob":
+        links = _knob_links(ctx["state"], (), anchors)
+    else:
+        links = {}
+    try:
+        row["params"] = set_knob(S.scene_doc or SceneDoc(), str(row.get("params", "")),
+                                 ctx["path"], _knob_spec(ctx), extra=anchors, anchor=anchor,
+                                 links=links)
+    except Exception as exc:
+        _set_status(f"knob not set: {exc}")
+        return
+    row["_open_unis"] = True
+    dpg.hide_item("knob_win")
+    S.knob_ctx = None
+    _draw_layer_rows()
+    _set_status("knob set — Save Scene to write it")
+
+
+def _draw_signals() -> None:
+    """The scene's signals: each shared value, what it is, where it is defined and who uses
+    it; edit changes it for all of them."""
+    if not dpg.does_item_exist("signals_panel"):
+        return
+    dpg.delete_item("signals_panel", children_only=True)
+    sigs = _scene_signals()
+    if not sigs:
+        dpg.add_text("   (none yet: name a knob in its editor to share it)", parent="signals_panel",
+                     color=(120, 120, 140))
+        return
+    for v in sigs:
+        row, path = v["def"]
+        with dpg.group(parent="signals_panel"):
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="edit", width=40, enabled=v["kind"] != "other",
+                               callback=lambda s, a, u=(row, path, v["kind"]):
+                                   _open_knob_editor(u[0], u[1], mode=u[2]))
+                dpg.add_text(f"&{v['name']}", color=(230, 210, 140))
+                dpg.add_text(v["kind"], color=(150, 180, 220))
+                dpg.add_text(_yaml_flow(v["value"])[:90], color=(170, 210, 170))
+            uses = "; ".join(_where(r, p) for r, p in v["uses"]) or "nobody else yet"
+            dpg.add_text(f"      defined in {_where(row, path)} · used by {uses}", wrap=1000,
+                         color=(120, 120, 140))
+
+
+def _remember_open_nodes() -> None:
+    for row in S.layer_rows:
+        for key, tag in (("_open_params", f"layer_params_{row['_rid']}"),
+                         ("_open_unis", f"layer_unis_{row['_rid']}")):
+            if dpg.does_item_exist(tag):
+                row[key] = bool(dpg.get_value(tag))
+
+
 def _draw_layer_rows() -> None:
     """(Re)build the layer panel from S.layer_rows — the order on screen is the stack order."""
     if not dpg.does_item_exist("layers_panel"):
         return
+    _remember_open_nodes()
     dpg.delete_item("layers_panel", children_only=True)
+    _draw_signals()
     shaders = _shader_choices()
     n = len(S.layer_rows)
     for i, row in enumerate(S.layer_rows):
@@ -973,9 +1629,12 @@ def _draw_layer_rows() -> None:
                     choices = shaders if row["file"] in shaders or not row["file"] \
                         else [row["file"]] + shaders
                     dpg.add_combo(choices, default_value=row["file"], width=360,
-                                  callback=_set("file"))
+                                  callback=lambda s, v, row=row: (row.update({"file": v}),
+                                                                  _draw_layer_rows()))
+                _draw_uniforms(row)
             lines = max(2, min(14, str(row["params"]).count("\n") + 2))
-            with dpg.tree_node(label="     params (YAML)", default_open=False):
+            with dpg.tree_node(label="     params (YAML)", tag=f"layer_params_{row['_rid']}",
+                               default_open=row.get("_open_params", False)):
                 dpg.add_input_text(default_value=row["params"], multiline=True,
                                    width=560, height=lines * 17, tab_input=True,
                                    callback=_set("params"))
@@ -1005,42 +1664,92 @@ def btn_add_layer() -> None:
     _draw_layer_rows()
 
 
-def _leading_comments(path: str) -> str:
-    """The comment block at the top of a scene file (credits, how to render), kept on save."""
-    try:
-        lines = Path(path).read_text(encoding="utf-8").splitlines()
-    except (FileNotFoundError, UnicodeDecodeError):
-        return ""
-    head = []
-    for ln in lines:
-        if ln.startswith("#") or not ln.strip():
-            head.append(ln)
-        else:
-            break
-    return "\n".join(head).rstrip() + "\n" if any(l.startswith("#") for l in head) else ""
+_VIDEO_EDITOR_KEYS = ("clip_per_bar", "clip_order", "triggers", "layers")
 
+
+def _scene_editor_rows(doc) -> tuple:
+    """The editor's view of a scene: (clip_per_bar, clip_order, the video keys it has no
+    widget for, trigger rows, layer rows). Each layer row keeps its node in the file and
+    what it said (``_base``), so a save patches only what changed."""
+    from core.scene_doc import plain
+    video = doc.plain_video()
+    cpb = bool(video.get("clip_per_bar", True))
+    order = video.get("clip_order", "shuffle")
+    extra = {k: v for k, v in video.items() if k not in _VIDEO_EDITOR_KEYS}
+    layer_rows = _layers_to_rows(video, doc)
+    for row, (_, _, layer) in zip(layer_rows, _rows_to_layer_items(layer_rows, doc)):
+        row["_base"] = plain(layer)
+    return cpb, order, extra, _video_cfg_to_rows(video), layer_rows
+
+
+def _apply_scene_editor(doc, video_base: dict, trig_rows: list, clip_per_bar: bool,
+                        clip_order: str, extra: dict, layer_rows: list) -> dict:
+    """Patch the scene ``doc`` with what the editor's rows changed since ``video_base``
+    (what they said when loaded); returns what they say now. Raises ValueError (the row
+    whose YAML is wrong) before touching the doc."""
+    video = _rows_to_video_cfg(trig_rows, clip_per_bar, clip_order, extra)
+    items = _rows_to_layer_items(layer_rows, doc)
+    doc.apply_video(video_base, video)
+    doc.set_layers(items)
+    return video
+
+
+# video-level keys with a widget of their own (kept in S._scene_extra_video): default, kind
+_SCENE_VIDEO_WIDGETS = {"bars_per_clip": (1, int), "clip_end": ("bounce", str), "seed": (None, int)}
+
+
+def _set_scene_video(key: str, value) -> None:
+    """A video-level widget changed: at its default the key goes (unless the file had it)."""
+    default, kind = _SCENE_VIDEO_WIDGETS[key]
+    if value in ("", None):
+        value = None
+    else:
+        try:
+            value = kind(value)
+        except (TypeError, ValueError):
+            _set_status(f"{key}: {value!r} is not a {kind.__name__}")
+            return
+    if value == default and key not in S._scene_video_base:
+        S._scene_extra_video.pop(key, None)
+    elif value is None:
+        S._scene_extra_video.pop(key, None)
+    else:
+        S._scene_extra_video[key] = value
+
+
+def _show_scene_video_widgets() -> None:
+    ex = S._scene_extra_video
+    for key, tag in (("bars_per_clip", "scene_bpc_input"), ("clip_end", "scene_end_combo"),
+                     ("seed", "scene_seed_input")):
+        if dpg.does_item_exist(tag):
+            v = ex.get(key, _SCENE_VIDEO_WIDGETS[key][0])
+            dpg.set_value(tag, "" if v is None else (str(v) if key == "seed" else v))
 
 
 def btn_scene_to_editor():
-    import yaml
+    from core.scene_doc import SceneDoc
     try:
-        with open(S.scene_path, encoding="utf-8") as f:
-            scene = yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        scene = {}
-    video = scene.get("video", {}) or {}
-    S.scene_clip_per_bar = bool(video.get("clip_per_bar", True))
-    S.scene_clip_order   = video.get("clip_order", "shuffle")
-    S._scene_extra_video = {k: v for k, v in video.items()
-                            if k not in ("clip_per_bar", "clip_order", "triggers", "layers")}
+        S.scene_doc = SceneDoc.load(S.scene_path)
+        cpb, order, extra, trig_cfgs, layer_cfgs = _scene_editor_rows(S.scene_doc)
+    except Exception as exc:                 # a hand-edited scene the editor can't read
+        S.scene_doc = None
+        _set_status(f"Scene não carregada no editor — {exc}")
+        _log(f"Editor: {Path(S.scene_path).name} não carregada: {exc}")
+        return
+    S.scene_clip_per_bar = cpb
+    S.scene_clip_order   = order
+    S._scene_extra_video = extra
     dpg.set_value("scene_cpb_check", S.scene_clip_per_bar)
     dpg.set_value("scene_order_combo", S.scene_clip_order)
     _clear_trigger_rows()
-    for cfg in _video_cfg_to_rows(video):
+    for cfg in trig_cfgs:
         _add_trigger_row(cfg)
     S.layer_rows = []
-    for cfg in _layers_to_rows(video):
+    for cfg in layer_cfgs:
         _add_layer_row(cfg)
+    S._scene_video_base = _rows_to_video_cfg(S.trig_rows, cpb, order, extra)
+    S._scene_extra_video = dict(extra)       # the widgets edit a copy; the base stays
+    _show_scene_video_widgets()
     _draw_layer_rows()
     if dpg.does_item_exist("scene_editor_label"):
         n = len(S.trig_rows)
@@ -1053,29 +1762,21 @@ def btn_scene_to_editor():
 
 
 def btn_editor_to_scene():
-    import yaml
-    video = _rows_to_video_cfg(S.trig_rows, S.scene_clip_per_bar,
-                               S.scene_clip_order, S._scene_extra_video)
+    from core.scene_doc import SceneDoc
+    if S.scene_doc is None:                  # never loaded (or unreadable): start it afresh
+        S.scene_doc, S._scene_video_base = SceneDoc(), {}
     try:
-        layers = _rows_to_layers(S.layer_rows)
+        video = _apply_scene_editor(S.scene_doc, S._scene_video_base, S.trig_rows,
+                                    S.scene_clip_per_bar, S.scene_clip_order,
+                                    S._scene_extra_video, S.layer_rows)
     except ValueError as exc:
         _set_status(f"Scene NÃO salva — {exc}")
         _log(f"Scene não salva: {exc}")
         return
-    if layers:                                   # no layers: the legacy single clips base
-        video["layers"] = layers
-    try:
-        with open(S.scene_path, encoding="utf-8") as f:
-            scene = yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        scene = {}
-    scene["video"] = video
-    header = _leading_comments(S.scene_path)   # the file's credits / how-to survive the rewrite
-    with open(S.scene_path, "w", encoding="utf-8") as f:
-        f.write(header)
-        yaml.dump(scene, f, allow_unicode=True, sort_keys=False)
+    S.scene_doc.save(S.scene_path)           # comments, anchors and layout as they were
     _log(f"Scene salva -> {S.scene_path} ({len(video['triggers'])} triggers, "
-         f"{len(layers)} layers)")
+         f"{len(S.layer_rows)} layers)")
+    btn_scene_to_editor()                    # the rows now point at the saved file
     _set_status(f"Scene salva: {Path(S.scene_path).name}")
     if dpg.does_item_exist("scene_editor_label"):
         dpg.set_value("scene_editor_label",
@@ -1111,6 +1812,9 @@ def _project_dict() -> dict:
             "start_time": S.start_time,
             "stems":      S.render_stems,
             "clip_fit":   S.clip_fit,
+            "turn_wide":  S.clip_turn_wide,
+            "masks":      S.masks_dir,
+            "profile":    S.profile,
         },
         "repaint": {
             "video":    S.repaint_video,
@@ -1173,6 +1877,9 @@ def _apply_project(data: dict):
     S.start_time   = float(render.get("start_time", 0.0))
     S.render_stems = bool(render.get("stems", False))
     S.clip_fit     = render.get("clip_fit", "contain")
+    S.clip_turn_wide = bool(render.get("turn_wide", False))
+    S.masks_dir    = str(render.get("masks", "") or "")
+    S.profile      = bool(render.get("profile", False))
     rp = data.get("repaint") or {}
     S.repaint_video    = rp.get("video", "")
     S.repaint_start    = float(rp.get("start", 0.0))
@@ -1223,6 +1930,8 @@ def _apply_project(data: dict):
     dpg.set_value("sync_input", S.sync_offset_ms)
     for tag, val in (("start_time_input", S.start_time), ("stems_check", S.render_stems),
                      ("clip_fit_combo", S.clip_fit),
+                     ("turn_wide_check", S.clip_turn_wide), ("profile_check", S.profile),
+                     ("masks_label", _masks_label()),
                      ("repaint_video_label", Path(S.repaint_video).name or "(nenhum)"),
                      ("repaint_start_input", S.repaint_start),
                      ("repaint_workflow_combo", S.repaint_workflow),
@@ -1596,8 +2305,10 @@ def _build_deck():
         _set_status("Clips mode: selecione a pasta de clipes antes.")
         return
     folder = Path(S.clips_dir)
-    tdir = folder / ".arc_thumbs"
-    tdir.mkdir(exist_ok=True)
+    import hashlib                           # never inside the user's clip folder
+    tdir = Path("render_output") / ".thumbs" / "deck" / hashlib.sha1(
+        str(folder.resolve()).encode()).hexdigest()[:12]
+    tdir.mkdir(parents=True, exist_ok=True)
     from core.video.clip_library import VIDEO_EXTS
     paths = sorted(p for p in folder.iterdir() if p.suffix.lower() in VIDEO_EXTS)
     _set_status(f"Deck: gerando thumbnails ({len(paths)} clipes)…")
@@ -1695,6 +2406,7 @@ def _clip_preview_frames(start_t: float, n_frames: int) -> list:
     from core.video.layers import build_compositor
 
     video_cfg = _effective_video_cfg()
+    pw, ph = _preview_size(S.width, S.height)     # the render's aspect, letterboxed
     layers = video_cfg.get("layers")
     uses_clips = not layers or any((l or {}).get("source", "clips") == "clips" for l in layers)
     comp = None
@@ -1702,15 +2414,17 @@ def _clip_preview_frames(start_t: float, n_frames: int) -> list:
         if not S.clips_dir:
             raise RuntimeError("Clips mode: this scene uses clips — select a clips folder first.")
         _log(f"Clips preview: loading library from {S.clips_dir}")
-        lib  = ClipLibrary(S.clips_dir, PREV_W, PREV_H, S.fps, cache_size=4)
+        lib  = ClipLibrary(S.clips_dir, pw, ph, S.fps, cache_size=4, fit=S.clip_fit,
+                           turn_wide=S.clip_turn_wide)
         comp = ClipComposer(lib, S.grid, S.midi_notes, video_cfg)
         comp.seek(start_t)
 
     features_at = None
     if S.extractor is not None:
         features_at = lambda t: S.extractor.get_features_at_time(t, apply_gate=False)
-    stack = build_compositor(comp, video_cfg, S.midi_notes, PREV_W, PREV_H,
-                             fps=S.fps, features_at=features_at, grid=S.grid)
+    stack = build_compositor(comp, video_cfg, S.midi_notes, pw, ph,
+                             fps=S.fps, features_at=features_at, grid=S.grid,
+                             masks=S.masks_dir or None)
     if len(stack) > 1:
         _log(f"Preview: {len(stack)} layers")
 
@@ -1847,6 +2561,12 @@ def _build_render_cmd() -> list:
             cmd += ["--stems"]
         if S.clip_fit != "contain":
             cmd += ["--clip-fit", S.clip_fit]
+        if S.clip_turn_wide:
+            cmd += ["--clip-turn-wide"]
+        if S.masks_dir:
+            cmd += ["--masks", S.masks_dir]
+        if S.profile:
+            cmd += ["--profile"]
         cmd += ["--output", _render_output_path()]
         if S.midi_path and S.midi_offset:
             cmd += ["--midi-offset", str(S.midi_offset)]
@@ -1878,6 +2598,55 @@ def _render_output_path() -> str:
     return f"render_output/{song}_{scene}{tail}.mp4"
 
 
+def _bar_beat_to_time(text: str, grid) -> float:
+    """"18.3" (bar 18, beat 3, as the DAW and the timeline count them) -> song seconds."""
+    parts = [p for p in str(text).strip().split(".") if p != ""]
+    if not parts or len(parts) > 2 or not all(p.isdigit() for p in parts):
+        raise ValueError(f"{text!r}: write bar.beat, e.g. 18.3")
+    bar, beat = int(parts[0]), int(parts[1]) if len(parts) > 1 else 1
+    db = getattr(grid, "downbeats", None)
+    if db is None or not len(db):
+        raise ValueError("load the project first (no bars yet)")
+    if not 1 <= bar <= len(db):
+        raise ValueError(f"bar {bar}: the song has bars 1..{len(db)}")
+    t0 = float(db[bar - 1])
+    t1 = float(db[bar]) if bar < len(db) else t0 + float(grid.bar_duration)
+    beats = getattr(grid, "beats", None)
+    inside = [float(b) for b in (beats if beats is not None else []) if t0 - 1e-3 <= b < t1 - 1e-3]
+    if not inside:                                   # no beat markers: split the bar evenly
+        n = max(1, int(round((t1 - t0) / max(1e-6, float(grid.beat_duration)))))
+        inside = [t0 + k * (t1 - t0) / n for k in range(n)]
+    if not 1 <= beat <= len(inside):
+        raise ValueError(f"bar {bar} has beats 1..{len(inside)}")
+    return inside[beat - 1]
+
+
+def _time_to_bar_beat(t: float, grid) -> str:
+    """Song seconds -> "bar.beat" (the beat it falls in)."""
+    db = getattr(grid, "downbeats", None)
+    if db is None or not len(db):
+        return ""
+    i = max(0, int(np.searchsorted(db, t + 1e-3, side="right")) - 1)
+    beats = getattr(grid, "beats", None)
+    t0 = float(db[i])
+    if beats is not None and len(beats):
+        k = int(np.sum((beats >= t0 - 1e-3) & (beats <= t + 1e-3)))
+    else:
+        k = int((t - t0) // max(1e-6, float(grid.beat_duration))) + 1
+    return f"{i + 1}.{max(1, k)}"
+
+
+def _on_start_bar(s, v):
+    try:
+        t = _bar_beat_to_time(v, S.grid)
+    except ValueError as exc:
+        _set_status(f"Início: {exc}")
+        return
+    S.start_time = round(t, 3)
+    dpg.set_value("start_time_input", S.start_time)
+    _set_status(f"Render começa em {S.start_time:.3f}s (compasso {v})")
+
+
 def btn_start_from_scrubber():
     """Start the render at the bar under the scrubber."""
     t = float(dpg.get_value("scrubber") or 0.0)
@@ -1886,6 +2655,8 @@ def btn_start_from_scrubber():
         t = past[-1] if past else float(S.grid.downbeats[0])
     S.start_time = round(t, 3)
     dpg.set_value("start_time_input", S.start_time)
+    if dpg.does_item_exist("start_bar_input"):
+        dpg.set_value("start_bar_input", _time_to_bar_beat(t, S.grid))
     _set_status(f"Render começa em {S.start_time:.3f}s (compasso {_bar_at(t + 1e-3) + 1})")
 
 
@@ -2110,12 +2881,61 @@ def _pick_midi(s, a):
         dpg.set_value("midi_label", Path(p).name)
         _set_status(f"MIDI selecionado: {Path(p).name}")
 
+NEW_SCENE = """# {name}: a new scene. The clips layer is the base (and the cut schedule the cut knobs
+# read); add the layers on top in the editor.
+video:
+  clip_per_bar: true
+  clip_order: shuffle
+  layers:
+    - source: clips
+"""
+
+
+def _new_scene_path(name: str, folder: str = "scenes") -> Path:
+    """scenes/<name>.yaml for a name typed in the GUI (letters, digits, - and _)."""
+    import re
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", str(name).strip()).strip("_")
+    if not stem:
+        raise ValueError("give the scene a name")
+    path = Path(folder) / f"{stem}.yaml"
+    if path.exists():
+        raise ValueError(f"{path.as_posix()} already exists")
+    return path
+
+
+def btn_new_scene():
+    try:
+        path = _new_scene_path(dpg.get_value("new_scene_name"))
+    except ValueError as exc:
+        _set_status(f"New Scene: {exc}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(NEW_SCENE.format(name=path.stem))
+    dpg.hide_item("dlg_new_scene")
+    S.scene_path = path.as_posix()
+    dpg.set_value("scene_label", path.name)
+    btn_scene_to_editor()
+    _set_status(f"Cena nova: {path.as_posix()}")
+
+
 def _pick_scene(s, a):
     p = _first_selection(a)
     if p:
         S.scene_path = p
         dpg.set_value("scene_label", Path(p).name)
         btn_scene_to_editor()   # editor always mirrors the active scene
+
+def _masks_label() -> str:
+    return Path(S.masks_dir).name if S.masks_dir else "(nenhuma — cast e mask: precisam)"
+
+
+def _pick_masks_dir(s, a):
+    p = a.get("file_path_name") or _first_selection(a)
+    if p:
+        S.masks_dir = Path(p).as_posix()
+        dpg.set_value("masks_label", _masks_label())
+
 
 def _pick_clips_dir(s, a):
     p = a.get("file_path_name", "")
@@ -2149,6 +2969,38 @@ def _on_mode_change(s, v):
 # ---------------------------------------------------------------------------
 # Build UI
 # ---------------------------------------------------------------------------
+
+class _ArrangeHost:
+    """What the Arrange window (arc_arrange.py) needs from the studio."""
+
+    def scene_path(self):
+        return S.scene_path
+
+    def grid(self):
+        return S.grid
+
+    def notes(self):
+        return S.midi_notes
+
+    def clips_dir(self):
+        return S.clips_dir
+
+    def duration(self):
+        return _full_duration() if S.loaded else 0.0
+
+    def log(self, msg):
+        _log(msg)
+
+    def status(self, msg):
+        _set_status(msg)
+
+    def reload_editor(self):
+        btn_scene_to_editor()
+        if S.loaded:
+            _load_trigger_events()
+            _resolve_output_lane()
+            _draw_timeline_static()
+
 
 def _build_ui():
     from core.video.layers import LAYER_SOURCES
@@ -2188,6 +3040,9 @@ def _build_ui():
     dpg.add_file_dialog(show=False, directory_selector=True,
                         callback=_pick_clips_dir, tag="dlg_clips",
                         width=620, height=420)
+    dpg.add_file_dialog(show=False, directory_selector=True, default_path="render_output",
+                        callback=_pick_masks_dir, tag="dlg_masks",
+                        width=620, height=420)
 
     with dpg.file_dialog(show=False, callback=_pick_repaint_video, tag="dlg_repaint_video",
                          width=620, height=420):
@@ -2198,6 +3053,43 @@ def _build_ui():
                          width=620, height=420):
         dpg.add_file_extension(".wav"); dpg.add_file_extension(".mp3")
         dpg.add_file_extension(".flac"); dpg.add_file_extension(".*")
+
+    with dpg.window(label="Knob — what in the music moves it", show=False, tag="knob_win",
+                    width=760, height=600, pos=(180, 60), on_close=lambda: setattr(S, "knob_ctx", None)):
+        dpg.add_text("", tag="knob_title", color=(230, 210, 140))
+        dpg.add_text("", tag="knob_shared", color=(220, 160, 100), wrap=740)
+        dpg.add_group(tag="knob_form")
+        dpg.add_separator()
+        dpg.add_text("", tag="knob_yaml", color=(150, 190, 150), wrap=740)
+        with dpg.group(horizontal=True):
+            dpg.add_button(label="Draw curve", width=100, callback=btn_knob_curve)
+            dpg.add_text("over what the timeline shows (zoom it to look closer); the bars and the "
+                         "scrubber as lines", color=(120, 120, 140))
+        with dpg.plot(height=170, width=-1, tag="knob_plot"):
+            dpg.add_plot_axis(dpg.mvXAxis, label="song (s)", tag="knob_x")
+            with dpg.plot_axis(dpg.mvYAxis, tag="knob_y"):
+                dpg.add_line_series([], [], tag="knob_series")
+                dpg.add_inf_line_series([], tag="knob_bars")
+                dpg.add_inf_line_series([], tag="knob_now")
+        with dpg.group(horizontal=True):
+            dpg.add_button(label="Apply", width=90, callback=btn_knob_apply)
+            dpg.add_button(label="Cancel", width=90,
+                           callback=lambda: (dpg.hide_item("knob_win"), setattr(S, "knob_ctx", None)))
+
+    import arc_arrange
+    arc_arrange.build(_ArrangeHost())
+
+    with dpg.window(label="New Scene", modal=True, show=False, tag="dlg_new_scene",
+                    width=360, height=90, pos=(300, 120), no_resize=True):
+        with dpg.group(horizontal=True):
+            dpg.add_text("scenes/")
+            dpg.add_input_text(tag="new_scene_name", width=180, hint="me_diz_ideia",
+                               on_enter=True, callback=lambda s, a: btn_new_scene())
+            dpg.add_text(".yaml")
+        with dpg.group(horizontal=True):
+            dpg.add_button(label="Create", width=80, callback=btn_new_scene)
+            dpg.add_button(label="Cancel", width=80,
+                           callback=lambda: dpg.hide_item("dlg_new_scene"))
 
     with dpg.item_handler_registry(tag="timeline_handler"):
         dpg.add_item_clicked_handler(callback=on_timeline_click)
@@ -2244,6 +3136,8 @@ def _build_ui():
         with dpg.group(horizontal=True):
             dpg.add_button(label="Scene", width=55,
                            callback=lambda: dpg.show_item("dlg_scene"))
+            dpg.add_button(label="New…", width=45,
+                           callback=lambda: dpg.show_item("dlg_new_scene"))
             dpg.add_text(Path(S.scene_path).name, tag="scene_label")
 
         dpg.add_separator()
@@ -2345,7 +3239,7 @@ def _build_ui():
                     dpg.add_combo(["854x480", "1280x720", "1920x1080",
                                    "2560x1440", "3840x2160",
                                    "480x480", "720x720", "1080x1080",
-                                   "2160x2160"],
+                                   "2160x2160", "480x854", "720x1280", "1080x1920"],
                                   default_value="", tag="res_preset",
                                   width=110,
                                   callback=lambda s, v: (
@@ -2385,15 +3279,33 @@ def _build_ui():
                         dpg.add_input_float(default_value=S.start_time, width=80, step=0,
                                             format="%.3f", tag="start_time_input",
                                             callback=lambda s, v: setattr(S, "start_time", float(v)))
+                        dpg.add_text("= bar.beat")
+                        dpg.add_input_text(default_value="", width=50, hint="18.3",
+                                           tag="start_bar_input", on_enter=True,
+                                           callback=_on_start_bar)
                         dpg.add_button(label="<- scrubber", width=85,
                                        callback=btn_start_from_scrubber)
+                    with dpg.group(horizontal=True):
                         dpg.add_text("Fit:")
                         dpg.add_combo(["contain", "cover"], default_value=S.clip_fit,
                                       width=75, tag="clip_fit_combo",
                                       callback=lambda s, v: setattr(S, "clip_fit", v))
+                        dpg.add_checkbox(label="turn wide", tag="turn_wide_check",
+                                         default_value=S.clip_turn_wide,
+                                         callback=lambda s, v: setattr(S, "clip_turn_wide", v))
                         dpg.add_checkbox(label="Stems (features)", tag="stems_check",
                                          default_value=S.render_stems,
                                          callback=lambda s, v: setattr(S, "render_stems", v))
+                        dpg.add_checkbox(label="profile", tag="profile_check",
+                                         default_value=S.profile,
+                                         callback=lambda s, v: setattr(S, "profile", v))
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label="Masks…", width=60,
+                                       callback=lambda: dpg.show_item("dlg_masks"))
+                        dpg.add_button(label="x", width=20,
+                                       callback=lambda: (setattr(S, "masks_dir", ""),
+                                                         dpg.set_value("masks_label", _masks_label())))
+                        dpg.add_text(_masks_label(), tag="masks_label")
                 dpg.add_button(label="Render Full",
                                callback=btn_render_full, width=120)
 
@@ -2419,6 +3331,19 @@ def _build_ui():
                               tag="scene_order_combo",
                               default_value=S.scene_clip_order,
                               callback=lambda s, v: setattr(S, "scene_clip_order", v))
+            with dpg.group(horizontal=True):
+                dpg.add_text("a new clip every")
+                dpg.add_input_int(default_value=1, width=80, min_value=1, min_clamped=True,
+                                  tag="scene_bpc_input",
+                                  callback=lambda s, v: _set_scene_video("bars_per_clip", v))
+                dpg.add_text("bar(s) · a clip shorter than its turn:")
+                dpg.add_combo(["bounce", "loop"], default_value="bounce", width=80,
+                              tag="scene_end_combo",
+                              callback=lambda s, v: _set_scene_video("clip_end", v))
+                dpg.add_text("seed:")
+                dpg.add_input_text(default_value="", width=90, hint="(project's)",
+                                   tag="scene_seed_input", decimal=True,
+                                   callback=lambda s, v: _set_scene_video("seed", v))
             with dpg.group(tag="triggers_panel"):
                 pass
 
@@ -2434,6 +3359,13 @@ def _build_ui():
                 dpg.add_combo(list(LAYER_SOURCES), default_value="shadertoy", width=120,
                               tag="new_layer_source")
                 dpg.add_button(label="+ Add Layer", width=100, callback=btn_add_layer)
+                dpg.add_button(label="Arrange...", width=100,
+                               callback=lambda: __import__("arc_arrange").open_window())
+            with dpg.tree_node(label="signals — values the layers share (kick, organ, the chords)",
+                               default_open=True):
+                dpg.add_button(label="refresh", width=70, callback=lambda: _draw_signals())
+                with dpg.group(tag="signals_panel"):
+                    pass
             with dpg.group(tag="layers_panel"):
                 pass
 
@@ -2595,6 +3527,8 @@ def main():
     dpg.set_primary_window("main_win", True)
 
     while dpg.is_dearpygui_running():
+        __import__("arc_arrange").tick()       # the Arrange window's thumbnails and redraws
+
         # Deck thumbnails ready -> load textures (must run on main thread)
         if S._deck_ready:
             S._deck_ready = False
