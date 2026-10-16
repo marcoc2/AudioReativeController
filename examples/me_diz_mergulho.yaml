@@ -1,0 +1,28 @@
+# Me diz, a dive into the Mandelbrot set (core/video/deep_zoom.py) alone, full frame: from
+# the whole set down to its seahorse valley, nearly a tenfold zoom a bar, eleven decades in
+# twelve bars (perturbation: a 64-bit reference orbit on the CPU, the pixels' differences on
+# the GPU). The kick jolts the dive forward; the chord colours the palette, which flows.
+# (This scene starts the dive where the 18.3 render starts; for a whole song, from: 0 and
+# fewer decades a bar.) The strip at the bottom (source: meters) shows the kick and the
+# chords. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips                 # the cut schedule (the set covers the picture)
+    - source: deep_zoom
+      from: 35.993
+      decades: 0.9
+      depth: 13
+      iterations: 3000
+      hue: {harmony: &score {score: input/me_diz/sheetsage, snap: beat}, glide: 0.8}
+      flow: {rate: 0.0, base: 0.3}
+      kick: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}
+    - source: meters
+      title: Mandelbrot deep zoom
+      subtitle: 0.9 decades a bar · the kick jolts it forward · chord colours
+      lanes:
+        - {label: "kick -> jolt (x 0.2 decades)", knob: *kick, range: [0, 1]}
+        - {label: chord -> palette, chords: *score}

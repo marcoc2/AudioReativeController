@@ -1,0 +1,36 @@
+# Me diz, a MilkDrop-style feedback (shaders/shadertoy/milkdrop_arc) alone over the clips:
+# the last frame comes back zoomed, turned and warped, the picture fed in on top; the
+# vortex sits on the biggest figure (figure: largest, its centre), the bass zooms it, the
+# presence band warps it, each chord change turns it a new way, each cut flips the mirror
+# echo. The strip at the bottom (source: meters) shows the drivers. Commands: see
+# me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/milkdrop_arc
+      uniforms:
+        u_cx: {figure: largest, part: x, glide: 0.3}
+        u_cy: {figure: largest, part: y, glide: 0.3}
+        u_zoom: &zoom {relative: subbands.bass, window: 6, gain: 0.025, bias: 0.995}
+        u_zoomexp: 1.5
+        u_rot: &rot {random_on: &score {score: input/me_diz/sheetsage, snap: beat}, ease: 0.5, gain: 0.06, bias: -0.03}
+        u_warp: &warp {relative: subbands.presence, window: 6, gain: 0.8}
+        u_decay: 0.95
+        u_feed: 0.15
+        u_echo: 0.3
+        u_flip: &flip {cut: count}
+        u_dark: 0.15
+    - source: meters
+      title: MilkDrop feedback
+      subtitle: vortex on the biggest figure · bass zooms · chord turns
+      lanes:
+        - {label: relative bass -> zoom, knob: *zoom}
+        - {label: relative presence -> warp, knob: *warp}
+        - {label: chord, chords: *score}
+        - {label: random on the chord -> rotation, knob: *rot}
+        - {label: cut count -> echo flip, knob: *flip, range: window}

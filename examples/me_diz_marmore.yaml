@@ -1,0 +1,29 @@
+# Me diz, marble (shaders/shadertoy/domain_warp_arc.glsl) alone over the clips: the
+# picture pulled through two layers of domain-warped noise (Quilez), the bass bending the
+# first, the presence band (2-6 kHz) the second, each against its own last six seconds;
+# the kick jumps the noise to a new place and the chord tints it. The strip at the bottom
+# (source: meters) shows the drivers. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/domain_warp_arc.glsl
+      uniforms:
+        u_warp1: &bass {relative: subbands.bass, window: 6, gain: 1.5}
+        u_warp2: &presence {relative: subbands.presence, window: 6, gain: 1.0}
+        u_jump: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.5}
+        u_tint: 0.6
+        u_hue: {harmony: &score {score: input/me_diz/sheetsage, snap: beat}, glide: 0.8}
+        u_scale: 2.5
+    - source: meters
+      title: marble (domain warp)
+      subtitle: bass -> first warp · presence -> second · kick jumps it
+      lanes:
+        - {label: relative bass -> warp 1, knob: *bass}
+        - {label: relative presence -> warp 2, knob: *presence}
+        - {label: kick -> jump, knob: *kick, range: [0, 1]}
+        - {label: chord -> tint, chords: *score}

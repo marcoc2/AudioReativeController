@@ -50,6 +50,20 @@ act     punch     the object jumps out of the paper on each hit, bigger, with a 
                   pixels/s at 720p, in a new direction on every clip — ``direction``, in
                   degrees (0 right, 90 down), sets the first, each clip turns it by the
                   golden angle)
+        sing      the object rises and falls with its instrument's notes: higher notes lift it
+                  (amount: pixels at 720p for the span low..high, default 60; low/high: the
+                  MIDI pitches at the bottom and top, 48 and 84; glide: seconds to slide to a
+                  note, 0.12), settling back to its place ``fade`` s after a note ends
+        clock     the object moves only while its instrument plays: between notes it freezes
+                  as it was last seen playing (or as the shot began), stuck over the picture
+                  that keeps going under it (hold: the shortest a note counts for, 0.1 s)
+        scope     an oscilloscope round the outline: a lit line ``gap`` px out from the object,
+                  pushed in and out by a wave made of the notes sounding, each going round
+                  the object with as many lobes as its pitch asks (an octave up doubles them,
+                  a fifth makes them 1.5 times as many), so a chord interferes into a
+                  Lissajous-like wobble (amount: the wave's height in pixels at 720p, 14;
+                  width: the line, 3; gap: 12; speed: how fast it turns, radians/s, 2;
+                  color: pitch | chord | [r, g, b]); the line dies ``fade`` s after the notes
 envelope  seconds a hit takes to die away (default by act)
 color     [r, g, b] | chord (the chord's hue, needs harmony:) | pitch (the note's hue)
 
@@ -67,11 +81,12 @@ import numpy as np
 
 from core.segment.mask_track import MaskTrack
 
-ACTS = ("punch", "shake", "tint", "glow", "presence", "rings", "echo", "carry", "wake")
+ACTS = ("punch", "shake", "tint", "glow", "presence", "rings", "echo", "carry", "wake", "sing", "clock",
+        "scope")
 RANKS = {"largest": 0, "second": 1, "third": 2, "fourth": 3}
 PLACES = {"leftmost": (1, 1), "rightmost": (1, -1), "topmost": (2, 1), "bottommost": (2, -1)}
 ENVELOPE = {"punch": 0.25, "shake": 0.15, "tint": 0.4, "glow": 0.3, "presence": 0.0,
-            "rings": 0.0, "echo": 0.0, "carry": 0.0, "wake": 0.0}
+            "rings": 0.0, "echo": 0.0, "carry": 0.0, "wake": 0.0, "sing": 0.0, "clock": 0.0, "scope": 0.0}
 FLAT = (28, 24, 34)                      # a silhouette's colour, for presence
 MAX_RINGS = 32                           # rings out at once, per role
 MAX_GHOSTS = 16                          # ghosts kept, per role
@@ -193,6 +208,43 @@ void main(){
 # the object's distance field (at the track's size) stretched as cv2.resize INTER_LINEAR
 # does, and the rings riding it, outside the object only: each ring mixes its colour in
 # (not added: on white paper an added colour would vanish)
+MAX_WAVES = 4
+
+_SCOPE_FS = """
+#version 330
+out vec4 f_color;
+uniform sampler2D u_src, u_m, u_dist;
+uniform vec2 u_size; uniform float u_scale;
+uniform vec2 u_c; uniform float u_gap, u_thick;
+uniform int u_n;
+uniform vec4 u_wave[%d];            // lobes, height, phase
+uniform vec3 u_col;
+float at(vec2 q){
+    ivec2 n = textureSize(u_dist, 0);
+    vec2 s = clamp((q + 0.5) * vec2(n) / u_size - 0.5, vec2(0.0), vec2(n - 1));
+    ivec2 i0 = ivec2(floor(s)), i1 = min(i0 + 1, n - 1);
+    vec2 f = s - vec2(i0);
+    float a = texelFetch(u_dist, i0, 0).r, b = texelFetch(u_dist, ivec2(i1.x, i0.y), 0).r;
+    float c = texelFetch(u_dist, ivec2(i0.x, i1.y), 0).r, d = texelFetch(u_dist, i1, 0).r;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+void main(){
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    vec3 v = floor(texelFetch(u_src, p, 0).rgb * 255.0 + 0.5);
+    if (texelFetch(u_m, p, 0).r < 0.5){
+        vec2 q = floor(gl_FragCoord.xy);
+        float d = at(q) * u_scale;
+        float th = atan(q.y - u_c.y, q.x - u_c.x);
+        float w = 0.0;
+        for (int i = 0; i < u_n; i++) w += u_wave[i].y * sin(u_wave[i].x * th + u_wave[i].z);
+        float x = (d - u_gap - w) / u_thick;
+        float a = exp(-x * x);
+        v = v * (1.0 - a) + u_col * a;
+    }
+    f_color = vec4(floor(clamp(v + 0.5, 0.0, 255.0)) / 255.0, 1.0);
+}
+""" % MAX_WAVES
+
 _RINGS_FS = """
 #version 330
 out vec4 f_color;
@@ -331,33 +383,37 @@ class _Role:
             raise ValueError(f"cast role {index}: act {self.act!r} (use one of {ACTS})")
         if "plays" not in spec:
             raise ValueError(f"cast role {index}: plays: names its instrument ({{track: kick}})")
-        if self.act in ("punch", "shake", "rings", "echo", "carry", "wake") and self.who == "background":
+        if self.act in ("punch", "shake", "rings", "echo", "carry", "wake", "sing", "clock",
+                        "scope") and self.who == "background":
             raise ValueError(f"cast role {index}: the background cannot {self.act}")
         events = _layer_events(spec["plays"], notes, onset_loader, grid)
         self.events = events
         self.times = np.array([e.time for e in events], float)
         self.env = EnvelopeOpacity(self.times, float(spec.get("envelope", ENVELOPE[self.act]) or 1e-3))
         default = {"punch": 0.12, "shake": 10.0, "tint": 0.7, "glow": 1.0, "presence": 1.0,
-                   "rings": 1.0, "echo": 0.6, "carry": 1.0, "wake": 0.85}[self.act]
+                   "rings": 1.0, "echo": 0.6, "carry": 1.0, "wake": 0.85, "sing": 60.0,
+                   "clock": 1.0, "scope": 14.0}[self.act]
         self.amount = float(spec.get("amount", default))
-        if self.act == "shake":
+        if self.act in ("shake", "sing", "scope"):
             self.amount *= scale
-        self.width = float(spec.get("width", 3 if self.act == "rings" else 8)) * scale
-        hold = spec.get("hold", {"carry": 4.0, "wake": "note"}.get(self.act, 2.0))
+        self.width = float(spec.get("width", 3 if self.act in ("rings", "scope") else 8)) * scale
+        self.gap = float(spec.get("gap", 12)) * scale
+        hold = spec.get("hold", {"carry": 4.0, "wake": "note", "clock": 0.1}.get(self.act, 2.0))
         if self.act == "wake":
             self._wake_spans(hold, grid, index)
             hold = 0.0
         self.hold = float(hold)
         self.fade = max(1e-3, float(spec.get("fade", 0.4 if self.act == "carry" else 0.3)))
         self.shadow = float(spec.get("shadow", 0.35))
-        self.speed = float(spec.get("speed", 300)) * scale
+        self.speed = float(spec.get("speed", 2.0)) if self.act == "scope" else float(spec.get("speed", 300)) * scale
         self.life = max(1e-3, float(spec.get("life", 1.0)))
         self.every = self._period(spec.get("every", None if self.act == "wake" else 0.08), grid, index)
         self._origin = float(grid.start_offset) if grid is not None and isinstance(spec.get("every"), str) else 0.0
         self._stamp = None                   # wake: the grid step last stamped
         self._was_on = False
         self.trail = float(spec.get("trail", 3.0))
-        colour = {"glow": [255, 220, 120], "rings": "pitch", "echo": None, "wake": None}.get(self.act, [255, 60, 60])
+        colour = {"glow": [255, 220, 120], "rings": "pitch", "echo": None, "wake": None,
+                  "scope": "pitch"}.get(self.act, [255, 60, 60])
         self.color = spec.get("color", colour)
         self.ghosts: List[dict] = []         # echo: what it has left behind
         self._spare: List[tuple] = []        # echo: GPU textures of ghosts gone, for new ones
@@ -380,6 +436,10 @@ class _Role:
             self._chords = _layer_events(h, notes, onset_loader, grid)
             self._chord_times = np.array([e.time for e in self._chords], float)
         self._seed = 1000 + index
+        self.low, self.high = float(spec.get("low", 48)), float(spec.get("high", 84))
+        self.glide = max(0.0, float(spec.get("glide", 0.12)))
+        self._lift = None                    # sing: where it is now, -1..1
+        self.frozen: Optional[dict] = None   # clock: the object as last seen playing
 
     def _wake_spans(self, hold, grid, index: int) -> None:
         """Wake: when it is on, as (start, end) per hit; ``ends`` a running max, so whether
@@ -450,6 +510,57 @@ class _Role:
             self._moved = self._moved + self.shift * dt * np.array([np.cos(ang), np.sin(ang)])
             step = tuple(int(v) for v in np.round(self._moved) - before)
         return on, decay, fresh, step
+
+    def _sounding(self, t: float) -> Optional[int]:
+        """The note sounding at ``t`` (the latest started, if it has not ended), or None."""
+        i = self.last_hit(t)
+        if i is None:
+            return None
+        e = self.events[i]
+        return i if t - e.time < max(float(getattr(e, "duration", 0.0) or 0.0), self.hold) else None
+
+    def singing(self, t: float) -> float:
+        """Sing: how far up the object is at ``t``, -1..1 of ``amount`` / 2 (gliding there)."""
+        i = self.last_hit(t)
+        target = 0.0
+        if i is not None:
+            e = self.events[i]
+            if t - e.time < max(float(getattr(e, "duration", 0.0) or 0.0), 0.05) + self.fade:
+                target = float(np.clip((e.pitch - self.low) / max(1.0, self.high - self.low), 0, 1)) * 2 - 1
+        if self._lift is None or self._last_t is None or t < self._last_t or self.glide <= 0:
+            self._lift = target
+        else:
+            self._lift += (target - self._lift) * (1 - np.exp(-(t - self._last_t) / self.glide))
+        self._last_t = t
+        return float(self._lift)
+
+    def scope(self, t: float) -> List[tuple]:
+        """Scope: the waves at ``t``, one per note sounding (or dying away): (lobes, height,
+        phase), at most MAX_WAVES, the loudest first."""
+        lo = int(np.searchsorted(self.times, t - 30.0, side="left"))
+        hi = int(np.searchsorted(self.times, t, side="right"))
+        out = []
+        for e in self.events[lo:hi]:
+            age = t - e.time
+            dur = max(float(getattr(e, "duration", 0.0) or 0.0), 0.05)
+            k = 1.0 if age < dur else 1.0 - (age - dur) / self.fade
+            if k <= 0.0:
+                continue
+            pitch = int(getattr(e, "pitch", 60))
+            lobes = float(np.clip(np.round(6.0 * 2.0 ** ((pitch - 60) / 12.0)), 2, 24))
+            h = self.amount * getattr(e, "velocity", 100) / 127.0 * k
+            out.append((lobes, h, self.speed * t * (1.0 + 0.1 * (pitch % 12)), pitch))
+        out.sort(key=lambda w: -w[1])
+        return out[:MAX_WAVES]
+
+    def clocking(self, t: float, shot: int) -> bool:
+        """Clock: whether the object is frozen at ``t`` (its instrument is quiet); a cut or a
+        jump back in time lets the old frozen picture go."""
+        if (self._shot is not None and shot != self._shot) or (self._last_t is not None and t < self._last_t):
+            self._drop(self.frozen)
+            self.frozen = None
+        self._shot, self._last_t = shot, t
+        return self._sounding(t) is None
 
     def colour(self, t: float, pitch: Optional[int] = None) -> np.ndarray:
         if self.color == "pitch":
@@ -688,6 +799,17 @@ class CastLayer:
         if role.act == "presence":
             p = role.presence(t)
             return None if p >= 1.0 else ("presence", {"p": p})
+        if role.act == "scope":
+            waves = role.scope(t)
+            if not waves:
+                return None
+            return "scope", {"waves": waves, "c": centre(), "col": role.colour(t, waves[0][3]), "role": role}
+        if role.act == "sing":
+            lift = role.singing(t)
+            if abs(lift) < 1e-3:
+                return None
+            return "paste", {"M": np.float32([[1, 0, 0], [0, 1, -0.5 * role.amount * lift]]),
+                             "shadow": 0.25 * abs(lift)}
         e = role.env(t)
         if e <= 0.0:
             return None
@@ -746,6 +868,20 @@ class CastLayer:
                 x = (d - np.float32(r)) / np.float32(thick)
                 k = np.minimum(np.float32(1.0), np.float32(k) * np.exp(-x * x))[..., None]
                 res = np.where(away[..., None], res * (1.0 - k) + c[None, None, :] * k, res)
+            return np.clip(res + 0.5, 0, 255).astype(np.uint8)
+        if kind == "scope":
+            d = self._distance(sel)
+            if d.shape != (self.H, self.W):
+                d = cv2.resize(d, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
+            d = d * np.float32(self.H / sel.shape[0])
+            yy, xx = np.mgrid[0:self.H, 0:self.W].astype(np.float32)
+            th = np.arctan2(yy - np.float32(a["c"][1]), xx - np.float32(a["c"][0]))
+            w = np.zeros_like(d)
+            for lobes, h, ph, _ in a["waves"]:
+                w += np.float32(h) * np.sin(np.float32(lobes) * th + np.float32(ph))
+            x = (d - np.float32(role.gap) - w) / np.float32(role.width)
+            k = np.where(m, np.float32(0.0), np.exp(-x * x))[..., None]
+            res = res * (1.0 - k) + np.asarray(a["col"], np.float32)[None, None, :] * k
             return np.clip(res + 0.5, 0, 255).astype(np.uint8)
         if kind == "echo":
             am = cv2.GaussianBlur(m.astype(np.float32), (0, 0), 0.8)
@@ -815,6 +951,18 @@ class CastLayer:
                         "u_dist": g.small(self._distance(sel), "cast_dist")}, fs=_RINGS_FS,
                         u_size=(float(self.W), float(self.H)), u_scale=float(np.float32(self.H / sel.shape[0])),
                         u_n=len(a["rings"]), u_ring=ring, u_col=col)
+            return Frame(g, tex=tex)
+        if kind == "scope":
+            waves = np.zeros((MAX_WAVES, 4), np.float32)
+            for n, (lobes, h, ph, _) in enumerate(a["waves"]):
+                waves[n, :3] = lobes, h, ph
+            role = a["role"]
+            tex = g.run("cast_scope", g.texture(), {"u_src": src, "u_m": m,
+                        "u_dist": g.small(self._distance(sel), "cast_dist")}, fs=_SCOPE_FS,
+                        u_size=(float(self.W), float(self.H)), u_scale=float(np.float32(self.H / sel.shape[0])),
+                        u_c=(float(a["c"][0]), float(a["c"][1])), u_gap=float(np.float32(role.gap)),
+                        u_thick=float(np.float32(role.width)), u_n=len(a["waves"]), u_wave=waves,
+                        u_col=tuple(float(c) for c in a["col"]))
             return Frame(g, tex=tex)
         if kind == "echo":
             role = a["role"]
@@ -935,6 +1083,10 @@ class CastLayer:
             if role.act == "carry":
                 out = self._carry_gpu(g, role, out, None if sel is None else mask(sel), t, shot)
                 continue
+            if role.act == "clock":
+                role._shot_now = shot
+                out = self._clock_gpu(g, role, out, None if sel is None else mask(sel), t)
+                continue
             if sel is None:
                 continue
 
@@ -965,6 +1117,36 @@ class CastLayer:
                 role.snap = {"shot": shot, "side": "cpu", "data": (out.copy(), m)}
         return res
 
+    def _clock(self, role: _Role, out: np.ndarray, sel: Optional[np.ndarray], t: float,
+               shot: int) -> np.ndarray:
+        """Clock: while its instrument is quiet the object stays as last seen playing (or as
+        the shot began); while it plays, that picture is renewed (``sel`` None: not in view)."""
+        frozen = role.clocking(t, shot)
+        if frozen and role.frozen is not None:
+            img, m = role.frozen["data"]
+            return self._paste(out, img, m, IDENTITY, 0.0)
+        if sel is not None:
+            m = self._mask(sel)
+            if m.any():
+                role.frozen = {"side": "cpu", "data": (out.copy(), m)}
+        return out
+
+    def _clock_gpu(self, g, role: _Role, out, m, t: float):
+        """``_clock`` on the GPU (``m`` None: the object is not in this frame)."""
+        from core.video.gpu_compose import Frame
+        frozen = role.clocking(t, role._shot_now)
+        kept = role.frozen
+        if frozen and kept is not None and kept["side"] == "gpu" and kept["data"][2] is g:
+            img, km, _ = kept["data"]
+            return Frame(g, tex=self._paste_gpu(g, out.tex(), img, km, IDENTITY, 0.0))
+        if m is not None:
+            data = kept["data"] if kept is not None and kept["side"] == "gpu" and kept["data"][2] is g \
+                else role.spare_for(g)
+            g.copy(out.tex(), data[0])
+            g.copy(m, data[1])
+            role.frozen = {"side": "gpu", "data": data}
+        return out
+
     def process(self, frame: np.ndarray, t: float) -> np.ndarray:
         i = self.track.frame_at(t)
         if i is None:
@@ -976,7 +1158,9 @@ class CastLayer:
             ids = self._cast(role.who, i)
             sel = None if ids is not None and not ids else \
                 (labels == 0) if ids is None else np.isin(labels, ids)
-            if role.act == "carry":
+            if role.act == "clock":
+                out = self._clock(role, out, None if sel is None or not self._mask(sel).any() else sel, t, shot)
+            elif role.act == "carry":
                 out = self._carry(role, out, sel, t, shot)
             elif sel is not None:            # else nobody plays that role in this shot
                 out = self._play(role, out, sel, t, shot)

@@ -1,0 +1,30 @@
+# Me diz, the Nebulabrot (core/video/nebulabrot.py) alone, full frame: the orbits that escape
+# the Mandelbrot set, added up into a nebula, one colour per orbit length; it builds up
+# frame after frame. Each channel's light follows a band against its recent average: the
+# bass lights the broad red glow, the mids the green, the presence the fine blue filaments.
+# The set turns slowly and breathes in and out over four bars. The strip at the bottom
+# (source: meters) shows the three bands. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips                 # the cut schedule (the nebula covers the picture)
+    - source: nebulabrot
+      caps: [40, 250, 1500]
+      samples: 1.0
+      memory: 0.94
+      red: &red {relative: subbands.bass, window: 6, gain: 0.9}
+      green: &green {relative: subbands.mid, window: 6, gain: 0.8}
+      blue: &blue {relative: subbands.presence, window: 6, gain: 1.0}
+      turn: {rate: 0.0, base: 0.03}
+      zoom: &zoom {lfo: sine, period: 4/1, gain: 0.25, bias: 0.95}
+    - source: meters
+      title: Nebulabrot
+      subtitle: bass -> red · mids -> green · presence -> blue
+      lanes:
+        - {label: relative bass -> red (short orbits), knob: *red, color: [255, 90, 90]}
+        - {label: relative mids -> green, knob: *green, color: [110, 235, 110]}
+        - {label: relative presence -> blue (long orbits), knob: *blue, color: [110, 160, 255]}
+        - {label: lfo sine (4 bars) -> zoom, knob: *zoom, range: [0.95, 1.2]}

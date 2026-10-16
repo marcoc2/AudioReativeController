@@ -1,0 +1,27 @@
+# Me diz, the flame lens (core/video/flame_lens.py) alone over the clips: the picture seen
+# through fractal-flame variations, each worn by a voice: the snare swirls it, each organ
+# note blows a bubble into it, and the kick spins the lens; between the hits the picture
+# is left plain, so the lens shows only where the music puts it.
+# The strip at the bottom (source: meters) shows the three drivers. Commands: see
+# me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: flame_lens
+      variations:
+        swirl: {hits: {track: drums (midi), notes: [38]}, envelope: 0.5, amount: 1.0}
+        bubble: {hits: {track: organ}, envelope: 0.6, amount: 1.0}
+      turn: {rate: 1.5, base: 0.15, from: {hits: {track: drums (midi), notes: [36]}, envelope: 0.4}}
+      zoom: 1.3
+    - source: meters
+      title: flame lens
+      subtitle: snare -> swirl · organ -> bubble · kick -> spin
+      lanes:
+        - {label: snare -> swirl, knob: {hits: {track: drums (midi), notes: [38]}, envelope: 0.5}, range: [0, 1]}
+        - {label: organ, roll: {track: organ}}
+        - {label: organ note -> bubble, knob: {hits: {track: organ}, envelope: 0.6}, range: [0, 1]}
+        - {label: kick -> spin burst, knob: {hits: {track: drums (midi), notes: [36]}, envelope: 0.4}, range: [0, 1]}

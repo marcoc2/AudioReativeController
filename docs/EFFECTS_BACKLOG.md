@@ -285,6 +285,9 @@ O papel toca com `plays`, que é um trigger comum (`track`, `notes`, `audio`, `s
 | `echo` | fantasmas enquanto a nota soa, rastro proporcional à duração | `esfolado_melodia` |
 | `carry` | atravessa o corte como adesivo até a próxima batida | `esfolado_colagem` |
 | `wake` | rastro temporal: onde a figura passou fica e se apaga | `esfolado_rastro*` |
+| `sing` | sobe e desce com a melodia, voltando ao lugar entre as frases | `me_diz_canto` |
+| `clock` | só anda enquanto o instrumento toca; congela entre as notas | `me_diz_canto` |
+| `scope` | osciloscópio no contorno: as notas que soam viram ondas em volta | `me_diz_scope` |
 
 Detalhes do `wake`:
 - **`hold`**: quanto tempo o rastro fica ligado. `note` = enquanto a nota soa; `bar` = até o fim do compasso; um número = segundos.
@@ -333,68 +336,76 @@ ligado à música por `uniforms:`, sem Python novo. Depois vira camada própria,
 
 ### 25. A base: como a música vira número
 - [x] Knob `chord:` → `core/video/layers.py`. É o acorde que soa agora: `root`, `tone` (terça, quinta…), `size`, `mode` (maior/menor/sus) e `tension`, com `glide`.
+- [x] Knob `groove:` → `layers.py`. É a levada do compasso como número: o bit k acende quando a semicolcheia k tem batida (`ago: 1` dá o compasso anterior, `part: steps` o tamanho).
 - [x] Knob `cut:` → `layers.py` + `ClipComposer.cut_times`. É o corte de clipe, conhecido **antes** de chegar: `count`, `since`, `until` e `phase`.
-- [ ] `channel: mask` no shadertoy: a máscara do SAM2 (ou o campo de distância dela) como textura do shader.
-- [ ] **Intensidade relativa.** Hoje cada banda é medida contra o máximo da música, o que deixa a estrofe parada e satura o refrão. Medir contra a média recente, com ataque rápido e soltura lenta, como faz o `audioLevels.js` do Butterchurn. Somar "presença" (atividade sustentada) e "intensidade" (a construção lenta da música), como no Synesthesia.
-- [ ] **Envelope ADSR com note-off.** Hoje o `EnvelopeOpacity` só decai a partir do ataque. O envelope deveria segurar enquanto a nota soa e soltar no fim dela, com a velocity escalando o pico, como o Trigger CHOP do TouchDesigner.
-- [ ] **Antecipação.** O render é offline: um efeito pode começar antes da batida, como o pré-corte ou a tensão no último tempo. O `cut: until` já abre esse caminho para os cortes.
-- [ ] **Moduladores em qualquer parâmetro**, não só nos `uniforms:` do shadertoy. Exemplos: `max_rotate: {tri: 2b}` e `hue_shift: {random_on: {track: snare}, ease: 0.1}`. Modelos: os osciladores em batidas do parseq e o `syn_RandomOnBeat` do Synesthesia.
+- [x] `channel: mask` / `mask_distance` no shadertoy → `core/shadertoy.py` + `ShadertoyLayer` (`examples/me_diz_julia.yaml`): as figuras, ou a distância com sinal até o contorno, como textura do shader.
+- [x] **Intensidade relativa** → knob `relative:` (`examples/me_diz_envelopes.yaml`): uma banda contra a própria média recente (1 = como de costume), com ataque e soltura; a estrofe se mexe e o refrão não satura. ("Presença" e "intensidade" do Synesthesia ficam por fazer.)
+- [x] **Envelope ADSR com note-off** → knob `adsr:` (`examples/me_diz_envelopes.yaml`): sobe, cai até o sustain enquanto a nota soa e solta no fim dela; a velocity escala o pico. E `voice:` dá a k-ésima nota soando (altura e nível).
+- [x] **Antecipação** → knob `before:` (sobe de 0 a 1 antes de cada batida) e `cut: until` (o tempo até o próximo corte).
+- [~] **Moduladores** → knobs `lfo:` (seno, triângulo, serra, quadrada, pulso; período em valor de nota, na grade) e `random_on:`, e `gain`/`bias` em todo knob (`examples/me_diz_lfo.yaml`). Valem nos `uniforms:` do shadertoy e nos parâmetros que aceitam knob (`chord_color`, `flame_lens`, `time_map`, `pixel_sort`, `nebulabrot`, `deep_zoom`, `flythrough`, os `weights:` do `flame`). Falta: qualquer parâmetro de qualquer camada (cada camada lê os seus na criação).
 
 ### 26. O corte como gesto (transições)
 Hoje o corte é seco. O knob `cut:` dá ao efeito o tempo até o corte. Para misturar dois
 clipes, o efeito precisa segurar o último quadro do plano que sai, como o `carry` faz.
-- [ ] **Padrões do MilkDrop:** o clipe novo entra por uma frente que varre num ângulo, sai do centro ou vem em manchas de plasma. Fórmula: `clamp(p*(1+b)/b - (1-t)/b, 0, 1)` (Butterchurn `blendPattern.js`, MIT). O avanço segue o último tempo antes do corte, e a bateria escolhe o padrão. Variante ARC: o campo é a distância às figuras, então elas trocam primeiro e o mundo depois. É mais geral que o wipe pela silhueta do item 24.
-- [ ] **Portal Menger:** o último quadro vira uma face de Menger, e a cada batida abre mais um nível de buracos por onde o clipe novo aparece.
-- [ ] **Wipe pelas curvas de nível de um fractal** (Julia ou Lyapunov), com o `c` vindo do acorde do corte.
-- [ ] **Droste como transição:** o clipe novo mora na cópia interna da espiral, e o corte cai quando a câmera chega nela.
-- [ ] **Datamosh:** os pixels do plano velho são arrastados pelo movimento do novo, até a caixa "limpar" a imagem. O fluxo ótico é calculado na CPU (OpenCV DIS) e guardado por clipe; o tamanho do bloco vem da velocity. Dá muito trabalho e também muito resultado.
+- [x] **Padrões do MilkDrop** → `core/video/transition.py` (`source: transition`, `examples/me_diz_transicao.yaml`; padrões `sweep`, `radial`, `iris`, `plasma` e `figures`; o plano velho fica parado durante a troca): o clipe novo entra por uma frente que varre num ângulo, sai do centro ou vem em manchas de plasma. Fórmula: `clamp(p*(1+b)/b - (1-t)/b, 0, 1)` (Butterchurn `blendPattern.js`, MIT). O avanço segue o último tempo antes do corte, e a bateria escolhe o padrão. Variante ARC: o campo é a distância às figuras, então elas trocam primeiro e o mundo depois. É mais geral que o wipe pela silhueta do item 24.
+- [x] **Portal Menger** → padrão `menger` da `transition` (`examples/me_diz_portais.yaml`): os buracos do tapete abrem nível por nível, os maiores primeiro.
+- [x] **Wipe pelas curvas de nível de um Julia** → padrão `julia` da `transition` (`examples/me_diz_portais.yaml`; um `c` novo por corte, ainda não o do acorde).
+- [~] **Droste como transição** → padrão `spiral` da `transition` (`examples/me_diz_espiral.yaml`): o plano novo entra pelos braços de uma espiral logarítmica. A versão inteira (o clipe novo dentro da cópia interna antes do corte) precisa do compositor entregar o próximo clipe antes da hora.
+- [x] **Datamosh** → `core/video/datamosh.py` (`source: datamosh`, `examples/me_diz_datamosh.yaml`; CPU): no corte, os pixels do plano velho são arrastados pelo fluxo ótico (OpenCV DIS) do novo, em macroblocos, até `length` ou a batida de `until`.
 
 ### 27. A harmonia como cor e forma
-- [ ] **Paleta pelo acorde** (pós-efeito): a luminância do quadro passa por uma rampa feita das notas do acorde. A qualidade define luz e saturação: maior mais claro, saturado e amarelo; menor mais escuro e azul (Palmer et al., PNAS 2013). A rampa troca em um tempo. Usar a cor do baixo no fundo e a do acorde nas figuras, via `mask:`.
-- [ ] **Newton/Nova cujas raízes são as notas do acorde**, nos ângulos da roda de 12. Numa troca de acorde as raízes deslizam e as bordas se retrançam. Cada bacia ganha a cor da sua nota. Variante: cada bacia mostra o clipe girado (um caleidoscópio do acorde).
-- [ ] **KIFS 3D com simetria pelo acorde:** icosaédrica para maior, octaédrica para menor, tetraédrica para dim/aug. A tônica gira as dobras e o kick infla a escala.
-- [ ] **Orbit traps harmônicos** (um include GLSL para todo fractal, inclusive `mandelbulb` e `mandelbox`): tônica, terça e quinta em três canais de trap, e uma nota da melodia acende uma quarta.
-- [ ] **Notas como luzes dentro do fractal:** cada nota é um ponto de trap brilhante, com velocity e duração (névoa por iteração e "fake lights" do Mandelbulber). A partitura vira luz dentro do objeto.
-- [ ] **Julia quaterniônico:** o acorde move `c` e a melodia percorre a fatia 4D.
+- [x] **Paleta pelo acorde** → `core/video/chord_color.py` (`source: chord_color`, `examples/me_diz_paleta.yaml`): a luminância do quadro passa por uma rampa feita das notas do acorde. A qualidade define luz e saturação: maior mais claro, saturado e amarelo; menor mais escuro e azul (Palmer et al., PNAS 2013). A rampa troca em um tempo. Usar a cor do baixo no fundo e a do acorde nas figuras, via `mask:`.
+- [x] **Newton cujas raízes são as notas do acorde** → `shaders/shadertoy/newton_acorde_arc.glsl` (`examples/me_diz_newton.yaml`; Nova fica para depois), nos ângulos da roda de 12. Numa troca de acorde as raízes deslizam e as bordas se retrançam. Cada bacia ganha a cor da sua nota. Variante: cada bacia mostra o clipe girado (um caleidoscópio do acorde).
+- [x] **KIFS 3D com simetria pelo acorde** → `shaders/shadertoy/kifs_acorde_arc.glsl` (`examples/me_diz_kifs.yaml`; os orbit traps já pintam com tônica, terça e quinta): icosaédrica para maior, octaédrica para menor, tetraédrica para dim/aug. A tônica gira as dobras e o kick infla a escala.
+- [~] **Orbit traps harmônicos**: feitos no KIFS (tônica, terça e quinta) e no Julia 4D; falta virar um include GLSL comum, inclusive para `mandelbulb` e `mandelbox`.
+- [x] **Notas como luzes dentro do fractal** → `u_p0..3`/`u_l0..3` do `kifs_acorde_arc.glsl` + knob `voice:` (`examples/me_diz_luzes.yaml`): cada nota do órgão é uma luz no espaço do cristal (ângulo pela roda das quintas, altura pela oitava) e ilumina as dobras perto dela enquanto soa.
+- [x] **Julia quaterniônico** → `shaders/shadertoy/julia4d_arc.glsl` (`examples/me_diz_julia4d.yaml`): o acorde move `c`, a melodia percorre a fatia 4D, o kick faz a superfície ferver.
 
 ### 28. A bateria como estrutura
-- [ ] **Lyapunov:** a sequência A/B é a bateria do compasso em semicolcheias (bumbo = A, caixa = B). Cada levada tem a sua paisagem, e uma virada a muda. Num compasso de outro tamanho a sequência muda (Deserto: 5/4 → 6/4).
-- [ ] **Fractal 3D híbrido:** os 16 passos do compasso escolhem a fórmula de cada iteração (bumbo = dobra Mandelbox, caixa = bulb, hi-hat = dobra KIFS). Cada levada vira uma "espécie".
+- [x] **Lyapunov** → `shaders/shadertoy/lyapunov_bateria_arc.glsl` + knob `groove` (`examples/me_diz_lyapunov.yaml`): a sequência A/B é a bateria do compasso em semicolcheias (bumbo = A, caixa = B). Cada levada tem a sua paisagem, e uma virada a muda. Num compasso de outro tamanho a sequência muda (Deserto: 5/4 → 6/4).
+- [x] **Fractal 3D híbrido** → `shaders/shadertoy/hibrido_arc.glsl` (`examples/me_diz_hibrido.yaml`): cada iteração olha uma semicolcheia: bumbo = dobra Mandelbox, caixa = dobra octaédrica, prato = dobra tetraédrica com giro, nada = Menger. Cada levada vira uma espécie, derretendo de um compasso para o outro.
 
 ### 29. O fractal deformando o clipe
-- [ ] **Variações do flame como lente sobre o vídeo:** swirl, bubble, spherical e outras, cada peso vindo de um stem. Reaproveita `core/flame.py`.
-- [ ] **Droste:** o quadro contém a si mesmo numa espiral, com uma volta por compasso, o que dá um loop perfeito. A cópia interna fica na caixa da figura.
-- [ ] **Julia com orbit trap feita da figura** (o campo de distância da máscara) ou do próprio quadro: o personagem se repete em todas as escalas.
-- [ ] **MRCM, a "copiadora":** um IFS cujo atrator é feito de cópias do clipe. Cada trilha MIDI é uma lente, e a batida reforça a cópia dela.
-- [ ] **Ladrilhamento hiperbólico {p,q}** (Escher, *Circle Limit*): `p` vem do numerador do compasso e `q` do tamanho do acorde, com um ladrilho de translação por tempo.
-- [ ] **Kleinianos / Indra's Pearls:** o clipe dentro de cada pérola, com a melodia movendo `µ`.
-- [ ] **Domain warp** (fbm∘fbm∘fbm do iq) como deslocamento do vídeo: baixo no primeiro estágio, voz no segundo.
-- [ ] **Modulação cruzada** (`modulate`/`modulateHue` da Hydra): uma imagem entorta a outra. Por exemplo, o clipe que entra entorta o que sai no último tempo.
-- [ ] **Campo de warp do MilkDrop:** zoom por raio, rotação por ângulo e turbulência, com o centro no centróide da figura principal (o vórtice segue quem canta). Hoje o `feedback` é só um zoom global.
-- [ ] **Fractal 3D com o clipe como textura:** projeção triplanar, ou o UV vindo da última iteração. Com a máscara, as figuras viram estátuas repetidas na superfície.
+- [x] **Variações do flame como lente sobre o vídeo** → `core/video/flame_lens.py` (`source: flame_lens`, `examples/me_diz_lente.yaml`): swirl, bubble, spherical e outras, cada peso vindo de um stem. Reaproveita `core/flame.py`.
+- [x] **Droste** → `shaders/shadertoy/droste_arc.glsl` (`examples/me_diz_droste.yaml`): o quadro contém a si mesmo na espiral de Escher, um nível por compasso.
+- [x] **Julia com orbit trap feita da figura** → `shaders/shadertoy/julia_figuras_arc.glsl` (`examples/me_diz_julia.yaml`): as figuras se repetem pelos filamentos do Julia; o acorde move `c`.
+- [x] **MRCM, a "copiadora"** → `shaders/shadertoy/copiadora_arc` (`examples/me_diz_copiadora.yaml`): quatro lentes, cada uma de um instrumento.
+- [x] **Ladrilhamento hiperbólico {p,q}** → `shaders/shadertoy/hiperbolico_arc.glsl` (`examples/me_diz_hiperbolico.yaml`): `q` pelo tamanho do acorde, um ladrilho por tempo.
+- [x] **Pérolas de Indra** → `shaders/shadertoy/perolas_arc.glsl` (`examples/me_diz_perolas.yaml`): a gaxeta apoloniana 2D por inversões (não a fatia de Maskit), o clipe dentro de cada pérola, a melodia na força da inversão.
+- [x] **Domain warp** → `shaders/shadertoy/domain_warp_arc.glsl` (`examples/me_diz_marmore.yaml`): grave e presença relativos nos dois estágios.
+- [~] **Modulação cruzada** → `shaders/shadertoy/fluxo_cromatico_arc.glsl` (`examples/me_diz_fluxo.yaml`): o modulateHue (as cores empurram a imagem, acumulando). "O clipe que entra entorta o que sai" precisa do próximo clipe antes do corte.
+- [x] **Campo de warp do MilkDrop** → `shaders/shadertoy/milkdrop_arc` + knob `figure:` (`examples/me_diz_milkdrop.yaml`): o vórtice segue a maior figura; eco espelhado que troca a cada corte.
+- [x] **Fractal 3D com o clipe como textura** → `u_video` do `kifs_acorde_arc.glsl` (`examples/me_diz_kifs_video.yaml`): projeção triplanar.
 
 ### 30. Mundos de fundo (atrás das figuras, com `mask: outside`)
-- [ ] **Star Nest** (Kali): nuvens volumétricas. É quase só o `.glsl`, com licença MIT a confirmar.
-- [ ] **Fatiador:** um plano corta o fractal uma vez por compasso, como uma tomografia.
-- [ ] **"Fases" do Marble Marcher:** o fractal muda de forma a cada corte (`cut: count`), e as animações senoidais andam presas ao compasso.
-- [ ] **Voo por waypoints:** pseudo-Kleiniano ou Amazing Surf, um waypoint por compasso e um galho novo a cada corte.
-- [ ] **Bolhas apolonianas:** o kick infla a inversão e as notas acendem as cascas. Combina com o `soap_bubble.glsl`.
-- [ ] **Nebulabrot pelos stems** (baixo, bateria e voz em três tetos de iteração): reaproveita o caminho de histograma do flame.
-- [ ] **Zoom profundo ao longo da música inteira** (perturbação): uma década a cada N compassos, chegando a um minibrot no refrão.
-- [ ] **Gray-Scott** semeado pelo quadro: o acorde salta (f, k) entre manchas, vermes e labirintos.
-- [ ] **Melhorias no flame:** um xform por trilha MIDI e a estimativa de densidade do flam3.
-- [ ] **Desfoque de movimento e profundidade de campo por sub-quadros** em qualquer fractal da GPU.
+- [x] **Nebulosa (kaliset)** → `shaders/shadertoy/nebulosa_arc.glsl` (`examples/me_diz_nebulosa.yaml`; escrita do zero a partir da fórmula de Kali).
+- [x] **Fatiador** → `u_slice`/`u_tilt` do `kifs_acorde_arc.glsl` (`examples/me_diz_fatiador.yaml`).
+- [x] **"Fases"** → `shaders/shadertoy/fases_arc.glsl` (`examples/me_diz_fases.yaml`): seis formas, uma nova a cada corte.
+- [x] **Voo** → `core/video/flythrough.py` (`source: flythrough`, `examples/me_diz_voo.yaml`): pseudo-kleiniano; a câmera (numpy, o mesmo DE) anda um passo por compasso e se guia pelos corredores; outro galho a cada corte.
+- [x] **Bolhas apolonianas** → `shaders/shadertoy/bolhas_arc.glsl` (`examples/me_diz_bolhas.yaml`): o kick infla, a melodia acende as cascas da sua classe de nota.
+- [x] **Nebulabrot** → `core/video/nebulabrot.py` (`source: nebulabrot`, `examples/me_diz_nebulabrot.yaml`; compute shader): grave, médios e presença relativos nos três canais.
+- [x] **Zoom profundo** → `core/video/deep_zoom.py` (`source: deep_zoom`, `examples/me_diz_mergulho.yaml`): perturbação (referência float64 na CPU, diferenças float32 na GPU, rebase de Zhuoran) até ~1e-13. Escolher o caminho para cair em marcos nas seções fica por fazer.
+- [x] **Gray-Scott** → `shaders/shadertoy/reacao_arc` (`examples/me_diz_reacao.yaml`): quatro passos por quadro, semeado pelas bordas do quadro; o modo do acorde escolhe o regime.
+- [x] **Melhorias no flame** → `weights:` (um knob por xform: `examples/me_diz_chama.yaml`) e `estimator:` (a estimativa de densidade do flam3, GPU: `examples/me_diz_chama_suave.yaml`).
+- [~] **Desfoque de movimento por subquadros** → `subframes:`/`shutter:` em qualquer camada shadertoy (`examples/me_diz_desfoque.yaml`). Profundidade de campo fica por fazer.
+
+Também desta rodada, fora da lista original:
+- [x] **Figuras no cenário fractal** → `shaders/shadertoy/cenario_arc.glsl` (`examples/me_diz_cenario.yaml`): as
+  figuras viram um recorte em pé dentro do pseudo-kleiniano, escondidas pelo que passa na frente e com a sombra
+  do fractal. (A composição com profundidade real, via um modelo de profundidade, fica por fazer: pede um modelo
+  novo e um job na GPU.)
+- [x] **Nova** → `u_nova`/`u_bass` do `newton_acorde_arc.glsl` (`examples/me_diz_nova.yaml`).
 
 ### 31. Pós-efeitos musicais
-- [ ] **Mapa de deslocamento no tempo** (Time Machine TOP do TouchDesigner): cada pixel lê um quadro passado escolhido por um mapa (distância à figura, luminância ou ruído), com o atraso em valores de nota. Inclui o split RGB no tempo: R agora, G uma colcheia atrás, B uma semínima atrás.
-- [ ] **Bloom musical** (blur1/2/3 do MilkDrop): a batida baixa o limiar e sobe o ganho, e o acorde tinge o brilho.
-- [ ] **Pixel sorting:** o rastro cresce enquanto a nota soa e derrete no note-off, com o limiar seguindo a tensão do acorde.
+- [x] **Mapa de deslocamento no tempo** → `core/video/time_map.py` (`source: time_map`, `examples/me_diz_tempo.yaml`; CPU): figuras, luminância ou ruído; `rgb: true` para o split no tempo.
+- [x] **Bloom musical** → `shaders/shadertoy/bloom_arc` (`examples/me_diz_bloom.yaml`).
+- [x] **Pixel sorting** → `core/video/pixel_sort.py` (`source: pixel_sort`, `examples/me_diz_pixelsort.yaml`; CPU): o envelope do órgão abre o limiar; a direção troca a cada corte.
 
 Novos atos do elenco, pelo item 24:
-- [ ] `clock`: a figura só anda enquanto o instrumento dela toca e congela nas pausas (como o `syn_BassTime` do Synesthesia, mas com o MIDI exato).
-- [ ] `sing`: a figura sobe e desce com a melodia, deslizando no legato.
-- [ ] `scope`: o contorno vira um osciloscópio, com ondas sintetizadas das notas MIDI. Um acorde dá interferência no estilo Lissajous.
-- [ ] Reação-difusão crescendo dentro da figura: cada nota semeia um ponto dentro da máscara.
+- [x] `clock` → `core/video/cast.py` (`examples/me_diz_canto.yaml`): a figura congela entre as notas do seu instrumento.
+- [x] `sing` → `core/video/cast.py` (`examples/me_diz_canto.yaml`): sobe e desce com a melodia.
+- [x] `scope` → `core/video/cast.py` (`examples/me_diz_scope.yaml`): uma linha em volta do contorno, empurrada pelas ondas das notas que soam.
+- [~] Reação-difusão dentro da figura → `reacao_arc` com `mask: inside` (`examples/me_diz_reacao_figuras.yaml`): cresce das linhas da própria figura; cada nota do órgão semeia de novo nas bordas (não num ponto sorteado dentro dela).
 
 ---
 
@@ -417,11 +428,10 @@ Novos atos do elenco, pelo item 24:
 
 21 máscaras → 22 mask: → 23 cast (feitos) → 24 stutter primeiro
 
-25 knobs chord + cut (feitos) → 27 paleta pelo acorde (pós, muda tudo de uma vez)
-                             → 26 transições no corte (padrões MilkDrop + variante pelas figuras)
-                             → 29 lente de variações do flame (reaproveita o flame)
-                             → 27 KIFS pelo acorde + orbit traps harmônicos
-25 intensidade relativa + ADSR  (melhora todos os efeitos que já existem)
+25–31 (pesquisa de out/2026): quase tudo feito, um render de cada em examples/me_diz_*.yaml.
+Pendentes: moduladores em qualquer parâmetro · include de orbit traps · profundidade de campo ·
+modelo de profundidade real · transições que veem o próximo clipe antes do corte (Droste inteiro,
+modulação cruzada) · deep zoom guiado pelas seções.
 ```
 
 A ordem cede à próxima música: se o clipe da vez for **Deserto de lama**,

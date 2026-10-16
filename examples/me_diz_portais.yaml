@@ -1,0 +1,22 @@
+# Me diz, fractal portals on the cut (core/video/transition.py, patterns menger and julia)
+# alone over the clips: at every clip cut the new shot opens through the holes of a Menger
+# carpet, then through a Julia set, the old shot frozen behind, over a whole bar. The strip
+# at the bottom (source: meters) marks the cuts in red and shows the shot's phase.
+# Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: transition
+      pattern: [menger, julia]
+      length: 1/1
+      soft: 0.3
+    - source: meters
+      title: fractal portals on the cut
+      subtitle: Menger carpet, then Julia set, one per cut, a bar long
+      lanes:
+        - {label: drums, roll: {track: drums (midi), notes: [36, 38, 42, 46, 51]}}
+        - {label: "shot phase (0 at the cut, 1 at the next)", knob: {cut: phase}, range: [0, 1]}

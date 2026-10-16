@@ -1,0 +1,28 @@
+# Me diz, the figures standing in a fractal hall (shaders/shadertoy/cenario_arc.glsl) alone,
+# full frame: the world replaced by Knighty's pseudo-Kleinian space; the figures of each
+# shot (the mask track) become a paper cut-out standing in it, the fractal behind them all
+# round, casting its soft shadows on them. The camera walks up the hall a step a bar and
+# back; the kick throws the cut-out forward; the chord colours the stone. The strip at the
+# bottom (source: meters) shows the drivers. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/cenario_arc.glsl
+      uniforms:
+        u_depth: 0.5
+        u_kick: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}
+        u_dolly: &dolly {bar: {step: 1, morph: 1.2}}
+        u_hue: {harmony: &score {score: input/me_diz/sheetsage, snap: beat}, glide: 0.8}
+        u_shadow: 0.8
+    - source: meters
+      title: figures in a fractal hall
+      subtitle: a step up the hall each bar · kick throws the cut-out forward
+      lanes:
+        - {label: kick -> cut-out forward, knob: *kick, range: [0, 1]}
+        - {label: bar -> camera walk, knob: *dolly, range: window}
+        - {label: chord -> colour, chords: *score}

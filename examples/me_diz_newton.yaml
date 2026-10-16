@@ -1,0 +1,36 @@
+# Me diz, the chord's Newton fractal (shaders/shadertoy/newton_acorde_arc.glsl) alone,
+# full frame: the roots of the polynomial are the chord's notes round the circle, so each
+# chord draws its own basins (three notes, three colours; four, four); the clip shows
+# through the basins (u_video), the kick relaxes the iteration and the snare spins the
+# plane. The strip at the bottom (source: meters) shows the drivers. Commands: see
+# me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/newton_acorde_arc.glsl
+      channel0: frame
+      uniforms:
+        u_t0: &t0 {chord: &score {score: input/me_diz/sheetsage, snap: beat}, part: tone, tone: 0, glide: 0.5}
+        u_t1: {chord: *score, part: tone, tone: 1, glide: 0.5}
+        u_t2: {chord: *score, part: tone, tone: 2, glide: 0.5}
+        u_t3: {chord: *score, part: tone, tone: 3, glide: 0.5}
+        u_size: &size {chord: *score, part: size}
+        u_relax: 1.0
+        u_kick: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}
+        u_spin: {rate: 1.2, base: 0.05, from: &snare {hits: {track: drums (midi), notes: [38]}, envelope: 0.4}}
+        u_zoom: 1.0
+        u_video: 0.55
+    - source: meters
+      title: chord Newton fractal
+      subtitle: chord notes = roots · kick relaxes · snare spins
+      lanes:
+        - {label: chord, chords: *score}
+        - {label: chord size -> number of roots, knob: *size, range: [2, 5]}
+        - {label: first chord note -> root 0, knob: *t0, range: [0, 11]}
+        - {label: kick -> relax, knob: *kick, range: [0, 1]}
+        - {label: snare -> spin burst, knob: *snare, range: [0, 1]}

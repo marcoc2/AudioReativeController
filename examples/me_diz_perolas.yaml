@@ -1,0 +1,29 @@
+# Me diz, Indra's pearls (shaders/shadertoy/perolas_arc.glsl) alone over the clips: the
+# picture mirrored in a packing of circles (the Apollonian gasket, by inversions), its
+# scale following the organ's latest note (higher: smaller pearls; this stretch has no
+# sung melody), the kick swelling them, the chord tinting them. The strip at the bottom
+# (source: meters) shows the organ and the drivers. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/perolas_arc.glsl
+      uniforms:
+        u_s: &pitch {pitch: {track: organ}, low: 62, high: 80, glide: 0.25, gain: 0.35, bias: 1.05}
+        u_kick: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}
+        u_depth: 9
+        u_zoom: 0.9
+        u_hue: {harmony: &score {score: input/me_diz/sheetsage, snap: beat}, glide: 0.8}
+        u_drift: {rate: 0.0, base: 0.08}
+    - source: meters
+      title: Indra's pearls
+      subtitle: organ pitch -> pearl size · kick swells · chord tints
+      lanes:
+        - {label: organ, roll: {track: organ}}
+        - {label: organ's latest note -> scale, knob: *pitch}
+        - {label: kick -> swell, knob: *kick, range: [0, 1]}
+        - {label: chord -> tint, chords: *score}

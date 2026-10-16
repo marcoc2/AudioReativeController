@@ -34,6 +34,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) { ... }
   - `previous`: a última saída da própria Image.
   - `sound`: a música como a entrada de som do Shadertoy (espectro na linha de cima,
     forma de onda na de baixo), calculada dos recursos de áudio do quadro.
+  - `mask`: as figuras da trilha de máscaras (`--masks`, ou `track:` na camada), brancas
+    sobre preto.
+  - `mask_distance`: a distância com sinal até o contorno das figuras: 0.5 no contorno,
+    um nível (1/255) por pixel a 720p, mais claro dentro.
   - o caminho de uma imagem (textura fixa).
   Na cena, `channel0..3` sobrescrevem os canais da aba Image.
 - Não suportados: cube maps, teclado. `iMouse` fica parado em (0, 0); se o shader
@@ -76,7 +80,22 @@ referência; não vai para vídeo publicado sem autorização do autor).
                                    # a terça do acorde, 0..11 (C = 0)
     u_mode: {chord: {score: input/musica/sheetsage}, part: mode}    # 1 maior, 0 menor, 0.5 sus
     u_cut: {cut: until}            # segundos até o próximo corte de clipe
+    u_seq: {groove: {track: kick}}                          # a levada do compasso (bits)
+    u_grave: {relative: subbands.bass, window: 6}           # o grave contra a média recente
+    u_nota: {adsr: {track: pad}, release: 0.6}              # o envelope das notas, com note-off
+    u_antes: {before: {track: snare}, window: 0.4}          # sobe antes de cada caixa
+    u_onda: {lfo: tri, period: 2/1, gain: 0.5, bias: 0.2}   # um oscilador na grade
+    u_sorteio: {random_on: {track: snare}, ease: 0.2}       # um valor novo a cada caixa
+    u_voz: {voice: {track: organ}, k: 0, part: pitch}       # a nota mais grave soando
+    u_x: {figure: largest, part: x}                         # o centro da maior figura
 ```
+
+Todo knob aceita `gain` e `bias` (o valor vira `bias + gain * valor`).
+Lista completa, com as opções de cada um: a docstring de `_knob` em
+`core/video/layers.py`.
+
+Uma camada shadertoy também aceita `subframes: N` e `shutter: 0..1`: renderiza N
+vezes dentro do quadro e tira a média, o que dá desfoque de movimento.
 
 **`chord:`** lê o acorde que soa agora na transcrição do SheetSage. Nos trechos sem
 acorde, ele mantém o último. Cada `part` dá um número:
@@ -104,6 +123,40 @@ compassos de `bars_per_clip`, nos compassos fixados em `overrides` e nos trigger
 | `phase` | 0 → 1 ao longo do plano |
 
 `cut:` precisa de uma cena com `- source: clips`.
+
+**`groove:`** é a levada do compasso como um número. O bit k acende quando a
+semicolcheia k do compasso (contando do tempo 1) tem batida. Exemplo:
+`u_seq: {groove: {track: kick}}`. Opções:
+- `division: 16`: quantos passos cabem numa semibreve (16 dá 16 passos em 4/4, 12 em 3/4, 20 em 5/4);
+- `ago: 1`: a levada do compasso anterior;
+- `part: steps`: quantos passos o compasso tem.
+
+## Shaders do ARC (MIT, escritos do zero)
+
+Os comentários no topo de cada arquivo explicam os uniforms. A cena de exemplo de cada
+um está em `examples/me_diz_*.yaml`.
+
+| Arquivo | O que é |
+|---|---|
+| `kifs_acorde_arc.glsl` | KIFS 3D com simetria pelo acorde; orbit traps nas notas; clipe como textura, fatiador e notas como luzes |
+| `newton_acorde_arc.glsl` | Newton com as raízes nas notas do acorde; modo Nova |
+| `lyapunov_bateria_arc.glsl` | Lyapunov escrito pela levada do compasso |
+| `julia_figuras_arc.glsl` | Julia com as figuras como armadilha de órbita |
+| `julia4d_arc.glsl` | Julia quaterniônico |
+| `droste_arc.glsl` | A espiral de Escher sobre o quadro |
+| `hiperbolico_arc.glsl` | Ladrilhos {p,q} no disco de Poincaré |
+| `perolas_arc.glsl` | Pérolas de Indra (inversões) |
+| `domain_warp_arc.glsl` | Mármore (domain warp) sobre o clipe |
+| `fluxo_cromatico_arc.glsl` | As cores empurram a imagem (modulateHue) |
+| `copiadora_arc/` | MRCM: quatro lentes de cópias realimentadas |
+| `milkdrop_arc/` | Campo de warp e eco espelhado à moda do MilkDrop |
+| `reacao_arc/` | Gray-Scott, quatro passos por quadro |
+| `bloom_arc/` | Bloom com limiar e ganho musicais |
+| `nebulosa_arc.glsl` | Nebulosa volumétrica (kaliset) |
+| `fases_arc.glsl` | Fractal de dobras com seis formas |
+| `bolhas_arc.glsl` | Espuma apoloniana |
+| `hibrido_arc.glsl` | Fórmula por semicolcheia, pela levada |
+| `cenario_arc.glsl` | As figuras em pé num salão fractal |
 
 Um shader só responde a um `uniforms:` se o usar: para ligar um botão num shader
 baixado, salve a cópia `_arc` e troque uma constante pelo uniform.

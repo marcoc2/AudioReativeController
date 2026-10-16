@@ -1,0 +1,34 @@
+# Me diz, envelopes that follow the score: the octagrams tunnel alone, full frame, driven
+# by three kinds of knob (core/video/layers.py, _knob):
+#   the shapes' size   adsr on the organ: they swell on each chord, hold while it is held
+#                      and shrink back once it is let go
+#   the flight speed   relative bass: against its own last six seconds, so a quiet verse
+#                      moves as much as a loud chorus
+#   the twin's turn    before the snare: it winds up over the 0.35 s ahead of each hit
+# The strip at the bottom (source: meters) shows each envelope over the notes it reads.
+# Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips                 # the cut schedule (the tunnel covers the picture)
+    - source: shadertoy
+      file: shaders/shadertoy/octagrams_arc.glsl
+      uniforms:
+        u_shape: 2
+        u_twin: &before {before: {track: drums (midi), notes: [38]}, window: 0.35, gain: 0.9}
+        u_size: &adsr {adsr: {track: organ}, attack: 0.05, decay: 0.4, sustain: 0.5, release: 0.8, gain: 0.7, bias: 0.6}
+        u_fly: {rate: 5.0, base: 1.5, from: &bass {relative: subbands.bass, window: 6}}
+        u_hue: {harmony: {score: input/me_diz/sheetsage, snap: beat}, glide: 0.8}
+        u_sat: 0.8
+    - source: meters
+      title: envelopes (adsr · relative · before)
+      subtitle: organ adsr -> size · relative bass -> speed · before snare -> turn
+      lanes:
+        - {label: organ, roll: {track: organ}}
+        - {label: organ adsr -> shape size, knob: *adsr}
+        - {label: relative bass -> flight speed, knob: *bass}
+        - {label: snare, roll: {track: drums (midi), notes: [38]}}
+        - {label: before the snare -> twin turn, knob: *before}

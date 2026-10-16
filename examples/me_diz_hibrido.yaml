@@ -1,0 +1,35 @@
+# Me diz, the groove picks the formula (shaders/shadertoy/hibrido_arc.glsl) alone, full
+# frame: a hybrid 3D fractal whose formula changes at each iteration by the bar's drums
+# (iteration k reads sixteenth k: a kick there makes it a Mandelbox box-and-sphere fold, a
+# snare an octahedral fold, a hat a turned tetrahedral one, nothing a Menger fold), so a
+# new groove builds another creature, melting from the last bar's over the bar; the kick
+# swells it, the chord colours it. The strip at the bottom (source: meters) shows the
+# drums the formula is read from. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips                 # the cut schedule (the fractal covers the picture)
+    - source: shadertoy
+      file: shaders/shadertoy/hibrido_arc.glsl
+      uniforms:
+        u_kick_seq: {groove: {track: drums (midi), notes: [36]}}
+        u_snare_seq: {groove: {track: drums (midi), notes: [38]}}
+        u_hat_seq: {groove: {track: drums (midi), notes: [42, 46, 51]}}
+        u_kick_prev: {groove: {track: drums (midi), notes: [36]}, ago: 1}
+        u_snare_prev: {groove: {track: drums (midi), notes: [38]}, ago: 1}
+        u_hat_prev: {groove: {track: drums (midi), notes: [42, 46, 51]}, ago: 1}
+        u_bar: &bar {bar: {step: 1, morph: 0.8}}
+        u_kick: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}
+        u_hue: {harmony: &score {score: input/me_diz/sheetsage, snap: beat}, glide: 0.8}
+        u_orbit: {bar: {step: 0.1, morph: 0.8}}
+    - source: meters
+      title: the groove picks the formula
+      subtitle: each sixteenth's drum picks that iteration's fold
+      lanes:
+        - {label: "drums (kick, snare, hats)", roll: {track: drums (midi), notes: [36, 38, 42, 46, 51]}}
+        - {label: bar -> morph from the last bar's, knob: *bar, range: window}
+        - {label: kick -> swell, knob: *kick, range: [0, 1]}
+        - {label: chord -> colour, chords: *score}

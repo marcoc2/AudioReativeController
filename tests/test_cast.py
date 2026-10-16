@@ -194,7 +194,10 @@ def test_echo_leaves_a_trail_while_the_note_is_held(track):
     {"act": "wake", "plays": {"track": "lead"}},
     {"act": "wake", "plays": {"track": "lead"}, "color": [80, 255, 120], "hold": 0.2, "length": 0.4},
     {"act": "wake", "plays": {"track": "lead"}, "every": 0.25, "length": 2.0},
-    {"act": "wake", "plays": {"track": "lead"}, "length": 2.0, "shift": 170, "direction": 30}])
+    {"act": "wake", "plays": {"track": "lead"}, "length": 2.0, "shift": 170, "direction": 30},
+    {"act": "sing", "plays": {"track": "acid"}, "low": 40, "high": 70, "amount": 120},
+    {"act": "clock", "plays": {"track": "lead"}},
+    {"act": "scope", "plays": {"track": "acid"}, "amount": 20, "color": [255, 255, 0]}])
 @pytest.mark.parametrize("size", [(W, H), (2 * W + 3, 2 * H - 1)])
 def test_the_gpu_keeps_step_with_numpy_over_time(track, role, size):
     import cv2
@@ -325,3 +328,43 @@ def test_wake_shift_drifts_it_a_new_way_each_clip(track):
         cast.process(_frame(i), START + i / FPS)
     moved = cast.roles[0]._moved
     assert np.degrees(np.arctan2(moved[1], moved[0])) == pytest.approx(90 + 137.50776 - 360, abs=0.01)
+
+
+def test_sing_lifts_it_with_the_notes(track):
+    folder, _ = track
+    low, high = [_held("voice", START, 0.2, pitch=48)], [_held("voice", START, 0.2, pitch=84)]
+    up = _cast(folder, [{"who": "largest", "plays": {"track": "voice"}, "act": "sing", "glide": 0,
+                         "amount": 40}], high).process(_frame(0), START)
+    down = _cast(folder, [{"who": "largest", "plays": {"track": "voice"}, "act": "sing", "glide": 0,
+                           "amount": 40}], low).process(_frame(0), START)
+    rows = lambda img: np.nonzero(np.all(np.abs(img.astype(int) - RED) < 12, axis=2).any(axis=1))[0]
+    assert rows(up).min() < rows(_frame(0)).min() and rows(down).max() > rows(_frame(0)).max()
+    rest = _cast(folder, [{"who": "largest", "plays": {"track": "voice"}, "act": "sing", "glide": 0,
+                           "fade": 0.1}], high)
+    assert np.array_equal(rest.process(_frame(5), START + 0.5), _frame(5))   # the note is over: back home
+
+
+def test_clock_freezes_it_between_notes(track):
+    folder, _ = track
+    cast = _cast(folder, [{"who": "largest", "plays": {"track": "lead"}, "act": "clock"}],
+                 [_held("lead", START + 0.3, 0.2)])
+    first = cast.process(_frame(0), START)                       # quiet: as the shot began
+    assert np.array_equal(first, _frame(0))
+    later = cast.process(_frame(2), START + 0.2)
+    assert (later[60, 30] == RED).all() and (later[60, 30] == _frame(0)[60, 30]).all()
+    assert not np.array_equal(later, _frame(2))                  # the square stayed where it was
+    playing = cast.process(_frame(4), START + 0.4)
+    assert np.array_equal(playing, _frame(4))                    # its note: it moves again
+
+
+def test_scope_draws_a_wavy_line_round_the_outline(track):
+    folder, _ = track
+    chord = [_held("keys", START, 0.5, pitch=60), _held("keys", START, 0.5, pitch=67)]
+    cast = _cast(folder, [{"who": "largest", "plays": {"track": "keys"}, "act": "scope", "amount": 30,
+                           "gap": 50, "width": 14, "color": [0, 255, 0]}], chord)   # px at 720p: /6 here
+    out = cast.process(_frame(0), START + 0.1)
+    line = _frame(0)[..., 0].astype(int) - out[..., 0] > 100     # green over the light grey
+    assert line.sum() > 150                                       # a line, all round
+    assert (out[50:70, 30:50] == RED).all()                      # not on the object itself
+    quiet = cast.process(_frame(9), START + 0.9)                  # the notes ended 0.4 s ago
+    assert np.array_equal(quiet, _frame(9))

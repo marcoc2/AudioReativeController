@@ -1,0 +1,30 @@
+# Me diz, the hyperbolic tiling (shaders/shadertoy/hiperbolico_arc.glsl) alone over the
+# clips: the picture tiled over the Poincaré disc, a {p, q} tiling whose q is the chord's
+# size (three notes {4, 5}, four {4, 6}), sliding one tile along each beat (a saw LFO), the
+# kick pushing it. The strip at the bottom (source: meters) shows the drivers. Commands:
+# see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/hiperbolico_arc.glsl
+      uniforms:
+        u_p: 4
+        u_q: &q {chord: &score {score: input/me_diz/sheetsage, snap: beat}, part: size, bias: 2}
+        u_phase: &saw {lfo: saw, period: 1/4}
+        u_kick: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}
+        u_spin: {rate: 0.0, base: 0.05}
+        u_edge: 0.4
+        u_fill: 1.8
+    - source: meters
+      title: hyperbolic tiling
+      subtitle: chord size -> q · a tile per beat · kick pushes
+      lanes:
+        - {label: chord, chords: *score}
+        - {label: "chord size + 2 -> q of the {4, q} tiling", knob: *q, range: [4, 7]}
+        - {label: lfo saw (a beat) -> slide, knob: *saw, range: [0, 1]}
+        - {label: kick -> push, knob: *kick, range: [0, 1]}

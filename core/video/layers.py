@@ -36,7 +36,8 @@ LAYER_SOURCES = (
     "clips", "solid", "cells", "veils", "flame", "eyes", "mouths", "ferrofluid", "chladni",
     "orbiters", "particles", "feedback", "rgb_noise", "drops", "cast", "shadertoy", "sandlines",
     "shockwave", "slitscan", "grain", "echoes", "rgb_split", "mandelbox", "mandelbulb",
-    "julia", "cubes",
+    "julia", "cubes", "chord_color", "transition", "flame_lens", "datamosh",
+    "time_map", "pixel_sort", "nebulabrot", "deep_zoom", "flythrough", "meters", "footage",
 )
 
 
@@ -780,6 +781,11 @@ class FlameLayer:
           paint: under           # colour every point with the layers below it (a video):
           paint_mix: 0.9         # the figure becomes a kaleidoscope of that picture
           paint_gain: 5          # undo a dimming solid below: the mandala shows the video at full colour
+          estimator: 0           # flam3's density estimation (GPU): blur up to this many pixels where
+          estimator_curve: 1.2   # the points are sparse, narrowing where dense (0: off; try 4)
+          weights:               # optional: an xform's weight follows the music (by index from 0; any knob,
+            0: {adsr: {track: organ}, gain: 3, bias: 0.2}     # see the shadertoy layer's uniforms), so
+            1: {hits: {track: kick}, envelope: 0.4, gain: 3, bias: 0.3}   # the arrangement reshapes it
 
     Loudness drives the light and the speed, swell the zoom, harmonic change makes
     the figure wander; the chord sets the palette and the pose.
@@ -791,13 +797,22 @@ class FlameLayer:
         self.fps = fps
         self.features_at = features_at
         genome = Genome.from_spec(spec.get("genome") or {"random": 5}).with_symmetry(int(spec.get("symmetry", 1)))
+        self._base_weights = [x.weight for x in genome.xforms]
+        wspec = spec.get("weights") or {}
+        bad = [k for k in wspec if not (0 <= int(k) < len(genome.xforms))]
+        if bad:
+            raise ValueError(f"flame: weights for xforms {bad}, but the genome has {len(genome.xforms)} (0..)")
+        self._weights = {int(k): _music_knob(f"weight {k}", how, notes, features_at, onset_loader, grid)
+                         for k, how in wspec.items()}
         self.sys = FlameSystem(width, height, genome, seed=int(spec.get("seed", 0)),
                                samples=float(spec.get("samples", 6.0)),
                                supersample=int(spec.get("supersample", 2)),
                                backend=str(spec.get("backend", "auto")),
                                exposure=float(spec.get("exposure", 3.0)),
                                white=float(spec.get("white", 40.0)), gamma=float(spec.get("gamma", 2.4)),
-                               centered=int(spec.get("symmetry", 1)) > 1)
+                               centered=int(spec.get("symmetry", 1)) > 1,
+                               estimator=float(spec.get("estimator", 0.0)),
+                               estimator_curve=float(spec.get("estimator_curve", 1.2)))
         self._spin = float(spec.get("spin", 0.02))
         self._pose_amount = float(spec.get("pose", 0.25))
         self._root = int(spec.get("root", 0)) % 12
@@ -867,6 +882,8 @@ class FlameLayer:
             root = root if hue_root is None else hue_root
             gap = ((VeilsLayer.hue_of_root(root) - self.hue + 0.5) % 1.0) - 0.5
             self.hue = (self.hue + gap * glide) % 1.0
+        for k, f in self._weights.items():                 # the arrangement reshapes the flame
+            self.sys.genome.xforms[k].weight = self._base_weights[k] * max(0.0, float(f(t)))
         return self.sys.render(dt, phase=self.phase, pose=self.pose, hue=self.hue, level=level,
                                zoom=math.exp(self.breath), bloom=self._bloom(t) if self._bloom else 0.0,
                                paint=self._under, paint_mix=self._paint_mix, paint_gain=self._paint_gain,
@@ -1863,12 +1880,23 @@ CUT_PARTS = ("count", "since", "until", "phase")
 
 
 def _music_knob(name: str, how, notes: Sequence, features_at=None, onset_loader=None, grid=None,
-                cuts=None):
+                cuts=None, track=None):
+    """See ``_knob``; any of the forms below also takes ``gain`` and ``bias``: bias + gain * value."""
+    f = _knob(name, how, notes, features_at, onset_loader, grid, cuts, track)
+    if isinstance(how, dict) and "feature" not in how and ("gain" in how or "bias" in how):
+        gain, bias = float(how.get("gain", 1.0)), float(how.get("bias", 0.0))
+        return lambda t: bias + gain * f(t)
+    return f
+
+
+def _knob(name: str, how, notes: Sequence, features_at=None, onset_loader=None, grid=None,
+          cuts=None, track=None):
     """A value that follows the music, as ``t -> float`` (called once a frame, in time order):
 
         0.5                                       a constant
         subbands.bass                             an audio feature
         {feature: texture.noisiness, gain: 1, bias: 0}   an audio feature, scaled: bias + gain * feature
+                                                  (every form below takes gain and bias too)
         {hits: <trigger>, envelope: 0.25, amount: 1}   1 -> 0 after each hit
         {count: <trigger>, per: bar}              hits so far in the current bar (0 at the bar's start)
         {pitch: <trigger>, low: 36, high: 84, glide: 0.1}   the latest note's pitch, low..high -> 0..1
@@ -1894,6 +1922,32 @@ def _music_knob(name: str, how, notes: Sequence, features_at=None, onset_loader=
                                                   the first shot; ``morph`` seconds to step up) | since
                                                   seconds since the last one | until  seconds to the next
                                                   (1000 when there is none) | phase  0 -> 1 across the shot
+        {groove: <trigger>, division: 16, ago: 0} the bar's pattern of hits: bit k set when step k (from the
+                                                  bar's 1; ``division`` steps to a whole note, so 16 in 4/4,
+                                                  12 in 3/4, 20 in 5/4) has one; ago: 1 the bar before;
+                                                  part: steps  how many steps the bar has
+        {relative: subbands.bass, window: 6, attack: 0.05, release: 0.3}   an audio feature against its own
+                                                  recent average (1 = as usual lately, 2 = twice that), so a
+                                                  quiet verse still moves and a loud chorus does not saturate
+        {adsr: <trigger>, attack: 0.02, decay: 0.2, sustain: 0.6, release: 0.4, velocity: true}
+                                                  each note's envelope: up, down to ``sustain`` while the note
+                                                  is held, then away over ``release`` once it ends (the loudest
+                                                  of the notes sounding); velocity scales the peak
+        {before: <trigger>, window: 0.5}          0 -> 1 over the ``window`` seconds before each hit, then 0:
+                                                  something that starts ahead of the beat
+        {lfo: sine, period: 1/1, phase: 0, width: 0.5}   an oscillator, 0..1: sine | tri | saw | square |
+                                                  pulse (high for ``width`` of the period); the period in
+                                                  seconds or a note value on the song's grid, in step with it
+        {random_on: <trigger>, ease: 0.1, seed: 0}   a new random value (0..1) on each hit, slid to over
+                                                  ``ease`` seconds
+        {voice: <trigger>, k: 0, part: pitch, release: 0.3}   the k-th note sounding now, lowest first:
+                                                  pitch  its MIDI pitch (held after it ends) | level
+                                                  1 while it sounds (velocity: true scales it), fading
+                                                  over ``release`` after; 0 when there is no k-th note
+        {figure: largest, part: x, glide: 0.15}   a figure of the mask track (``track``: --masks or the
+                                                  layer's track:): largest | second | third, by its share
+                                                  of the frame now; x, y its centre (0..1 across, down),
+                                                  size its share; held while there is none
     """
     if isinstance(how, (int, float)):
         return lambda t, v=float(how): v
@@ -1940,7 +1994,7 @@ def _music_knob(name: str, how, notes: Sequence, features_at=None, onset_loader=
             return state["v"]
         return pitch
     if isinstance(how, dict) and "rate" in how:
-        src = _music_knob(name, how.get("from", 1.0), notes, features_at, onset_loader, grid, cuts)
+        src = _music_knob(name, how.get("from", 1.0), notes, features_at, onset_loader, grid, cuts, track)
         rate, base = float(how["rate"]), float(how.get("base", 0.0))
         state = {"v": 0.0, "t": None}
 
@@ -2054,8 +2108,170 @@ def _music_knob(name: str, how, notes: Sequence, features_at=None, onset_loader=
                 return i - 1 + x * x * (3 - 2 * x)
             return float(i)
         return cut
-    raise ValueError(f"uniform {name!r}: use a number, a feature path, or "
-                     f"{{feature|hits|count|pitch|rate|bar|harmony|since|chord|cut: ...}}")
+    if isinstance(how, dict) and "groove" in how:
+        if grid is None:
+            raise ValueError(f"uniform {name!r}: groove needs a rhythm grid (render with --midi)")
+        division, back = int(how.get("division", 16)), -int(how.get("ago", 0))
+        steps_only = how.get("part", "pattern") == "steps"
+        times = np.array(sorted(_layer_hits(how["groove"], notes, onset_loader, grid)), dtype=float)
+
+        def groove(t):
+            i = grid.bar_index(t) + back
+            start, end = grid.bar_start(i), grid.bar_start(i + 1)
+            n = max(1, int(round(grid.beats_in_bar(i) * division / 4)))
+            if steps_only:
+                return float(n)
+            step = (end - start) / n
+            hits = times[(times >= start - step / 2) & (times < end - step / 2)]
+            bits = 0
+            for k in np.round((hits - start) / step).astype(int):
+                bits |= 1 << int(min(max(k, 0), n - 1))
+            return float(bits)
+        return groove
+    if isinstance(how, dict) and "relative" in how:
+        path = str(how["relative"])
+        window = max(1e-3, float(how.get("window", 6.0)))
+        attack, release = max(1e-3, float(how.get("attack", 0.05))), max(1e-3, float(how.get("release", 0.3)))
+        state = {"avg": None, "env": 0.0, "t": None}
+
+        def relative(t):
+            v = max(0.0, float(_feature((features_at(t) if features_at else None) or {}, path)))
+            if state["avg"] is None:
+                state["avg"], state["env"] = v, v
+            else:
+                dt = max(0.0, t - state["t"])
+                tau = attack if v > state["env"] else release
+                state["env"] += (v - state["env"]) * (1 - math.exp(-dt / tau))
+                state["avg"] += (v - state["avg"]) * (1 - math.exp(-dt / window))
+            state["t"] = t
+            return state["env"] / max(state["avg"], 1e-4)
+        return relative
+    if isinstance(how, dict) and "adsr" in how:
+        events = _layer_events(how["adsr"], notes, onset_loader, grid)
+        a, d = max(1e-3, float(how.get("attack", 0.02))), max(1e-3, float(how.get("decay", 0.2)))
+        sus, r = float(how.get("sustain", 0.6)), max(1e-3, float(how.get("release", 0.4)))
+        use_vel = bool(how.get("velocity", True))
+        starts = np.array([e.time for e in events], dtype=float)
+        ends = np.array([e.time + max(float(getattr(e, "duration", 0.0) or 0.0), 1e-3) for e in events])
+        peaks = np.array([(e.velocity / 127.0 if use_vel else 1.0) for e in events], dtype=float)
+        longest = float((ends - starts).max()) if len(events) else 0.0
+
+        def level(x, held):
+            """The envelope ``x`` seconds into a note held for ``held`` seconds."""
+            def on(y):
+                return y / a if y < a else sus + (1 - sus) * math.exp(-(y - a) / d)
+            if x < held:
+                return on(x)
+            return on(held) * math.exp(-(x - held) / r * 3.0)
+
+        def adsr(t):
+            hi = int(np.searchsorted(starts, t, side="right"))
+            lo = int(np.searchsorted(starts, t - longest - 4.0 * r, side="left"))
+            best = 0.0
+            for k in range(lo, hi):
+                x = t - starts[k]
+                if x - (ends[k] - starts[k]) > 4.0 * r:
+                    continue
+                best = max(best, peaks[k] * level(x, ends[k] - starts[k]))
+            return best
+        return adsr
+    if isinstance(how, dict) and "before" in how:
+        times = np.array(sorted(_layer_hits(how["before"], notes, onset_loader, grid)), dtype=float)
+        window = max(1e-3, float(how.get("window", 0.5)))
+
+        def before(t):
+            i = int(np.searchsorted(times, t, side="right"))
+            if i >= len(times):
+                return 0.0
+            x = (times[i] - t) / window
+            return float(1.0 - x) if x < 1.0 else 0.0
+        return before
+    if isinstance(how, dict) and "lfo" in how:
+        from core.video.cast import _Role
+        shape = how["lfo"]
+        if shape not in ("sine", "tri", "saw", "square", "pulse"):
+            raise ValueError(f"uniform {name!r}: lfo {shape!r} (sine, tri, saw, square or pulse)")
+        period = _Role._period(how.get("period", "1/1" if grid is not None else 2.0), grid, 0)
+        origin = float(grid.start_offset) if grid is not None and isinstance(how.get("period", "1/1"), str) else 0.0
+        phase0, width = float(how.get("phase", 0.0)), float(how.get("width", 0.5))
+
+        def lfo(t):
+            x = ((t - origin) / period + phase0) % 1.0
+            if shape == "sine":
+                return 0.5 - 0.5 * math.cos(2 * math.pi * x)
+            if shape == "tri":
+                return 1.0 - abs(2.0 * x - 1.0)
+            if shape == "saw":
+                return x
+            return 1.0 if x < (0.5 if shape == "square" else width) else 0.0
+        return lfo
+    if isinstance(how, dict) and "random_on" in how:
+        times = np.array(sorted(_layer_hits(how["random_on"], notes, onset_loader, grid)), dtype=float)
+        values = np.random.default_rng(int(how.get("seed", 0))).uniform(0, 1, len(times) + 1)
+        ease = max(0.0, float(how.get("ease", 0.1)))
+
+        def random_on(t):
+            i = int(np.searchsorted(times, t, side="right"))
+            if i == 0 or ease <= 0:
+                return float(values[i])
+            x = min(1.0, (t - times[i - 1]) / ease)
+            x = x * x * (3 - 2 * x)
+            return float(values[i - 1] + (values[i] - values[i - 1]) * x)
+        return random_on
+    if isinstance(how, dict) and "voice" in how:
+        events = _layer_events(how["voice"], notes, onset_loader, grid)
+        k, part = int(how.get("k", 0)), how.get("part", "pitch")
+        if part not in ("pitch", "level"):
+            raise ValueError(f"uniform {name!r}: voice part {part!r} (pitch or level)")
+        release = max(1e-3, float(how.get("release", 0.3)))
+        use_vel = bool(how.get("velocity", False))
+        starts = np.array([e.time for e in events], dtype=float)
+        ends = np.array([e.time + max(float(getattr(e, "duration", 0.0) or 0.0), 0.05) for e in events])
+        longest = float((ends - starts).max()) if len(events) else 0.0
+        state = {"pitch": 60.0}
+
+        def voice(t):
+            lo = int(np.searchsorted(starts, t - longest - release, side="left"))
+            hi = int(np.searchsorted(starts, t, side="right"))
+            live = []
+            for j in range(lo, hi):
+                if t < ends[j] + release:
+                    lev = 1.0 if t < ends[j] else 1.0 - (t - ends[j]) / release
+                    if use_vel:
+                        lev *= events[j].velocity / 127.0
+                    live.append((events[j].pitch, lev))
+            live.sort()
+            if k < len(live):
+                state["pitch"] = float(live[k][0])
+                return state["pitch"] if part == "pitch" else float(live[k][1])
+            return state["pitch"] if part == "pitch" else 0.0
+        return voice
+    if isinstance(how, dict) and "figure" in how:
+        if track is None:
+            raise ValueError(f"uniform {name!r}: figure needs a mask track (track: <folder>) or the render's --masks")
+        rank = {"largest": 0, "second": 1, "third": 2}.get(how["figure"])
+        part = {"x": "cx", "y": "cy", "size": "share"}.get(how.get("part", "x"))
+        if rank is None or part is None:
+            raise ValueError(f"uniform {name!r}: figure largest|second|third, part x|y|size")
+        glide = max(0.0, float(how.get("glide", 0.15)))
+        state = {"v": None, "t": None}
+
+        def figure(t):
+            tr = track()
+            i = tr.frame_at(t)
+            ids = tr.in_view(i) if i is not None else []
+            target = tr.stat(i, ids[rank])[part] if len(ids) > rank else state["v"]
+            if target is None:
+                target = 0.5 if part != "share" else 0.0
+            if state["v"] is None or glide <= 0:
+                state["v"] = target
+            else:
+                state["v"] += (target - state["v"]) * (1 - math.exp(-max(0.0, t - state["t"]) / glide))
+            state["t"] = t
+            return float(state["v"])
+        return figure
+    raise ValueError(f"uniform {name!r}: use a number, a feature path, or {{feature|hits|count|pitch|rate|bar|"
+                     f"harmony|since|chord|cut|groove|relative|adsr|before|lfo|random_on|voice|figure: ...}}")
 
 
 class ShadertoyLayer:
@@ -2066,11 +2282,16 @@ class ShadertoyLayer:
           channel0: frame           # what the Image pass reads (overrides the file's ``// iChannel0:`` line):
                                     # frame: the picture below (the layer is then a post-op) | previous: its
                                     # own last output | buffer_a .. buffer_d | sound: the music as Shadertoy's
-                                    # sound input (spectrum + waveform) | a path to an image | none
+                                    # sound input (spectrum + waveform) | mask: the figures of the mask track
+                                    # (--masks, or track:), white on black | mask_distance: the signed distance
+                                    # to their outline, 0.5 on it, +1/255 per pixel inside (at 720p) | a path
+                                    # to an image | none
           supersample: 1
           speed: 1.0                # how fast the shader's clock (iTime) runs
           start: 0.0                # the clock at the first frame (default: the song's time there)
           rush: {hits: {track: kick}, amount: 3.0, envelope: 0.3}   # the clock rushes on each hit
+          subframes: 1              # > 1: motion blur, the frame averaged over that many renders
+          shutter: 0.5              #      spread over this share of the frame's time (0..1)
           uniforms:                 # float knobs of the shader's own (declared for it if it does not)
             u_bass: subbands.bass   # an audio feature
             u_kick: {hits: {track: kick}, envelope: 0.25}           # a pulse on each hit, 1 -> 0
@@ -2088,7 +2309,7 @@ class ShadertoyLayer:
     """
 
     def __init__(self, spec: dict, notes: Sequence, width: int, height: int, fps: int,
-                 features_at=None, onset_loader=None, grid=None, cuts=None):
+                 features_at=None, onset_loader=None, grid=None, cuts=None, default_track=None, tracks=None):
         from core.shadertoy import BUFFERS, Shadertoy, load
         if not spec.get("file"):
             raise ValueError("shadertoy: needs file: (a .glsl or a folder in shaders/shadertoy/)")
@@ -2106,26 +2327,63 @@ class ShadertoyLayer:
         def resolve(src):
             if src in (None, "none"):
                 return None
-            if src in ("frame", "previous", "sound") or str(src).startswith("buffer_"):
+            if src in ("frame", "previous", "sound", "mask", "mask_distance") or str(src).startswith("buffer_"):
                 return src
             from PIL import Image
             return np.asarray(Image.open(src).convert("RGB"))
         channels = {p: {i: resolve(src) for i, src in chans.items() if resolve(src) is not None}
                     for p, chans in channels.items()}
-        self._knobs = {name: _music_knob(name, how, notes, features_at, onset_loader, grid, cuts)
+        tracks = tracks if tracks is not None else {}
+        folder = spec.get("track") or default_track
+
+        def track():
+            if not folder:
+                raise ValueError("shadertoy: needs a mask track (track: <folder>) or the render's --masks")
+            if folder not in tracks:
+                from core.segment.mask_track import MaskTrack
+                tracks[folder] = MaskTrack(folder)
+            return tracks[folder]
+        self._track = track
+        self._knobs = {name: _music_knob(name, how, notes, features_at, onset_loader, grid, cuts,
+                                         track if folder else None)
                        for name, how in (spec.get("uniforms") or {}).items()}
         self.toy = Shadertoy(shader["image"], width, height, supersample=int(spec.get("supersample", 1)),
                              extra=tuple(self._knobs), buffers={b: shader.get(b) for b in BUFFERS},
                              common=shader.get("common", ""), channels=channels)
         self._speed = float(spec.get("speed", 1.0))
         self._start = spec.get("start")
+        self.subframes = max(1, int(spec.get("subframes", 1)))
+        self.shutter = float(np.clip(float(spec.get("shutter", 0.5)), 0.0, 1.0))
         rspec = spec.get("rush")
         self._rush = EnvelopeOpacity(_layer_hits(rspec["hits"], notes, onset_loader, grid),
                                      float(rspec.get("envelope", 0.3))) if rspec else None
         self._rush_amount = float(rspec.get("amount", 3.0)) if rspec else 0.0
         self._clock = 0.0
+        self._clock_before = None
         self._last_t = None
         self._hears = self.toy.reads("sound")
+        self._sees = "mask_distance" if self.toy.reads("mask_distance") else "mask" if self.toy.reads("mask") else None
+        self.track = None
+        if self._sees:
+            if not folder:
+                raise ValueError("shadertoy: a mask channel needs a mask track (track: <folder>) or the render's --masks")
+            self.track = track()
+        self.W, self.H = width, height
+
+    def _mask(self, t: float) -> np.ndarray:
+        """The figures at ``t`` for a mask channel: white on black, or the signed distance to
+        their outline (128 on it, a level per pixel at 720p, brighter inside)."""
+        import cv2
+        lab = self.track.labels_at(t)
+        if lab is None:
+            return np.zeros((self.H, self.W), np.uint8)
+        inside = cv2.resize((lab > 0).astype(np.uint8), (self.W, self.H), interpolation=cv2.INTER_NEAREST)
+        if self._sees == "mask":
+            return inside * np.uint8(255)
+        per = 720.0 / self.H                                  # levels per pixel of this frame
+        d_in = cv2.distanceTransform(inside, cv2.DIST_L2, 5)
+        d_out = cv2.distanceTransform(1 - inside, cv2.DIST_L2, 5)
+        return np.clip(128.0 + (d_in - d_out) * per, 0, 255).astype(np.uint8)
 
     def _draw(self, below, t: float, target=None):
         dt = 1.0 / self.fps if self._last_t is None else max(0.0, t - self._last_t)
@@ -2140,7 +2398,21 @@ class ShadertoyLayer:
             from core.shadertoy import sound_texture
             feats = (self.features_at(t) if self.features_at else None) or {}
             sound = sound_texture(feats.get("spectrum"), float(feats.get("nyquist", 22050.0)), feats.get("wave"))
-        return self.toy.render(self._clock, dt, frame=below, sound=sound, target=target,
+        mask = self._mask(t) if self._sees else None
+        if self.subframes > 1:
+            # the shutter open over the last ``shutter`` of the frame: renders at times in step,
+            # the knobs asked in time order, the pictures averaged
+            acc = None
+            rate = (self._clock - self._clock_before) / dt if self._clock_before is not None and dt > 0 else self._speed
+            for j in range(self.subframes):
+                back = self.shutter * dt * (1.0 - (j + 1) / self.subframes)
+                img = self.toy.render(self._clock - rate * back, dt / self.subframes, frame=below, sound=sound,
+                                      mask=mask, **{k: f(t - back) for k, f in self._knobs.items()})
+                acc = img.astype(np.float32) if acc is None else acc + img
+            self._clock_before = self._clock
+            return np.clip(acc / self.subframes + 0.5, 0, 255).astype(np.uint8)
+        self._clock_before = self._clock
+        return self.toy.render(self._clock, dt, frame=below, sound=sound, target=target, mask=mask,
                                **{k: f(t) for k, f in self._knobs.items()})
 
     @property
@@ -2151,7 +2423,9 @@ class ShadertoyLayer:
 class _ShadertoySource:
     def __init__(self, layer: ShadertoyLayer):
         self.layer = layer
-        self.on_gpu = not layer.toy.reads("previous")     # its picture can stay on the GPU
+        # its picture can stay on the GPU (not when it reads its own last output, nor when it
+        # averages subframes: those are added up on the CPU)
+        self.on_gpu = not layer.toy.reads("previous") and layer.subframes == 1
 
     def frame_at(self, t: float) -> np.ndarray:
         return self.layer._draw(None, t)
@@ -2163,7 +2437,7 @@ class _ShadertoySource:
 class _ShadertoyPost:
     def __init__(self, layer: ShadertoyLayer):
         self.layer = layer
-        self.on_gpu = not layer.toy.reads("previous")
+        self.on_gpu = not layer.toy.reads("previous") and layer.subframes == 1
 
     def process(self, frame: np.ndarray, t: float) -> np.ndarray:
         return self.layer._draw(frame, t)
@@ -2603,7 +2877,8 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             continue
         if src_name == "shadertoy":
             toy = ShadertoyLayer(spec, notes, width, height, fps, features_at=features_at,
-                                 onset_loader=onset_loader, grid=grid, cuts=getattr(base, "cut_times", None))
+                                 onset_loader=onset_loader, grid=grid, cuts=getattr(base, "cut_times", None),
+                                 default_track=masks, tracks=tracks)
             if toy.is_post:
                 comp.add(_ShadertoyPost(toy), "normal", None)
             else:
@@ -2621,6 +2896,62 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             from core.video.cast import CastLayer
             comp.add(CastLayer(spec, notes, width, height, fps, onset_loader=onset_loader,
                                grid=grid, default_track=masks, tracks=tracks), "normal", None)
+            continue
+        if src_name == "transition":
+            from core.video.transition import Transition
+            comp.add(Transition(spec, width, height, fps, grid=grid, cuts=getattr(base, "cut_times", None),
+                                default_track=masks, tracks=tracks), "normal", None)
+            continue
+        if src_name == "footage":
+            from core.video.footage import Footage
+            comp.add(Footage(spec, width, height, tracks=tracks, notes=notes, features_at=features_at,
+                             onset_loader=onset_loader, grid=grid), blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "flythrough":
+            from core.video.flythrough import FlythroughLayer
+            comp.add(FlythroughLayer(spec, notes, width, height, fps, features_at=features_at,
+                                     onset_loader=onset_loader, grid=grid, cuts=getattr(base, "cut_times", None)),
+                     blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "deep_zoom":
+            from core.video.deep_zoom import DeepZoomLayer
+            comp.add(DeepZoomLayer(spec, notes, width, height, fps, features_at=features_at,
+                                   onset_loader=onset_loader, grid=grid), blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "nebulabrot":
+            from core.video.nebulabrot import NebulabrotLayer
+            comp.add(NebulabrotLayer(spec, notes, width, height, fps, features_at=features_at,
+                                     onset_loader=onset_loader, grid=grid), blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "time_map":
+            from core.video.time_map import TimeMap
+            comp.add(TimeMap(spec, notes, width, height, fps, features_at=features_at, onset_loader=onset_loader,
+                             grid=grid, default_track=masks, tracks=tracks), "normal", None)
+            continue
+        if src_name == "pixel_sort":
+            from core.video.pixel_sort import PixelSort
+            comp.add(PixelSort(spec, notes, fps, features_at=features_at, onset_loader=onset_loader, grid=grid,
+                               cuts=getattr(base, "cut_times", None)), "normal", None)
+            continue
+        if src_name == "datamosh":
+            from core.video.datamosh import Datamosh
+            comp.add(Datamosh(spec, notes, width, height, fps, onset_loader=onset_loader, grid=grid,
+                              cuts=getattr(base, "cut_times", None)), "normal", None)
+            continue
+        if src_name == "flame_lens":
+            from core.video.flame_lens import FlameLens
+            comp.add(FlameLens(spec, notes, width, height, fps, features_at=features_at,
+                               onset_loader=onset_loader, grid=grid), "normal", None)
+            continue
+        if src_name == "meters":
+            from core.video.meters import Meters
+            comp.add(Meters(spec, notes, width, height, fps, features_at=features_at, onset_loader=onset_loader,
+                            grid=grid, cuts=getattr(base, "cut_times", None)), "normal", None)
+            continue
+        if src_name == "chord_color":
+            from core.video.chord_color import ChordColor
+            comp.add(ChordColor(spec, notes, fps, features_at=features_at, onset_loader=onset_loader,
+                                grid=grid), "normal", None)
             continue
         if src_name == "slitscan":
             comp.add(SlitScanLayer(spec, notes, width, height, fps, features_at=features_at,

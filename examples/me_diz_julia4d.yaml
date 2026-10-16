@@ -1,0 +1,32 @@
+# Me diz, a quaternion Julia set (shaders/shadertoy/julia4d_arc.glsl) alone, full frame: a
+# 4D fractal sliced into 3D; the chord's root takes c round the Mandelbrot set's edge and
+# its mode sets c's fourth coordinate (a new shape on each chord, sliding there), the
+# organ's latest note moves the slice through the fourth dimension, the kick jolts c
+# (the surface boils), the chord colours it, the camera turns each bar. The
+# strip at the bottom (source: meters) shows the drivers. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips                 # the cut schedule (the fractal covers the picture)
+    - source: shadertoy
+      file: shaders/shadertoy/julia4d_arc.glsl
+      uniforms:
+        u_root: &root {chord: &score {score: input/me_diz/sheetsage, snap: beat}, part: root, glide: 1.0}
+        u_mode: {chord: *score, part: mode, glide: 0.8}
+        u_slice: &slice {pitch: &organ {track: organ}, low: 62, high: 80, glide: 0.3, gain: 0.8, bias: -0.4}
+        u_kick: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}
+        u_hue: {harmony: *score, glide: 0.8}
+        u_orbit: {bar: {step: 0.08, morph: 1.0}}
+        u_dist: 8.0                 # far enough to see it whole in a portrait frame
+    - source: meters
+      title: quaternion Julia (4D)
+      subtitle: chord -> c · organ note -> the 4th-dimension slice · kick jolts
+      lanes:
+        - {label: chord, chords: *score}
+        - {label: chord root -> c, knob: *root}
+        - {label: organ, roll: *organ}
+        - {label: organ's latest note -> slice (w), knob: *slice, range: [-0.4, 0.4]}
+        - {label: kick -> jolt c, knob: *kick, range: [0, 1]}

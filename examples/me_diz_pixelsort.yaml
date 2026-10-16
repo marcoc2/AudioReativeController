@@ -1,0 +1,21 @@
+# Me diz, pixel sorting (core/video/pixel_sort.py) alone over the clips: runs of bright
+# pixels sorted into streaks, as much of the picture as the organ's envelope says, growing
+# while its chords are held and melting back after; the streaks fall down one clip and run
+# sideways the next. The strip at the bottom (source: meters) shows the organ and its
+# envelope. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: pixel_sort
+      amount: &amount {adsr: {track: organ}, attack: 0.2, decay: 0.5, sustain: 0.7, release: 0.8, velocity: false, gain: 0.85}
+      direction: [vertical, horizontal]
+    - source: meters
+      title: pixel sort
+      subtitle: the organ's envelope -> how much sorts · direction turns at the cut
+      lanes:
+        - {label: organ, roll: {track: organ}}
+        - {label: organ adsr -> share sorted, knob: *amount, range: [0, 0.85]}

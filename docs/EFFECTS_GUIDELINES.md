@@ -4,7 +4,7 @@ Público-alvo: agentes LLM (e humanos) estendendo o sistema sem quebrar a
 arquitetura. Leia inteiro antes de escrever código. Em caso de conflito
 entre este documento e o código, o código vence — atualize este arquivo.
 
-## 1. O mapa: cinco pontos de extensão
+## 1. O mapa: seis pontos de extensão
 
 Todo efeito novo entra por exatamente UM destes seams. Escolher o seam
 certo é a decisão mais importante.
@@ -14,6 +14,7 @@ certo é a decisão mais importante.
 | **Layer source** | Gerador de imagem: produz um frame RGB por chamada | O efeito desenha conteúdo próprio (fractais, partículas, geometria) | `core/cells.py`, `core/fractal.py`, `core/mandelbulb.py`, `core/mandelbox.py` + wrappers em `core/video/layers.py` |
 | **Post-op** | Transforma o composto acumulado (pixels) | O efeito modifica a imagem existente (aberração, feedback/túnel, hue shift, blur) | `RgbSplit` em `core/video/layers.py` |
 | **Ato do elenco** (`cast`) | Um gesto que um instrumento faz com uma figura do vídeo (objeto da trilha de máscaras SAM2) | O efeito é sobre *uma figura*, escolhida por papel (`who`), não sobre o quadro todo | `ACTS`, `_Role` e `CastLayer._step/_play/_play_gpu` em `core/video/cast.py` |
+| **Knob** (`uniforms:` e parâmetros que aceitam knob) | Um jeito novo de a música virar número: o acorde, a levada, um envelope, um corte, uma figura | O efeito já existe e só precisa de outro sinal; ou um shader `_arc` novo que precisa de um sinal que ainda não há | `_knob` em `core/video/layers.py` (e `_music_knob`, que soma `gain`/`bias`) |
 | **Transport action / GravityWarp** | Muda o playback dos clipes (tempo) | O efeito é temporal: direção, velocidade, salto de clipe | `ACTIONS` e `GravityWarp` em `core/video/composer.py` |
 | **Legado (congelado)** | `generators/*.py`, `core/particles*.py`, `core/visual.py` | **Nunca estenda.** São modos standalone antigos, despachados pela GUI. Efeitos deles migram virando layer source | — |
 
@@ -95,6 +96,12 @@ brilho no hit vs fora dele — ver histórico de commits por exemplos).
       o efeito for "flagship"; senão, documente no docstring do YAML
 - [ ] `examples/README.md` atualizado se criou exemplo
 - [ ] Render curto de validação inspecionado (frame extraído)
+- [ ] O render de avaliação mostra o efeito **sozinho**: sem o empilhamento de outra cena
+      por cima (túnel, elenco, aberração, que mascaram o resultado), em tela cheia quando
+      ele gera a imagem, sem `mask:` a menos que a máscara seja o assunto, e com a camada
+      `meters` por último, um traço por knob que o move (a mesma spec, por âncora YAML),
+      para que se veja o componente audio-reativo junto com a imagem
+      (ex.: `examples/me_diz_kifs.yaml`)
 
 ## 5. Mapeamento das sugestões propostas (Gemini) → seams
 

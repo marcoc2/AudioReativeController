@@ -1,44 +1,40 @@
-# Me diz, the chord and the cut steering the tunnel: me_diz_capa with the knobs that follow
-# the harmony and the clip cuts (shaders/shadertoy/README.md).
+# Me diz, the chord and the cut steering the tunnel: the octagrams tunnel alone, full
+# frame, with the knobs that follow the harmony and the clip cuts (shaders/shadertoy/README.md);
+# the strip at the bottom (source: meters) scrolls what drives it past the playhead.
 #
 #   the tunnel's shape   a new one at every clip cut (cut: count), melting in over half a second
 #   its twin's turn      the chord's root (chord: root), sliding there
 #   its saturation       the chord's mode: grey on a minor chord (E:min7), full colour on a
 #                        major one (B:7, G); its hue still follows the root (harmony)
+#   the flight           the kick throws it forward
 #
 # snap: beat, not auto: in this song the chords change on beat 3 of the DAW's bars
 # (G at bar 24.3), and snapping them to the bar lands G and the B:7 after it on the same
 # line, losing the G.
 #
-# Everything else, and the commands, as in me_diz_capa.yaml.
+# The commands as in me_diz_capa.yaml; the demos start at DAW bar 18.3 (35.993 s of the
+# master), where only drums (midi) and organ play.
 video:
   clip_per_bar: true
   bars_per_clip: 2
   clip_order: shuffle
   clip_end: loop
   layers:
-    - source: clips
+    - source: clips                 # the cut schedule (the tunnel covers the picture)
     - source: shadertoy
       file: shaders/shadertoy/octagrams_arc.glsl
-      blend: normal
-      opacity: 0.6
       uniforms:
-        u_shape: {cut: count, morph: 0.5}
-        u_twin: {chord: {score: input/me_diz/sheetsage, snap: beat}, part: root, glide: 0.6}
-        u_fly: {rate: 10.0, base: 4.0, from: {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}}
+        u_shape: &shape {cut: count, morph: 0.5}
+        u_twin: &root {chord: {score: input/me_diz/sheetsage, snap: beat}, part: root, glide: 0.6}
+        u_fly: {rate: 10.0, base: 4.0, from: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}}
         u_hue: {harmony: {score: input/me_diz/sheetsage, snap: beat}, glide: 0.8}
-        u_sat: {chord: {score: input/me_diz/sheetsage, snap: beat}, part: mode, glide: 0.3}
-      mask: {where: outside, grow: 3, feather: 3}
-    - source: rgb_split
-      amount: 14
-      trigger: {track: drums (midi), notes: [38], envelope: 0.18}
-      mask: {where: inside, feather: 2}
-    - source: cast
-      roles:
-        - {who: largest, plays: {track: e-piano}, act: echo, trail: 2, every: 0.08, amount: 0.6}
-        - {who: second, plays: {track: [bass acid, organ]}, act: rings, speed: 260, life: 1.1, width: 4}
-        - {who: largest, plays: {track: drums (midi), notes: [36]}, act: punch, amount: 0.14}
-        - {who: second, plays: {track: drums (midi), notes: [38]}, act: shake, amount: 14}
-        - {who: third, plays: {track: drums (midi), notes: [42, 46, 51]}, act: glow, width: 10, color: [255, 235, 160]}
-        - {who: second, plays: {track: drums (midi), notes: [38]}, act: carry, fade: 0.25}
-        - {who: largest, plays: {track: drums (midi), notes: [36]}, act: carry, fade: 0.3, shadow: 0.45}
+        u_sat: &mode {chord: {score: input/me_diz/sheetsage, snap: beat}, part: mode, glide: 0.3}
+    - source: meters
+      title: chord + cut knobs
+      subtitle: cut -> shape · root -> twin turn · mode -> saturation · kick -> flight
+      lanes:
+        - {label: chord, chords: {score: input/me_diz/sheetsage, snap: beat}}
+        - {label: cut count -> shape, knob: *shape, range: window}
+        - {label: chord root -> twin turn, knob: *root}
+        - {label: "chord mode -> saturation (minor 0, major 1)", knob: *mode, range: [0, 1]}
+        - {label: kick -> flight burst, knob: *kick, range: [0, 1]}

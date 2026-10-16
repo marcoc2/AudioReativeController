@@ -1,0 +1,26 @@
+# Me diz, a flight through a fractal's caves (core/video/flythrough.py) alone, full frame:
+# Knighty's pseudo-Kleinian space of arches and colonnades; the camera glides one step a
+# bar, easing in on the downbeat and holding, steering itself along the corridors (never
+# into a wall); the kick pushes it on and flashes the lamp; at each cut it takes another
+# branch; the chord colours the stone. The strip at the bottom (source: meters) shows the
+# kick, the cuts and the chords. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips                 # the cut schedule (the caves cover the picture)
+    - source: flythrough
+      step: 0.5
+      dolly: 0.5
+      kick: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}
+      hue: {harmony: &score {score: input/me_diz/sheetsage, snap: beat}, glide: 0.8}
+      fog: 0.3
+    - source: meters
+      title: flight through fractal caves
+      subtitle: a step each bar · kick pushes and flashes · a new branch at each cut
+      lanes:
+        - {label: kick -> push and lamp flash, knob: *kick, range: [0, 1]}
+        - {label: "bar -> the glide (half a bar moving, then a hold)", knob: {bar: {step: 1, morph: 1.1429}}, range: window}
+        - {label: chord -> colour, chords: *score}

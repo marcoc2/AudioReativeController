@@ -1,0 +1,31 @@
+# Me diz, the copying machine (shaders/shadertoy/copiadora_arc): Peitgen, Jürgens and
+# Saupe's multiple-reduction copy machine, four lenses each making a smaller copy of the
+# picture, fed back until only the attractor is left. Each lens is a voice: the kick, the
+# snare, the hats and the organ open their lens while they sound (the copy grows), and a
+# slow sine turns the whole. Alone, full frame. The strip at the bottom (source: meters)
+# shows the four lenses. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/copiadora_arc
+      uniforms:
+        u_l0: &l0 {hits: {track: drums (midi), notes: [36]}, envelope: 0.6, gain: 0.7, bias: 0.25}
+        u_l1: &l1 {hits: {track: drums (midi), notes: [38]}, envelope: 0.6, gain: 0.7, bias: 0.25}
+        u_l2: &l2 {hits: {track: drums (midi), notes: [42, 46, 51]}, envelope: 0.3, gain: 0.5, bias: 0.2}
+        u_l3: &l3 {hits: {track: organ}, envelope: 0.5, gain: 0.8}
+        u_turn: &turn {lfo: sine, period: 2/1, gain: 0.5, bias: -0.25}
+        u_scale: 0.5
+    - source: meters
+      title: copying machine (IFS)
+      subtitle: four lenses, four voices · a sine turns it
+      lanes:
+        - {label: kick -> lens 1, knob: *l0, range: [0.2, 1]}
+        - {label: snare -> lens 2, knob: *l1, range: [0.2, 1]}
+        - {label: hats -> lens 3, knob: *l2, range: [0.2, 0.7]}
+        - {label: organ -> lens 4, knob: *l3, range: [0, 0.8]}
+        - {label: lfo sine (2 bars) -> turn, knob: *turn, range: [-0.25, 0.25]}

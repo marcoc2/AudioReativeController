@@ -1,0 +1,31 @@
+# Me diz, the drum groove as a Lyapunov fractal (shaders/shadertoy/lyapunov_bateria_arc.glsl)
+# alone, full frame: the bar's kick pattern is the A/B sequence of the logistic map (a kick
+# on a step: A, none: B), so each new groove draws another landscape, morphing from the last
+# bar's over the bar; the kick flashes it, the chord colours it. The strip at the bottom
+# (source: meters) shows the kicks the sequence is read from. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips                 # the cut schedule (the fractal covers the picture)
+    - source: shadertoy
+      file: shaders/shadertoy/lyapunov_bateria_arc.glsl
+      uniforms:
+        u_seq: &seq {groove: {track: drums (midi), notes: [36]}}
+        u_prev: {groove: {track: drums (midi), notes: [36]}, ago: 1}
+        u_len: {groove: {track: drums (midi), notes: [36]}, part: steps}
+        u_bar: &bar {bar: {step: 1, morph: 0.6}}
+        u_hue: {harmony: &score {score: input/me_diz/sheetsage, snap: beat}, glide: 0.8}
+        u_pan: {rate: 0.0, base: 0.04}
+        u_kick: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.25}
+    - source: meters
+      title: groove Lyapunov
+      subtitle: the bar's kick pattern is the A/B sequence
+      lanes:
+        - {label: kick (the sequence), roll: {track: drums (midi), notes: [36]}}
+        - {label: kick pattern (bitmask) -> sequence, knob: *seq, range: window}
+        - {label: bar -> morph from the last bar's, knob: *bar, range: window}
+        - {label: kick -> flash, knob: *kick, range: [0, 1]}
+        - {label: chord -> hue, chords: *score}

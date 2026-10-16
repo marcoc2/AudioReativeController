@@ -1,0 +1,33 @@
+# Me diz, the slicer (shaders/shadertoy/kifs_acorde_arc.glsl, u_slice/u_tilt) alone, full
+# frame: the chord's kaleidoscope cut open by a plane that sweeps through it once a bar
+# (a saw LFO), showing its insides, the plane tilting a new way at each clip cut; the
+# kick opens it, the snare twists it. The strip at the bottom (source: meters) shows the
+# drivers. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips                 # the cut schedule (the fractal covers the picture)
+    - source: shadertoy
+      file: shaders/shadertoy/kifs_acorde_arc.glsl
+      uniforms:
+        u_mode: {chord: &score {score: input/me_diz/sheetsage, snap: beat}, part: mode, glide: 0.4}
+        u_root: {chord: *score, part: root, glide: 0.6}
+        u_third: {chord: *score, part: tone, tone: 1}
+        u_fifth: {chord: *score, part: tone, tone: 2}
+        u_kick: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}
+        u_snare: {hits: {track: drums (midi), notes: [38]}, envelope: 0.25}
+        u_orbit: {bar: {step: 0.125, morph: 0.6}}
+        u_glow: 0.4
+        u_slice: &slice {lfo: saw, period: 1/1, gain: 3.4, bias: -1.7}
+        u_tilt: &tilt {cut: count, gain: 0.7, morph: 0.5}
+    - source: meters
+      title: the slicer
+      subtitle: a plane sweeps through it each bar · it tilts at each cut
+      lanes:
+        - {label: lfo saw (a bar) -> slice plane, knob: *slice, range: [-1.7, 1.7]}
+        - {label: cut count -> plane tilt, knob: *tilt, range: window}
+        - {label: kick -> open, knob: *kick, range: [0, 1]}
+        - {label: chord, chords: *score}

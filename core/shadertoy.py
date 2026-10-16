@@ -125,6 +125,63 @@ def load(path) -> dict:
     return out
 
 
+_UNIFORM = re.compile(r"^\s*uniform\s+float\s+([^;]+);", re.M)
+_ABOUT = re.compile(r"^\s*//(\s+)(u_\w+(?:\s*,\s*u_\w+)*)\s{2,}(\S.*)$")
+
+
+def uniforms_of(path) -> list:
+    """The knobs a shader offers a scene: one ``{name, default, about}`` per ``uniform float u_*``
+    (the image pass, its common code and buffers), in the order declared. ``about`` comes from the
+    header's notes: an indented ``u_x   what it does`` line (and the lines under it indented
+    deeper), else the notes sentence that names it."""
+    src = load(path)
+    code = "\n".join(src[k] for k in ("common", "image", *BUFFERS) if k in src)
+    out, seen = [], set()
+    for m in _UNIFORM.finditer(code):
+        for part in m.group(1).split(","):
+            name, _, default = part.partition("=")
+            name = name.strip()
+            if not name.startswith("u_") or name in seen:
+                continue
+            seen.add(name)
+            try:
+                value = float(default) if default.strip() else 0.0
+            except ValueError:
+                value = 0.0
+            out.append({"name": name, "default": value, "about": ""})
+    lines = src["image"].splitlines()
+    head = []
+    for line in lines:
+        if not line.strip() or not line.lstrip().startswith("//"):
+            if head:
+                break
+            continue
+        head.append(line)
+    about: dict = {}
+    for i, line in enumerate(head):
+        m = _ABOUT.match(line)
+        if not m:
+            continue
+        text = [m.group(3).strip()]
+        col = len(line) - len(m.group(3))            # where the description starts
+        for nxt in head[i + 1:]:                     # lines indented as deep go on with it
+            body = nxt.split("//", 1)[1]
+            if _ABOUT.match(nxt) or not body.strip() or len(nxt) - len(body.lstrip()) < col:
+                break
+            text.append(body.strip())
+        for name in re.split(r"\s*,\s*", m.group(2)):
+            about.setdefault(name, " ".join(text))
+    notes = " ".join(l.lstrip()[2:].strip() for l in head)
+    notes = re.sub(r"^.*?notes:\s*", "", notes)
+    for u in out:
+        if u["name"] in about:
+            u["about"] = about[u["name"]]
+        else:
+            hit = re.search(rf"[^.;·]*\b{re.escape(u['name'])}\b[^.;·]*", notes)
+            u["about"] = hit.group(0).strip() if hit else ""
+    return out
+
+
 def wrap(code: str, extra=(), common: str = "", buffer: bool = False) -> str:
     """The fragment shader for one pass: Shadertoy's inputs declared above it, a ``main`` below."""
     if "mainImage" not in code:
@@ -252,7 +309,7 @@ class Shadertoy:
             tex.build_mipmaps()
         return tex
 
-    def _inputs(self, pass_: str, frame, sound=None):
+    def _inputs(self, pass_: str, frame, sound=None, mask=None):
         """The textures a pass reads, bound to units 1..4, and their sizes."""
         textures, res = {}, [(0.0, 0.0, 1.0)] * CHANNELS
         for i, src in self.channels.get(pass_, {}).items():
@@ -263,6 +320,10 @@ class Shadertoy:
             elif src == "sound":
                 img = sound if sound is not None else np.zeros((2, SOUND_BINS), np.uint8)
                 tex = self._upload((pass_, i), img, sound=True)
+                size = (img.shape[1], img.shape[0])
+            elif src in ("mask", "mask_distance"):
+                img = mask if mask is not None else np.zeros((self.H, self.W), np.uint8)
+                tex = self._upload((pass_, i), img)
                 size = (img.shape[1], img.shape[0])
             elif src == "frame" and frame is not None and not isinstance(frame, np.ndarray):
                 tex = self._frame_texture((pass_, i), frame)       # already on the GPU
@@ -278,10 +339,10 @@ class Shadertoy:
         return textures, res
 
     def render(self, time: float, dt: float = 1.0 / 30, frame=None, sound=None, target=None,
-               **uniforms):
+               mask=None, **uniforms):
         """Draw at shader time ``time``; ``frame`` the picture for "frame" channels (numpy, or a
         compositor texture), ``sound`` the texture for "sound" ones (``sound_texture``);
-        ``uniforms`` the extra knobs. With ``target`` (a compositor texture) the picture is
+        ``mask`` the one-channel picture for "mask" / "mask_distance" ones; ``uniforms`` the extra knobs. With ``target`` (a compositor texture) the picture is
         drawn into it and stays on the GPU — not for shaders that read "previous"."""
         if target is not None and self.reads("previous"):
             raise ValueError("shadertoy: a shader that reads its previous output renders on the CPU")
@@ -298,7 +359,7 @@ class Shadertoy:
                 if b not in self.buffers:
                     continue
                 prog, vao = self._progs[b]
-                textures, res = self._inputs(b, frame, sound)
+                textures, res = self._inputs(b, frame, sound, mask)
                 _set(prog, {**values, "iChannelResolution": res})
                 for unit, tex in textures.items():
                     tex.use(unit)
@@ -308,7 +369,7 @@ class Shadertoy:
                 if b in self._mip:
                     self._tex_buf[b][nxt].build_mipmaps()
                 self._cur[b] = nxt
-            textures, res = self._inputs("image", frame, sound)
+            textures, res = self._inputs("image", frame, sound, mask)
         if target is not None:
             self._pass.draw_into(target, textures=textures, **values, iChannelResolution=res)
             self._frame += 1

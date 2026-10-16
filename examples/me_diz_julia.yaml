@@ -1,0 +1,32 @@
+# Me diz, the figures caught in a Julia set (shaders/shadertoy/julia_figuras_arc.glsl)
+# alone, full frame: a Julia set whose orbit trap is the figures themselves (channel1:
+# mask_distance), so the capybara, the title, the flower repeat along its filaments at every
+# scale. The chord's root moves c round the circle (a new Julia on each chord), the kick
+# swells the trap, the snare spins the plane, the recursion deepens across each shot
+# (cut: phase). The strip at the bottom (source: meters) shows the drivers. Commands: see
+# me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/julia_figuras_arc.glsl
+      uniforms:
+        u_c: &root {chord: &score {score: input/me_diz/sheetsage, snap: beat}, part: root, glide: 1.0}
+        u_trap: 1.2
+        u_kick: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.35}
+        u_depth: &depth {cut: phase, gain: 40, bias: 10}
+        u_zoom: 1.6
+        u_spin: {rate: 0.8, base: 0.05, from: &snare {hits: {track: drums (midi), notes: [38]}, envelope: 0.4}}
+    - source: meters
+      title: figures in a Julia set
+      subtitle: root -> c · kick swells the trap · snare spins · shot deepens it
+      lanes:
+        - {label: chord, chords: *score}
+        - {label: chord root -> c (a new Julia), knob: *root}
+        - {label: kick -> trap swell, knob: *kick, range: [0, 1]}
+        - {label: snare -> spin burst, knob: *snare, range: [0, 1]}
+        - {label: shot phase -> depth, knob: *depth}

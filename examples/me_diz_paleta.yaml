@@ -1,0 +1,22 @@
+# Me diz, the chord's palette (core/video/chord_color.py) alone over the clips: the picture
+# is regraded towards the colours of the chord that sounds (its root sets the hue, a minor
+# chord cools and darkens it, a major one warms it), and the kick lifts it for a moment.
+# The strip at the bottom (source: meters) shows the chords and the kick going past.
+# Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: chord_color
+      harmony: &score {score: input/me_diz/sheetsage, snap: beat}
+      amount: 0.8
+      pulse: {hits: {track: drums (midi), notes: [36]}, envelope: 0.35, amount: 0.3}
+    - source: meters
+      title: chord palette
+      subtitle: the chord regrades the picture · the kick lifts it
+      lanes:
+        - {label: chord -> palette, chords: *score}
+        - {label: kick -> lift, knob: {hits: {track: drums (midi), notes: [36]}, envelope: 0.35}, range: [0, 1]}

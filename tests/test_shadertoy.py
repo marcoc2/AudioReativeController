@@ -341,3 +341,62 @@ def test_disabled_layer_is_left_out():
     stack = build_compositor(None, cfg, [], 8, 8)
     assert len(stack) == 1
     assert stack.frame_at(0.0).max() == 0
+
+
+def test_the_chords_kaleidoscope_takes_each_symmetry():
+    knobs = ("u_mode", "u_root", "u_third", "u_fifth", "u_kick", "u_snare", "u_orbit", "u_glow")
+    toy = _toy(load("shaders/shadertoy/kifs_acorde_arc.glsl")["image"], extra=knobs)
+    base = dict(u_root=4.0, u_third=7.0, u_fifth=11.0, u_kick=0.0, u_snare=0.0, u_orbit=0.1, u_glow=0.5)
+    shots = [toy.render(3.0, u_mode=m, **base) for m in (0.0, 0.5, 1.0)]
+    for img in shots:
+        assert img.std() > 8                                      # a shape on the background, not a flat fill
+    assert np.abs(shots[0].astype(int) - shots[2]).mean() > 5     # minor and major: other crystals
+
+
+def test_newton_paints_one_basin_per_chord_note():
+    knobs = ("u_t0", "u_t1", "u_t2", "u_t3", "u_size", "u_relax", "u_kick", "u_spin", "u_zoom", "u_video")
+    toy = _toy(load("shaders/shadertoy/newton_acorde_arc.glsl")["image"], extra=knobs)
+    base = dict(u_relax=1.0, u_kick=0.0, u_spin=0.0, u_zoom=1.0, u_video=0.0)
+    triad = toy.render(1.0, u_t0=7.0, u_t1=11.0, u_t2=2.0, u_t3=7.0, u_size=3.0, **base)
+    seventh = toy.render(1.0, u_t0=11.0, u_t1=3.0, u_t2=6.0, u_t3=9.0, u_size=4.0, **base)
+    colours = lambda img: len({tuple(c) for c in (img[::4, ::4] // 64).reshape(-1, 3)})
+    assert colours(triad) >= 3 and np.abs(triad.astype(int) - seventh).mean() > 10
+
+
+def test_lyapunov_changes_with_the_groove():
+    knobs = ("u_seq", "u_prev", "u_len", "u_bar", "u_hue", "u_pan", "u_kick")
+    toy = _toy(load("shaders/shadertoy/lyapunov_bateria_arc.glsl")["image"], extra=knobs)
+    base = dict(u_len=16.0, u_bar=0.0, u_hue=0.12, u_pan=0.0, u_kick=0.0)
+    four = toy.render(1.0, u_seq=4369.0, u_prev=4369.0, **base)
+    clave = toy.render(1.0, u_seq=float(0b0010010010010001), u_prev=float(0b0010010010010001), **base)
+    assert four.std() > 20 and np.abs(four.astype(int) - clave).mean() > 5
+
+
+def test_the_mask_channels_reach_the_shader():
+    code = "void mainImage(out vec4 o, in vec2 f){ o = vec4(texture(iChannel0, f / iResolution.xy).rrr, 1.0); }"
+    toy = _toy(code, channels={"image": {0: "mask_distance"}})
+    m = np.zeros((H, W), np.uint8)
+    m[:, : W // 2] = 200
+    out = toy.render(1.0, mask=m)
+    assert out[H // 2, 5, 0] > 190 and out[H // 2, W - 5, 0] < 10
+    with pytest.raises(ValueError, match="mask track"):
+        ShadertoyLayer({"file": "shaders/shadertoy/julia_figuras_arc.glsl"}, [], W, H, 30)
+
+
+def test_subframes_blur_what_moves():
+    code = ("void mainImage(out vec4 o, in vec2 f){ float x = fract(iTime * 4.0) * iResolution.x;"
+            " o = vec4(vec3(abs(f.x - x) < 2.0 ? 1.0 : 0.0), 1.0); }")
+    import os, tempfile
+    path = os.path.join(tempfile.mkdtemp(), "bar.glsl")
+    open(path, "w").write(code)
+    try:
+        sharp = ShadertoyLayer({"file": path, "start": 0.0}, [], W, H, 30)
+        blur = ShadertoyLayer({"file": path, "start": 0.0, "subframes": 6, "shutter": 1.0}, [], W, H, 30)
+        for t in (0.0, 1 / 30, 2 / 30):
+            a, b = sharp._draw(None, t), blur._draw(None, t)
+    except Exception as e:
+        if "context" in str(e).lower() or "moderngl" in str(e).lower():
+            pytest.skip("no GPU/moderngl context available")
+        raise
+    lit = lambda img: (img[H // 2, :, 0] > 10).sum()
+    assert lit(b) > 2 * lit(a)                                   # the moving bar smeared along its path
