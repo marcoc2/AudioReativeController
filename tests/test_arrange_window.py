@@ -195,3 +195,40 @@ def test_generators_and_fx_on_the_timeline(window):
     R.btn_undo()                                                          # the bars
     R.btn_undo()                                                          # the generator
     assert [l.label for l in R.A.lanes] == ["grain", "lion", "clip montage"]
+
+
+def test_the_plugin_window_sets_and_links_parameters(window):
+    R, host, path = window
+    R.insert_master("grain")
+    R.insert_background("shadertoy:nebulosa_arc")
+    grain = next(k for k, l in enumerate(R.A.lanes) if l.label == "grain")
+    neb = next(k for k, l in enumerate(R.A.lanes) if l.label == "nebulosa_arc")
+    R.open_plugin(grain)
+    assert dpg.is_item_shown("arr_plugin") and "grain - FX" in dpg.get_item_label("arr_plugin")
+    uid_grain = R.A.plugin
+    assert R.set_param(uid_grain, ("amount",), 0.2) == ""
+    assert R.set_param(uid_grain, ("mix",), 0.5) == ""
+    R.open_plugin(neb)
+    uid_neb = R.A.plugin
+    kick = {"hits": {"track": "kick"}, "envelope": 0.3}
+    defines = R.PluginTarget(uid_neb, "nebulosa_arc")                 # under grain: first in the file
+    assert defines.apply(("uniforms", "u_form"), kick, "kick", {}) is None    # a knob, named a signal
+    assert defines.value(("uniforms", "u_form")) == (kick, "&kick")
+    uses = R.PluginTarget(uid_grain, "grain")
+    assert "kick" in uses.anchors()
+    uses.apply(("burst",), None, None, {(): uses.anchors()["kick"]})  # grain uses the signal
+    assert uses.value(("burst",))[1] == "*kick"
+    defines.apply(("uniforms", "u_form"), {"hits": {"track": "snare"}}, None, {})   # redefined: grain follows
+    assert uses.value(("burst",))[0] == {"hits": {"track": "snare"}}
+    R.set_param(uid_neb, ("uniforms", "u_hue"), 0.1)
+    R.set_param(uid_neb, ("uniforms", "u_hue"), None)                  # back to its default
+    R.btn_save()
+    text = path.read_text(encoding="utf-8")
+    layers = yaml.safe_load(text)["video"]["layers"]
+    g = next(l for l in layers if l["source"] == "grain")
+    n = next(l for l in layers if l["source"] == "shadertoy")
+    assert g["amount"] == 0.2 and g["mix"] == 0.5 and g["burst"] == {"hits": {"track": "snare"}}
+    assert n["uniforms"] == {"u_form": {"hits": {"track": "snare"}}}
+    assert "&kick" in text and "*kick" in text
+    R.btn_undo()                                                        # the plugin follows the undo
+    R._draw_plugin()

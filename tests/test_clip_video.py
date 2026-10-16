@@ -675,3 +675,17 @@ def test_wide_clips_turn_for_a_portrait_frame(tmp_path):
     assert turned[35, 10, 2] > 200 and turned[35, 10, 0] < 60
     kept = ClipLibrary(folder, 20, 40, 10, fit="cover").get(0).frame(0).astype(int)
     assert kept[20, 2, 0] > 200 and kept[20, 17, 2] > 200              # not turned: red left, blue right
+
+
+def test_an_fx_mix_is_its_dry_wet():
+    import numpy as np
+    from core.video.layers import build_compositor
+    def stack(**fx):
+        cfg = {"layers": [{"source": "solid", "color": [120, 120, 120]},
+                          {"source": "rgb_noise", "amount": 0.5, "seed": 3, **fx}]}
+        return build_compositor(None, cfg, [], 32, 16).frame_at(1.0).astype(int)
+    wet, dry, half = stack(), stack(mix=0.0), stack(mix=0.5)
+    assert (dry == 120).all()                                    # mix 0: the picture it was given
+    assert np.abs(wet - 120).mean() > 10                         # no mix: all of the noise
+    assert abs(np.abs(half - 120).mean() - np.abs(wet - 120).mean() / 2) < 2
+    assert (stack(mix=1.0) == wet).all()

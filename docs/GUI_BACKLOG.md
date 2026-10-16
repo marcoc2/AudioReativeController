@@ -196,6 +196,16 @@ que está embaixo. Um shader é FX quando alguma aba lê `frame`.
    grupos de `knob_forms` (batida, nota, harmonia, corte, áudio, tempo, figura), os sinais
    nomeados do projeto (kick, snare) à mão, e a curva sobre os compassos. Reaproveita o
    editor de knob (item 6) e o painel de sinais (item 7). Um **Mix** (seco/molhado) por FX.
+   **Feito (16/10/2026):** "Open plugin" (botão direito, o inspector, ou clique duplo no
+   nome da faixa) abre a janela do Generator/FX: ligar/desligar, blend e opacidade (Generator),
+   **mix** (FX), e cada parâmetro com o valor (o default em cinza), **Link** (o editor de
+   knob do studio, com a curva sobre a música) e **x** (volta ao default). Um knob pode ser
+   nomeado como sinal (`&kick`) e usado em outro plugin (`*kick`); mudar o sinal onde ele é
+   definido (o primeiro na ordem da pilha) muda todos que o usam. No motor: `mix:` num FX
+   (número ou knob, 0..1). O Arranjo agora guarda os sinais ao salvar (antes, salvar uma
+   camada editada que usava `*nome` a soltava do sinal). Falta: o Link de um parâmetro que
+   não é número (as fontes `trigger:`), e o knob na opacidade de um Generator (o motor só
+   aceita número).
 4. **FX numa faixa** (pixel_sort só no dançarino): a faixa vira um grupo que é composto à
    parte (a imagem dela + os seus FX, com o recorte) e só então misturado. É a mudança de
    motor (CPU e GPU). Antes dela, a saída barata é o FX valer só dentro da máscara do

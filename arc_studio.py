@@ -1183,12 +1183,15 @@ def _knob_value(row: dict, path: tuple):
     return plain(node), shared
 
 
-def _open_knob_editor(row: dict, path: tuple, default=0.0, mode: str = "knob") -> None:
+def _open_knob_editor(row: dict, path: tuple, default=0.0, mode: str = "knob", target=None) -> None:
     """Edit the knob at ``path`` in a layer row (``mode`` trigger / score: only a source,
-    the who-plays or the transcription a signal shares)."""
+    the who-plays or the transcription a signal shares). ``target``, in place of a row:
+    another owner of the layer (the Arrange window's plugin), with ``title``,
+    ``value(path)`` -> (plain, shared), ``anchors()`` -> {name: object} and
+    ``apply(path, spec, anchor, links)`` -> an error or None."""
     from core.knob_forms import new_state, state_of
     try:
-        value, shared = _knob_value(row, path)
+        value, shared = target.value(path) if target is not None else _knob_value(row, path)
     except Exception as exc:
         _set_status(f"knob: the layer's params do not parse ({exc})")
         return
@@ -1202,9 +1205,9 @@ def _open_knob_editor(row: dict, path: tuple, default=0.0, mode: str = "knob") -
             state["main"] = float(default)
     link = shared[1:] if shared and shared[0] == "*" else None
     S.knob_ctx = {"row": row, "path": tuple(path), "state": state, "shared": shared,
-                  "mode": mode, "link": link, "anchor": ""}
+                  "mode": mode, "link": link, "anchor": "", "target": target}
     where = " > ".join(map(str, path))
-    dpg.set_value("knob_title", f"{row['source']} · {where}")
+    dpg.set_value("knob_title", f"{target.title if target is not None else row['source']} · {where}")
     if shared and shared[0] == "*":
         note = (f"this is {shared}, a signal another layer defines: unlink it to give this "
                 f"layer its own")
@@ -1230,10 +1233,19 @@ def _knob_draw() -> None:
     _knob_show_yaml()
 
 
+def _knob_signals() -> list:
+    """The signals the open knob can use: the layer rows', or its target's."""
+    from core.scene_doc import plain
+    target = (S.knob_ctx or {}).get("target")
+    if target is None:
+        return _scene_signals()
+    return [{"name": n, "value": plain(o), "kind": _signal_kind(plain(o))} for n, o in target.anchors().items()]
+
+
 def _draw_knob_link(parent, ctx: dict) -> None:
     """Use a signal (a knob another place defines) or name this one so others can."""
     from core.knob_forms import state_of
-    sigs = {v["name"]: v for v in _scene_signals() if v["kind"] == "knob"}
+    sigs = {v["name"]: v for v in _knob_signals() if v["kind"] == "knob"}
     own = ctx["shared"][1:] if ctx["shared"] and ctx["shared"][0] == "&" else None
     others = [n for n in sigs if n != own]
 
@@ -1296,7 +1308,7 @@ def _draw_knob_source_link(st: dict, kind: str, pad: str) -> bool:
     else a menu of the signals of that kind. True when it is tied (no fields to draw)."""
     from core.knob_forms import _trigger_state
     src = st["source"]
-    sigs = {v["name"]: v for v in _scene_signals() if v["kind"] == kind}
+    sigs = {v["name"]: v for v in _knob_signals() if v["kind"] == kind}
 
     def use(s, v, src=src):
         if v not in sigs:
@@ -1522,7 +1534,8 @@ def btn_knob_apply() -> None:
         return
     import re
     row = ctx["row"]
-    anchors = _rows_anchors()
+    target = ctx.get("target")
+    anchors = target.anchors() if target is not None else _rows_anchors()
     anchor = str(ctx.get("anchor", "") or "").strip() or None
     if anchor and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", anchor):
         _set_status(f"signal name {anchor!r}: letters, digits, - and _ (a letter first)")
@@ -1540,6 +1553,15 @@ def btn_knob_apply() -> None:
         links = _knob_links(ctx["state"], (), anchors)
     else:
         links = {}
+    if target is not None:
+        err = target.apply(ctx["path"], _knob_spec(ctx), anchor, links)
+        if err:
+            _set_status(f"knob not set: {err}")
+            return
+        dpg.hide_item("knob_win")
+        S.knob_ctx = None
+        _set_status("knob set")
+        return
     try:
         row["params"] = set_knob(S.scene_doc or SceneDoc(), str(row.get("params", "")),
                                  ctx["path"], _knob_spec(ctx), extra=anchors, anchor=anchor,
@@ -2993,6 +3015,10 @@ class _ArrangeHost:
 
     def status(self, msg):
         _set_status(msg)
+
+    def edit_knob(self, target, path, default=0.0):
+        """The studio's knob editor on a parameter the Arrange window owns."""
+        _open_knob_editor(None, tuple(path), default, "knob", target)
 
     def reload_editor(self):
         btn_scene_to_editor()

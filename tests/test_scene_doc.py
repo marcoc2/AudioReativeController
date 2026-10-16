@@ -128,3 +128,15 @@ def test_comments_above_layers_follow_them_when_layers_come_and_go():
     assert "# the tint" not in out
     assert out.index("# the grain, last") < out.index("source: grain")
     assert out.index("source: footage") < out.index("# the grain, last")
+
+
+def test_plain_keeping_signals_writes_back_still_tied():
+    from core.scene_doc import SceneDoc, plain, plain_keeping_signals
+    doc = SceneDoc.from_text("video:\n  layers:\n    - source: grain\n      amount: &soft {hits: {track: kick}}\n"
+                             "      bars: [[1, 4]]\n    - source: rgb_split\n      amount: *soft\n")
+    nodes = doc.layers()
+    items = [[n, plain(n), plain_keeping_signals(n)] for n in nodes]
+    items[1][2] = {**items[1][2], "bars": [[5, 8]]}               # the second layer edited, its signal not
+    doc.set_layers([tuple(it) for it in items])
+    out = doc.dumps()
+    assert "amount: &soft {hits: {track: kick}}" in out and "amount: *soft" in out

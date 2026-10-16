@@ -2772,6 +2772,8 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
     Layers with ``source: clips`` map to the base; unknown sources raise.
     Without a ``layers:`` section, the result is just the base (legacy).
     A layer with ``enabled: false`` is skipped (kept in the scene, left out of the picture).
+    An FX (a post-op) with ``mix:`` (a number or a music knob, 0..1) shows that much of its
+    result over the picture it was given: its dry/wet.
     A layer with ``mask:`` shows only inside or outside the objects of a mask track
     (core/video/matte.py); ``masks`` is the track used when its ``mask:`` names none.
     Layer triggers accept MIDI ``notes`` or ``audio`` onset sources.
@@ -2996,11 +2998,20 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
                      blend if len(comp) else "normal", op_fn)
             continue
         raise ValueError(f"unknown layer source {src_name!r}")
-    for i, window in enumerate(windows):               # post-ops are added without opacity: gate them here
-        src, blend, opacity, matte = comp._layers[i]
-        if window is not None and hasattr(src, "process"):
-            comp._layers[i] = (src, blend, window, matte)
     enabled = [spec for spec in layers_cfg if spec.get("enabled", True) is not False]
+    for i, (window, spec) in enumerate(zip(windows, enabled)):   # post-ops are added without opacity:
+        src, blend, opacity, matte = comp._layers[i]                # their window and mix set it here
+        if not hasattr(src, "process"):
+            continue
+        mix = spec.get("mix")
+        if mix is not None:                             # an FX's dry/wet: 0 the picture it got .. 1 its result
+            wet = _music_knob("mix", mix, notes, features_at, onset_loader, grid,
+                              cuts=getattr(base, "cut_times", None))
+            comp._layers[i] = (src, blend, (lambda t, w=window, m=wet:
+                                            (w(t) if w is not None else 1.0) * min(1.0, max(0.0, float(m(t))))),
+                               matte)
+        elif window is not None:
+            comp._layers[i] = (src, blend, window, matte)
     for i, spec in enumerate(enabled):
         if spec.get("mask"):
             if i == 0:

@@ -61,6 +61,7 @@ class _A:
     relane = False
     thumbing = False
     entry = None               # the Generator or FX chosen in the browser (catalog key)
+    plugin = None              # the layer (uid) the plugin window shows
     catalog_drawn = False
     undo: list = []            # the arrangement before each edit, newest last
     redo: list = []            # what undo took back, newest last
@@ -127,13 +128,22 @@ def _load() -> None:
         _status("no scene file: load or create one in the studio first")
         _relane()
         return
+    from core.scene_doc import plain_keeping_signals
     A.doc = SceneDoc.load(path)
-    A.items = [[node, plain(node), plain(node)] for node in A.doc.layers()]
+    A.items = [[node, plain(node), plain_keeping_signals(node), _uid()] for node in A.doc.layers()]
     A.sel, A.dirty, A.cues = None, False, {}
     A.undo, A.redo = [], []
     _relane()
     _status(f"arranging {Path(path).name}: {len(A.lanes)} lane(s)")
     _load_cues()
+
+
+_UIDS = iter(range(1, 1 << 62))
+
+
+def _uid() -> int:
+    """A layer's steady name in the window (its place in the stack changes)."""
+    return next(_UIDS)
 
 
 def _specs() -> list:
@@ -144,6 +154,7 @@ def _relane() -> None:
     A.lanes = list(reversed(arr.lanes_of(_specs())))      # the top of the picture on top
     _draw()
     _draw_inspector()
+    _draw_plugin()
 
 
 def _load_cues() -> None:
@@ -204,7 +215,7 @@ def btn_save() -> None:
     if A.doc is None:
         _status("nothing to save: no scene")
         return
-    A.doc.set_layers([tuple(it) for it in A.items])
+    A.doc.set_layers([tuple(it[:3]) for it in A.items])
     _flow_blocks(A.doc)
     saved = list(A.doc.layers())
     path = A.host.scene_path()
@@ -222,15 +233,15 @@ def _rebase(history: list, saved: list) -> list:
     is the same layer in the file now; one that was not (deleted, then undone) comes back
     as a new layer."""
     now = {id(node): (A.items[i][0], A.items[i][1]) for i, node in enumerate(saved) if i < len(A.items)}
-    return [([[*now.get(id(node), (None, None)), spec] for node, _, spec in items], sel)
+    return [([[*now.get(id(node), (None, None)), spec, uid] for node, _, spec, uid in items], sel)
             for items, sel in history]
 
 
 # ----------------------------------------------------------------------- edits
 
 def _snapshot() -> tuple:
-    import copy
-    return [[node, base, copy.deepcopy(spec)] for node, base, spec in A.items], A.sel
+    from core.scene_doc import plain_keeping_signals            # a copy; the signals stay shared
+    return [[node, base, plain_keeping_signals(spec), uid] for node, base, spec, uid in A.items], A.sel
 
 
 def _checkpoint() -> None:
@@ -331,7 +342,7 @@ def btn_add_background() -> None:
         return
     at = arr.insert_at(_specs(), "background")
     _checkpoint()
-    A.items.insert(at, [None, None, arr.new_background()])
+    A.items.insert(at, [None, None, arr.new_background(), _uid()])
     A.dirty = True
     _relane()
     _status("background lane added: drag across it to put the chosen clip there")
@@ -344,7 +355,7 @@ def btn_add_character() -> None:
     spec = arr.new_foreground(A.clip)
     at = arr.insert_at(_specs(), "foreground")
     _checkpoint()
-    A.items.insert(at, [None, None, spec])
+    A.items.insert(at, [None, None, spec, _uid()])
     A.dirty = True
     _relane()
     _status(f"character lane {Path(A.clip).stem} added"
@@ -358,7 +369,7 @@ def insert_entry(key: str, at: int, where: str = "") -> None:
     if A.doc is None or e is None:
         return
     _checkpoint()
-    A.items.insert(at, [None, None, e.spec()])
+    A.items.insert(at, [None, None, e.spec(), _uid()])
     A.dirty = True
     _relane()
     A.sel = (next(k for k, lane in enumerate(A.lanes) if lane.index == at), None)
@@ -429,6 +440,9 @@ def context_menu(x: float, y: float) -> None:
             _catalog_menu("Insert generator above", catalog.GENERATOR, lambda key: insert_above(key, k))
             _catalog_menu("Add FX above (works on it and what is under it)", catalog.FX,
                           lambda key: insert_above(key, k))
+            if lane.kind in (arr.GENERATOR, arr.FX):
+                dpg.add_menu_item(label="Open plugin (its parameters, linked to the music)...",
+                                  callback=lambda: (_close_menu(), open_plugin(k)))
             if lane.kind != arr.MONTAGE:
                 dpg.add_menu_item(label="Turn on" if not lane.enabled else "Turn off (bypass)",
                                   callback=lambda: (_close_menu(), _toggle(k)))
@@ -473,6 +487,13 @@ def on_canvas_click(sender, app_data) -> None:
         context_menu(*_mouse_in_canvas())
     elif app_data[0] == 0:
         press(*_mouse_in_canvas())
+
+
+def on_canvas_double_click(sender, app_data) -> None:
+    x, y = _mouse_in_canvas()
+    k = _lane_at(y)
+    if k is not None and x < LABEL_W and A.lanes[k].kind in (arr.GENERATOR, arr.FX):
+        open_plugin(k)
 
 
 def on_mouse_release(sender, app_data) -> None:
@@ -818,11 +839,237 @@ def _draw_effect_inspector(k: int, p) -> None:
             dpg.add_text("master: works on the whole picture" if _is_master(k)
                          else "works on every track under it", color=(150, 150, 160))
         dpg.add_button(label="delete track", callback=lambda: _delete_lane(k))
+        dpg.add_button(label="Open plugin...", callback=lambda: open_plugin(k))
     if e and e.needs:
         dpg.add_text("needs " + " and ".join("a mask track (SAM2)" if n == "masks" else "the clip montage's cuts"
                                              for n in e.needs), parent=p, color=(200, 160, 100))
-    dpg.add_text("its parameters: the layer editor for now (the plugin window, with Link to the music, "
-                 "comes next)", parent=p, color=(120, 120, 140), wrap=700)
+    dpg.add_text("its parameters: Open plugin (or double-click the track's name)", parent=p,
+                 color=(120, 120, 140), wrap=700)
+
+
+# ----------------------------------------------------------------------- the plugin window
+
+def _item(uid):
+    return next((it for it in A.items if it[3] == uid), None)
+
+
+def _signals() -> dict:
+    """name -> object: the signals (YAML anchors) the arrangement's layers carry, the first
+    by stack order, then the rest of the scene's."""
+    from core.scene_doc import _walk, _anchor_name, anchors_in
+    out: dict = {}
+    for it in A.items:
+        for _, o in _walk(it[2]):
+            name = _anchor_name(o)
+            if name and name not in out:
+                out[name] = o
+    for name, o in (anchors_in(A.doc.data) if A.doc is not None else {}).items():
+        out.setdefault(name, o)
+    return out
+
+
+def _defines(uid, obj) -> bool:
+    """Whether the layer ``uid`` is the first (by stack order) to hold ``obj``: where a
+    signal is defined; the later ones use it."""
+    from core.scene_doc import _walk
+    for it in A.items:
+        if any(o is obj for _, o in _walk(it[2])):
+            return it[3] == uid
+    return False
+
+
+def _param_path(spec: dict, name: str) -> tuple:
+    return ("uniforms", name) if spec.get("source") == "shadertoy" and name.startswith("u_") else (name,)
+
+
+def set_param(uid, path: tuple, value, anchor=None, links=None) -> str:
+    """Set (``value`` None: take out) a parameter of the layer ``uid``; a knob that follows
+    the music, a number, or (``links``) tied to signals: {(): obj} the whole of it, {sub
+    path: obj} a part (who plays). A signal this layer defines is changed for every layer
+    that uses it. Returns an error, or ""."""
+    import copy
+    from core.scene_doc import _anchor_name, _replace_ids, flow, get_path, plain_keeping_signals
+    it = _item(uid)
+    if it is None:
+        return "that track is not in the arrangement any more"
+    spec = plain_keeping_signals(it[2])
+    holder = spec
+    for k in path[:-1]:
+        nxt = holder.get(k)
+        nxt = dict(nxt) if isinstance(nxt, dict) else {}
+        holder[k] = nxt
+        holder = nxt
+    last = path[-1]
+    old = holder.get(last)
+    links = dict(links or {})
+    redefined = None                                     # a signal defined here, given a new value
+    if value is None and not links:
+        new = None
+        holder.pop(last, None)
+        if len(path) == 2 and not holder:                # no uniforms left
+            spec.pop(path[0], None)
+    elif () in links:
+        new = links[()]
+        holder[last] = new
+    else:
+        new = flow(copy.deepcopy(value))
+        for part, obj in links.items():
+            h = get_path(new, tuple(part[:-1]))
+            if isinstance(h, (dict, list)):
+                h[part[-1]] = obj
+        if isinstance(old, (dict, list)) and _anchor_name(old) and _defines(uid, old):
+            redefined = old
+        name = _anchor_name(redefined) or anchor
+        if name:
+            if not isinstance(new, (dict, list)):
+                return "only a knob that follows the music can be a signal (a plain number cannot)"
+            new.yaml_set_anchor(name, always_dump=True)
+        holder[last] = new
+    _checkpoint()
+    it[2] = spec
+    if redefined is not None:                            # the layers that use it follow
+        for other in A.items:
+            if other is not it:
+                other[2] = _replace_ids(plain_keeping_signals(other[2]), {id(redefined): new})
+    A.dirty = True
+    _relane()
+    return ""
+
+
+class PluginTarget:
+    """What the studio's knob editor needs to edit a parameter the arrangement owns."""
+
+    def __init__(self, uid, title: str):
+        self.uid, self.title = uid, title
+
+    def value(self, path):
+        from core.scene_doc import _anchor_name, get_path, plain
+        it = _item(self.uid)
+        obj = get_path(it[2], tuple(path)) if it else None
+        name = _anchor_name(obj)
+        shared = (("&" if _defines(self.uid, obj) else "*") + name) if name else None
+        return plain(obj), shared
+
+    def anchors(self):
+        return _signals()
+
+    def apply(self, path, spec, anchor, links):
+        return set_param(self.uid, tuple(path), spec, anchor, links) or None
+
+
+def open_plugin(lane_k: int) -> None:
+    """A Generator's or FX's window: each parameter with its value and a Link to the music."""
+    lane = A.lanes[lane_k]
+    A.plugin = next(it[3] for it in A.items if it[2] is lane.spec)
+    if not dpg.does_item_exist("arr_plugin"):
+        with dpg.window(tag="arr_plugin", width=560, height=640, pos=(560, 60), on_close=_plugin_closed):
+            dpg.add_group(tag="arr_plugin_body")
+    dpg.show_item("arr_plugin")
+    _draw_plugin()
+    dpg.focus_item("arr_plugin")
+
+
+def _plugin_closed(*_):
+    A.plugin = None
+
+
+def _summary(value) -> str:
+    """A knob on one line: what in the music moves it."""
+    from core.scene_doc import plain
+    import yaml
+    text = yaml.safe_dump(plain(value), default_flow_style=True, width=1 << 16).strip()
+    return text if len(text) <= 64 else text[:61] + "..."
+
+
+def _draw_plugin() -> None:
+    from core import catalog
+    from core.knob_forms import form_of
+    from core.scene_doc import _anchor_name, plain
+    if not dpg.does_item_exist("arr_plugin") or not dpg.is_item_shown("arr_plugin") or A.plugin is None:
+        return
+    body = "arr_plugin_body"
+    dpg.delete_item(body, children_only=True)
+    it = _item(A.plugin)
+    if it is None:
+        dpg.configure_item("arr_plugin", label="Plugin")
+        dpg.add_text("this track is not in the arrangement now (undone or deleted)", parent=body,
+                     color=(200, 160, 100))
+        return
+    uid, spec = it[3], it[2]
+    e = catalog.of_layer(spec)
+    kind = "FX" if e and e.kind == catalog.FX else "Generator"
+    name = e.label if e else str(spec.get("source"))
+    dpg.configure_item("arr_plugin", label=f"{name} - {kind}" + (f" · {e.category}" if e else ""))
+    if e:
+        dpg.add_text(e.about, parent=body, wrap=530)
+    on = spec.get("enabled", True) is not False
+    with dpg.group(horizontal=True, parent=body):
+        dpg.add_checkbox(label="on", default_value=on,
+                         callback=lambda s, v: set_param(uid, ("enabled",), None if v else False))
+        if kind == "Generator":
+            dpg.add_text("blend")
+            dpg.add_combo(["normal", "add", "screen", "multiply"], default_value=spec.get("blend", "normal"),
+                          width=90, callback=lambda s, v: set_param(uid, ("blend",), None if v == "normal" else v))
+            op = spec.get("opacity", 1.0)
+            dpg.add_text("opacity")
+            if isinstance(op, (int, float)):
+                dpg.add_slider_float(default_value=float(op), min_value=0.0, max_value=1.0, width=120,
+                                     callback=lambda s, v: set_param(uid, ("opacity",), None if v >= 1.0 else round(v, 3)))
+    params = list(e.params) if e else []
+    if kind == "FX":
+        params.insert(0, catalog.Param("mix", 1.0, "dry/wet: 0 the picture it was given .. 1 all of its result"))
+    known = {p.name for p in params}
+    extra = [k for k in spec if k not in known and k not in catalog.COMMON_KEYS and k not in ("file", "uniforms", "mix")]
+    params += [catalog.Param(k, None, "") for k in extra]
+    dpg.add_separator(parent=body)
+    dpg.add_text("~ the music can move it: Link chooses what (kick, snare, amplitude, notes, chords...)",
+                 parent=body, color=(120, 120, 140), wrap=530)
+    with dpg.table(parent=body, header_row=False, policy=dpg.mvTable_SizingFixedFit, scrollY=True,
+                   height=-1, borders_innerH=True):
+        dpg.add_table_column(width_fixed=True, init_width_or_weight=130)
+        dpg.add_table_column(width_stretch=True)
+        dpg.add_table_column(width_fixed=True, init_width_or_weight=110)
+        for prm in params:
+            path = _param_path(spec, prm.name)
+            from core.scene_doc import get_path
+            value = get_path(spec, path)
+            with dpg.table_row():
+                label = dpg.add_text(("~ " if prm.knob else "  ") + prm.name,
+                                     color=(230, 210, 140) if value is not None else (170, 170, 180))
+                if prm.about:
+                    with dpg.tooltip(label):
+                        dpg.add_text(prm.about, wrap=380)
+                numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
+                if numeric or (value is None and prm.knob):
+                    shown = float(value) if numeric else float(prm.default)
+                    dpg.add_input_float(default_value=shown, width=-1, step=0, format="%.4g", on_enter=True,
+                                        callback=lambda s, v, path=path: set_param(uid, path, v))
+                elif value is None:
+                    dpg.add_text("-" if prm.default is None else str(prm.default), color=(120, 120, 130))
+                else:
+                    sig = _anchor_name(value)
+                    dpg.add_text(("*" + sig + "  " if sig else "") + _summary(value),
+                                 color=(230, 210, 140) if sig else (170, 210, 170))
+                with dpg.group(horizontal=True):
+                    if prm.knob or (isinstance(value, dict) and form_of(plain(value)) is not None):
+                        dpg.add_button(label="Link" if not isinstance(value, dict) else "Edit",
+                                       callback=lambda s, a, path=path, d=prm.default: _link(uid, path, d))
+                    if value is not None:
+                        dpg.add_button(label="x", callback=lambda s, a, path=path: set_param(uid, path, None))
+                        with dpg.tooltip(dpg.last_item()):
+                            dpg.add_text("back to its default")
+
+
+def _link(uid, path: tuple, default) -> None:
+    """The studio's knob editor on this parameter."""
+    it = _item(uid)
+    if it is None or not hasattr(A.host, "edit_knob"):
+        _status("Link needs the studio's knob editor")
+        return
+    from core import catalog
+    e = catalog.of_layer(it[2])
+    title = e.label if e else str(it[2].get("source"))
+    A.host.edit_knob(PluginTarget(uid, title), path, default if isinstance(default, (int, float)) else 0.0)
 
 
 # ----------------------------------------------------------------------- the browser
@@ -1090,6 +1337,7 @@ def build(host) -> None:
                     dpg.add_drawlist(width=CANVAS_W, height=200, tag="arr_canvas")
                 with dpg.item_handler_registry(tag="arr_canvas_handler"):
                     dpg.add_item_clicked_handler(callback=on_canvas_click)
+                    dpg.add_item_double_clicked_handler(callback=on_canvas_double_click)
                 dpg.bind_item_handler_registry("arr_canvas", "arr_canvas_handler")
                 dpg.add_separator()
                 with dpg.child_window(height=-1, border=False):

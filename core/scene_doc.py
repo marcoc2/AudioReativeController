@@ -55,6 +55,18 @@ def plain(obj: Any) -> Any:
     return obj
 
 
+def plain_keeping_signals(obj: Any) -> Any:
+    """``plain(obj)``, but its signals (the anchored parts) kept as the scene's objects: what
+    is edited as plain values can be written back (``apply_diff``) with them still tied."""
+    if isinstance(obj, (dict, list)) and _anchor_name(obj):
+        return obj
+    if isinstance(obj, dict):
+        return {plain(k): plain_keeping_signals(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [plain_keeping_signals(v) for v in obj]
+    return plain(obj)
+
+
 def _anchor_name(obj: Any) -> Optional[str]:
     a = getattr(obj, "anchor", None)
     return getattr(a, "value", None) if a is not None else None
