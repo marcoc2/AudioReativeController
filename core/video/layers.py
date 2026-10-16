@@ -38,6 +38,7 @@ LAYER_SOURCES = (
     "shockwave", "slitscan", "grain", "echoes", "rgb_split", "mandelbox", "mandelbulb",
     "julia", "cubes", "chord_color", "transition", "flame_lens", "datamosh",
     "time_map", "pixel_sort", "nebulabrot", "deep_zoom", "flythrough", "meters", "footage",
+    "group",
 )
 
 
@@ -2772,10 +2773,12 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
     Layers with ``source: clips`` map to the base; unknown sources raise.
     Without a ``layers:`` section, the result is just the base (legacy).
     A layer with ``enabled: false`` is skipped (kept in the scene, left out of the picture).
+    A source's ``opacity:`` is a number or a music knob (0..1).
     An FX (a post-op) with ``mix:`` (a number or a music knob, 0..1) shows that much of its
     result over the picture it was given: its dry/wet.
     A source layer with ``fx:`` (a list of FX layers) puts its own picture through them
-    before it joins the stack (core/video/track_fx.py).
+    before it joins the stack; a ``group`` is a lane of the Arrange window, its layers and
+    then its FX (core/video/track_fx.py).
     A layer with ``mask:`` shows only inside or outside the objects of a mask track
     (core/video/matte.py); ``masks`` is the track used when its ``mask:`` names none.
     Layer triggers accept MIDI ``notes`` or ``audio`` onset sources.
@@ -2784,7 +2787,8 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
     comp.size = (width, height)
     # no layers: section -> legacy single clips base; a layers: list is
     # used as-is (first layer = canvas), so pure-generative scenes work
-    layers_cfg = video_cfg.get("layers") or [{"source": "clips"}]
+    from core.video.track_fx import expand_groups
+    layers_cfg = expand_groups(video_cfg.get("layers") or [{"source": "clips"}])   # the background lane, spliced
     windows: list = []
     tracks: dict = {}                                   # one mask-track reader per folder, shared
     for spec in layers_cfg:
@@ -2794,11 +2798,14 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
         blend = spec.get("blend", "normal")
         static_op = spec.get("opacity")
         op_fn = (lambda t, v=float(static_op): v) if isinstance(static_op, (int, float)) else None
+        if isinstance(static_op, dict):                 # a music knob: how much of it shows, 0..1
+            knob = _music_knob("opacity", static_op, notes, features_at, onset_loader, grid,
+                               cuts=getattr(base, "cut_times", None))
+            op_fn = lambda t, f=knob: min(1.0, max(0.0, float(f(t))))
         window = BarWindow(spec, grid) if "bars" in spec else None
         windows.append(window)
         if window is not None:
-            op_fn = (lambda t, w=window, v=float(static_op) if isinstance(static_op, (int, float)) else 1.0:
-                     w(t) * v)
+            op_fn = (lambda t, w=window, f=op_fn: w(t) * (f(t) if f is not None else 1.0))
         if src_name == "clips":
             comp.add(base, blend if len(comp) else "normal", op_fn)
             continue
@@ -2910,6 +2917,15 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             from core.video.footage import Footage
             comp.add(Footage(spec, width, height, tracks=tracks, notes=notes, features_at=features_at,
                              onset_loader=onset_loader, grid=grid), blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "group":                       # a lane drawn on its own (core/video/track_fx.py)
+            from core.video.track_fx import Group
+
+            def build(layers, given):
+                return build_compositor(given, {"layers": layers}, notes, width, height,
+                                        onset_loader=onset_loader, fps=fps, features_at=features_at,
+                                        grid=grid, masks=masks)
+            comp.add(Group(spec, build, width, height, base), blend if len(comp) else "normal", op_fn)
             continue
         if src_name == "flythrough":
             from core.video.flythrough import FlythroughLayer

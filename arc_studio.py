@@ -922,8 +922,10 @@ def _layers_to_rows(video_cfg: dict, doc=None) -> list:
     nodes = doc.layers() if doc is not None else []
     for i, spec in enumerate(video_cfg.get("layers") or []):
         spec = spec or {}
-        params = {k: v for k, v in spec.items() if k not in _LAYER_KEYS}
         op = spec.get("opacity", 1.0)
+        op_knob = not isinstance(op, (int, float))       # opacity that follows the music: in the text
+        params = {k: v for k, v in spec.items() if k not in _LAYER_KEYS or (k == "opacity" and op_knob)}
+        skip = tuple(k for k in _LAYER_KEYS if not (k == "opacity" and op_knob))
         node = nodes[i] if i < len(nodes) else None
         rows.append({
             "source":  spec.get("source", "clips"),
@@ -932,7 +934,7 @@ def _layers_to_rows(video_cfg: dict, doc=None) -> list:
             "blend":   spec.get("blend", "normal"),
             "opacity": float(op) if isinstance(op, (int, float)) else 1.0,
             "bars":    _yaml_flow(spec["bars"]) if "bars" in spec else "",
-            "params":  doc.layer_text(i) if node is not None else
+            "params":  doc.layer_text(i, skip) if node is not None else
                        yaml.safe_dump(params, allow_unicode=True, sort_keys=False) if params else "",
             "_node":   node,
         })
@@ -988,8 +990,8 @@ def _rows_to_layer_items(rows: list, doc=None) -> list:
                 except yaml.YAMLError as exc:
                     raise ValueError(f"layer {i} ({r['source']}): bars is not valid YAML: {exc}")
             for k, v in params.items():
-                if k not in _LAYER_KEYS:
-                    spec[k] = v
+                if k not in _LAYER_KEYS or (k == "opacity" and not isinstance(v, (int, float))):
+                    spec[k] = v                  # an opacity knob lives in the text, over the slider
             built[i] = spec
         if len(unresolved) == len(pending):
             i, r, exc = unresolved[0]
@@ -2420,14 +2422,17 @@ def _resolve_output_lane():
         _log(f"Output lane indisponivel: {exc}")
 
 
-def _clip_preview_frames(start_t: float, n_frames: int) -> list:
+def _clip_preview_frames(start_t: float, n_frames: int, layers=None) -> list:
     """Render preview frames with the same stack a full render uses: the ClipComposer
-    (when the scene has clips) under the scene's layers — generators, shaders, post-ops."""
+    (when the scene has clips) under the scene's layers — generators, shaders, post-ops.
+    ``layers``: in place of the scene file's (the Arrange window's, not saved yet)."""
     from core.video.clip_library import ClipLibrary
     from core.video.composer import ClipComposer
     from core.video.layers import build_compositor
 
     video_cfg = _effective_video_cfg()
+    if layers is not None:
+        video_cfg = {**video_cfg, "layers": layers}
     pw, ph = _preview_size(S.width, S.height)     # the render's aspect, letterboxed
     layers = video_cfg.get("layers")
     uses_clips = not layers or any((l or {}).get("source", "clips") == "clips" for l in layers)
@@ -2458,7 +2463,9 @@ def _clip_preview_frames(start_t: float, n_frames: int) -> list:
     return frames
 
 
-def _do_preview():
+def _do_preview(at: Optional[float] = None, bars: Optional[int] = None, layers=None):
+    """The preview: from the bar the scrubber is in, ``S.preview_bars`` bars; or from ``at``
+    (s), ``bars`` bars, with ``layers`` in place of the scene file's (the Arrange window)."""
     import traceback
     from core.particles import ParticleSystem
 
@@ -2477,7 +2484,7 @@ def _do_preview():
         frames = []
 
         # Start at the bar that contains the current scrubber position
-        scrub_t = float(dpg.get_value("scrubber") or 0.0)
+        scrub_t = float(dpg.get_value("scrubber") or 0.0) if at is None else float(at)
         downbeats = S.grid.downbeats if S.grid.downbeats is not None else []
         if len(downbeats) > 0:
             # most recent downbeat <= scrub_t
@@ -2486,15 +2493,15 @@ def _do_preview():
         else:
             start_t = scrub_t
 
-        n_bars   = max(1, int(S.preview_bars))
+        n_bars   = max(1, int(S.preview_bars if bars is None else bars))
         n_frames = int(S.pipeline.bar_duration * n_bars * S.fps)
         dt       = 1.0 / S.fps
 
         _log(f"Preview: {n_bars} bar(s), {n_frames} frames @ {S.fps}fps  "
              f"start={start_t:.2f}s (scrubber={scrub_t:.2f}s)")
 
-        if S.mode == "clips":
-            frames = _clip_preview_frames(start_t, n_frames)
+        if S.mode == "clips" or layers is not None:
+            frames = _clip_preview_frames(start_t, n_frames, layers)
         else:
             for fi in range(n_frames):
                 t  = start_t + fi * dt
@@ -3016,9 +3023,24 @@ class _ArrangeHost:
     def status(self, msg):
         _set_status(msg)
 
-    def edit_knob(self, target, path, default=0.0):
-        """The studio's knob editor on a parameter the Arrange window owns."""
-        _open_knob_editor(None, tuple(path), default, "knob", target)
+    def preview(self, at, bars, layers):
+        """The studio's preview of ``bars`` bars from ``at`` (s) of these layers; its frames
+        play in ``preview_texture()``."""
+        if not S.loaded:
+            _set_status("Load the project first: the preview needs the song")
+            return False
+        if S.rendering:
+            return False
+        threading.Thread(target=_do_preview, args=(at, bars, layers), daemon=True).start()
+        return True
+
+    def preview_texture(self):
+        return "preview_tex", PREV_W, PREV_H
+
+    def edit_knob(self, target, path, default=0.0, mode="knob"):
+        """The studio's knob editor on a parameter the Arrange window owns (``mode``
+        trigger: only who plays it)."""
+        _open_knob_editor(None, tuple(path), default, mode, target)
 
     def reload_editor(self):
         btn_scene_to_editor()

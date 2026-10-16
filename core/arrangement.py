@@ -1,27 +1,32 @@
-"""The arrangement: which clip, Generator or FX plays in which bars, behind and in front.
+"""The arrangement: what plays in the background and in the foreground, bar by bar.
 
-Every layer of a scene is a lane (a track). A ``footage`` layer is a clip lane: a
-background lane shows a clip per block
-(``file`` on each block, filling the frame); a foreground lane is one character's clip,
-cut out by its own mask track and placed in the frame, shown in its blocks' bars:
+The Arrange window keeps a scene as the clip montage (``source: clips``), two lanes and
+the master over them (core/video/track_fx.py runs them):
 
-    - source: footage
-      role: background            # what the Arrange window calls it (background | foreground)
-      fit: cover
-      loop: true
-      blocks:
-        - {bars: [1, 4], file: C:/v/a/final.mp4, from: 42.0}
-        - {bars: [5, 8], file: C:/v/b/final.mp4, from: 3.5}
+    - source: clips                     # the montage, wherever the BG has nothing
+    - source: group
+      name: BG                          # the background: its members over the montage,
+      canvas: below                     # then its FX on all of it
+      layers:
+        - {source: footage, role: background, fit: cover, loop: true, file: C:/v/a/final.mp4,
+           blocks: [{bars: [1, 4], from: 42.0}]}
+        - {source: shadertoy, file: shaders/shadertoy/nebulosa_arc.glsl, bars: [[5, 17]]}
+      fx: [{source: feedback, bars: [[5, 8]]}]
+    - source: group
+      name: FG                          # the foreground: drawn on its own, then over the BG
+      layers:
+        - {source: footage, file: lion.mp4, cutout: {...}, bars: [[5, 17]], fx: [...]}
+    - {source: grain}                   # the master: over everything
 
-A Generator or FX lane (core/catalog.py) is shown in its ``bars:`` windows, so its blocks
-are bars and nothing else: ``bars: [[5, 8], [17, 20]]``; without them it plays the whole
-song. The base clip montage (``source: clips``) is a lane too, always on, under the rest.
-A lane's own FX (``fx:``, core/video/track_fx.py) are lanes too, in its ``chain``.
+A member is a clip in its blocks (``blocks:``, each from where in the clip) or a Generator
+in its ``bars:`` windows; each can have its own ``fx:``. A scene written as a flat stack is
+grouped by where its layers sit (``grouped``).
 
 This module is the window's model, kept apart from the widgets so it can be tested:
-reading the lanes of a layer list, placing and removing blocks (a new block takes the
-bars it covers from the blocks there), new lanes, the clips of a folder, a frame of a
-clip as a thumbnail, and the mask track SAM2 made of a clip.
+reading the members of a lane, placing and removing blocks (a new block takes the bars it
+covers from the blocks there), packing overlapping members into sub-rows, new characters,
+the clips of a folder, a frame of a clip as a thumbnail, and the mask track SAM2 made of a
+clip.
 """
 from __future__ import annotations
 
@@ -56,36 +61,6 @@ class Block:
         return out
 
 
-CLIP, GENERATOR, FX, MONTAGE = "clip", "generator", "fx", "clips"
-
-
-@dataclass
-class Lane:
-    index: int                 # the layer's place in the scene's stack
-    role: str                  # a clip lane: background | foreground; else its kind
-    file: Optional[str]
-    blocks: List[Block] = field(default_factory=list)
-    cued: bool = False         # it also has ``cues:`` (seconds, or the REAPER edit): shown, not edited
-    spec: dict = field(default_factory=dict)
-    always: bool = False       # no cues, blocks nor bars: it plays the whole song
-    kind: str = CLIP           # clip | generator | fx | clips (the base montage)
-    name: str = ""             # a Generator's or FX's name (catalog)
-    sub: Optional[int] = None  # one of a layer's own FX: its place in the layer's ``fx:``
-    chain: List["Lane"] = field(default_factory=list)   # the layer's own FX, in order
-
-    @property
-    def label(self) -> str:
-        if self.kind != CLIP:
-            return self.name
-        if self.file:
-            return Path(self.file).stem
-        return "background" if self.role == "background" else f"layer {self.index}"
-
-    @property
-    def enabled(self) -> bool:
-        return self.spec.get("enabled", True) is not False
-
-
 def role_of(spec: dict) -> str:
     """background | foreground: as the layer says, else a cutout or a placed clip is a
     character and a frame-filling one without a file is the background."""
@@ -114,52 +89,6 @@ def windows_of(spec: dict) -> List[Block]:
     return [Block(int(a), int(b)) for a, b in bars]
 
 
-def lanes_of(layers: list) -> List[Lane]:
-    """Every layer of a scene's layer list, as a lane, in stack order (the first is under
-    the rest). A clip lane shown by ``bars:`` windows (and no cues or blocks) shows them as
-    its blocks: arranging it turns them into blocks (``with_blocks``)."""
-    lanes = []
-    for i, spec in enumerate(layers or []):
-        if not isinstance(spec, dict):
-            continue
-        if spec.get("source", "clips") != "footage":
-            lanes.append(_effect_lane(i, spec))
-            lanes[-1].chain = _chain(i, spec)
-            continue
-        cued = spec.get("cues") is not None
-        blocks = blocks_of(spec)
-        if not blocks and not cued:
-            blocks = windows_of(spec)
-        lanes.append(Lane(index=i, role=role_of(spec), file=str(spec["file"]) if spec.get("file") else None,
-                          blocks=blocks, cued=cued, spec=spec,
-                          always=not blocks and not cued and not spec.get("bars"), chain=_chain(i, spec)))
-    return lanes
-
-
-def _chain(i: int, spec: dict) -> List[Lane]:
-    """A layer's own FX (``fx:``) as lanes."""
-    out = []
-    for j, fx in enumerate(spec.get("fx") or []):
-        if isinstance(fx, dict):
-            lane = _effect_lane(i, fx)
-            lane.sub = j
-            out.append(lane)
-    return out
-
-
-def _effect_lane(i: int, spec: dict) -> Lane:
-    """A Generator's or FX's lane (or the base montage's): its ``bars:`` windows are its blocks."""
-    source = spec.get("source", "clips")
-    if source == "clips":
-        return Lane(index=i, role=MONTAGE, file=None, spec=spec, always=True, kind=MONTAGE, name="clip montage")
-    from core import catalog
-    entry = catalog.of_layer(spec)
-    kind = entry.kind if entry else (FX if source == "meters" else GENERATOR)
-    name = entry.label if entry else (Path(str(spec["file"])).stem if spec.get("file") else source)
-    blocks = windows_of(spec)
-    return Lane(index=i, role=kind, file=None, blocks=blocks, spec=spec, always=not blocks, kind=kind, name=name)
-
-
 def with_windows(spec: dict, blocks: List[Block]) -> dict:
     """A copy of a Generator's or FX's layer ``spec`` shown in ``blocks`` (``bars:``); with
     none it plays the whole song."""
@@ -169,15 +98,6 @@ def with_windows(spec: dict, blocks: List[Block]) -> dict:
     else:
         out.pop("bars", None)
     return out
-
-
-def master_at(layers: list) -> int:
-    """Where an FX over everything goes: the top of the stack (under a ``meters`` read-out,
-    which stays last)."""
-    at = len(layers)
-    while at > 0 and isinstance(layers[at - 1], dict) and layers[at - 1].get("source") == "meters":
-        at -= 1
-    return at
 
 
 def place(blocks: List[Block], new: Block, bar_seconds: float = 0.0) -> List[Block]:
@@ -228,6 +148,150 @@ def with_blocks(spec: dict, blocks: List[Block]) -> dict:
     return out
 
 
+# ----------------------------------------------------------------------- the lanes: BG, FG, master
+
+BG, FG = "BG", "FG"
+CLIP, GENERATOR, FX = "clip", "generator", "fx"
+
+
+@dataclass
+class Member:
+    """One thing in a lane: a clip, a character or a Generator, in its bars."""
+    at: int                    # its place in the lane's ``layers:``
+    spec: dict
+    kind: str                  # clip | generator | fx (an FX among the layers, written by hand)
+    label: str
+    blocks: List[Block] = field(default_factory=list)
+    cued: bool = False         # played by its ``cues:`` (seconds, the REAPER edit): shown, not edited
+    always: bool = False       # no blocks nor cues: the whole song
+    row: int = 0               # the lane's sub-row it is drawn on (overlaps stack up)
+
+    @property
+    def enabled(self) -> bool:
+        return self.spec.get("enabled", True) is not False
+
+
+def kind_of(spec: dict) -> str:
+    if spec.get("source") == "footage":
+        return CLIP
+    from core import catalog
+    entry = catalog.of_layer(spec)
+    return entry.kind if entry else (FX if spec.get("source") == "meters" else GENERATOR)
+
+
+def label_of(spec: dict) -> str:
+    """What the window calls a layer: its clip, its Generator or FX."""
+    if spec.get("source") == "footage" and spec.get("file"):
+        return Path(str(spec["file"])).stem
+    if spec.get("source") == "footage":
+        bl = blocks_of(spec)
+        return Path(bl[0].file).stem if bl and bl[0].file else "clip"
+    from core import catalog
+    entry = catalog.of_layer(spec)
+    if entry:
+        return entry.label
+    return Path(str(spec["file"])).stem if spec.get("file") else str(spec.get("source", "clips"))
+
+
+def members_of(group: dict) -> List[Member]:
+    out = []
+    for m, spec in enumerate(group.get("layers") or []):
+        if not isinstance(spec, dict):
+            continue
+        kind = kind_of(spec)
+        cued = spec.get("cues") is not None
+        blocks = blocks_of(spec) if kind == CLIP else []
+        if not blocks and not cued:
+            blocks = windows_of(spec)
+        out.append(Member(m, spec, kind, label_of(spec), blocks, cued, always=not blocks and not cued))
+    return out
+
+
+def pack(members: List[Member], n_bars: int, cue_bars: Optional[dict] = None) -> int:
+    """Each member a sub-row, the topmost (the last in the lane) first: one that overlaps
+    nothing already on a row shares it; a cued one by its cues' bars (``cue_bars``: member's
+    place -> [(first, last)]) once they are known. Returns how many rows."""
+    rows: List[list] = []
+    for mem in reversed(members):
+        if mem.cued and (cue_bars or {}).get(mem.at):
+            spans = cue_bars[mem.at]
+        else:
+            spans = [(1, n_bars)] if mem.always or mem.cued else [(b.first, b.last) for b in mem.blocks]
+        for r, taken in enumerate(rows):
+            if not any(a <= d and c <= b for a, b in spans for c, d in taken):
+                mem.row = r
+                taken.extend(spans)
+                break
+        else:
+            mem.row = len(rows)
+            rows.append(list(spans))
+    return len(rows)
+
+
+def group(name: str, layers: Optional[list] = None, fx: Optional[list] = None) -> dict:
+    out = {"source": "group", "name": name}
+    if name == BG:
+        out["canvas"] = "below"
+    out["layers"] = list(layers or [])
+    if fx:
+        out["fx"] = list(fx)
+    return out
+
+
+def _split_blocks(spec: dict) -> list:
+    """A background clip lane of several blocks: one member per block (each its own FX)."""
+    blocks = spec.get("blocks") or []
+    if spec.get("source") != "footage" or len(blocks) < 2 or spec.get("cues") is not None:
+        return [spec]
+    out = []
+    for b in blocks:
+        one = {k: v for k, v in spec.items() if k != "blocks"}
+        if isinstance(b, dict) and b.get("file"):
+            one["file"] = b["file"]
+            b = {k: v for k, v in b.items() if k != "file"}
+        one["blocks"] = [b]
+        out.append(one)
+    return out
+
+
+def grouped(layers: list) -> tuple:
+    """The scene's layers as the Arrange window keeps them: the clip montage, the BG lane,
+    the FG lane, then the master (the FX, and anything else, over everything). Returns
+    (layers, whether they had to be grouped). A scene written as a flat stack is grouped by
+    where its layers sit: under the first character, the background (its Generators and
+    clips are the BG's members, its FX the BG's FX); up to the last clip above it, the
+    foreground; above, the master."""
+    layers = [s for s in layers or [] if isinstance(s, dict)]
+    have = {s.get("name"): s for s in layers if s.get("source") == "group"}
+    if BG in have and FG in have:
+        montage = [s for s in layers if s.get("source", "clips") == "clips"]
+        before_fg = layers[:layers.index(have[FG])]
+        loose = [s for s in before_fg if s.get("source", "clips") not in ("clips", "group")]
+        bg = have[BG]
+        if loose:                                        # written by hand under the FG: into the BG
+            bg = dict(bg)
+            bg["layers"] = list(bg.get("layers") or []) + [s for s in loose if kind_of(s) != FX]
+            bg["fx"] = list(bg.get("fx") or []) + [s for s in loose if kind_of(s) == FX]
+        master = layers[layers.index(have[FG]) + 1:]
+        return montage + [bg, have[FG]] + master, bool(loose)
+    fg_at = [i for i, s in enumerate(layers) if s.get("source") == "footage" and role_of(s) == "foreground"]
+    first = min(fg_at) if fg_at else len(layers)
+    last = max((i for i, s in enumerate(layers) if s.get("source") == "footage" and i >= first), default=-1)
+    montage, bg_l, bg_fx, fg_l, fg_fx, master = [], [], [], [], [], []
+    for i, s in enumerate(layers):
+        if s.get("source", "clips") == "clips":
+            montage.append(s)
+        elif s.get("source") == "group":
+            (bg_l if s.get("name") == BG else fg_l).extend(s.get("layers") or [])
+        elif i < first:
+            (bg_fx if kind_of(s) == FX else bg_l).extend(_split_blocks(s) if kind_of(s) != FX else [s])
+        elif i <= last:
+            (fg_fx if kind_of(s) == FX else fg_l).append(s)
+        else:
+            master.append(s)
+    return montage + [group(BG, bg_l, bg_fx), group(FG, fg_l, fg_fx)] + master, True
+
+
 def find_mask_track(clip: str, root: Path = MASKS) -> Optional[str]:
     """The mask track SAM2 made of ``clip`` (segment_video.py --start-time 0 into
     render_output/footage/...): a ``<clip stem>_segments`` folder with a track.json."""
@@ -242,11 +306,6 @@ def find_mask_track(clip: str, root: Path = MASKS) -> Optional[str]:
 def mask_folder_for(clip: str, root: Path = MASKS) -> str:
     """Where segment_video.py should write ``clip``'s mask track."""
     return (root / f"{Path(clip).stem}_segments").as_posix()
-
-
-def new_background(blocks: Optional[List[Block]] = None) -> dict:
-    return with_blocks({"source": "footage", "role": "background", "fit": "cover", "loop": True},
-                       blocks or [])
 
 
 def new_foreground(clip: str, blocks: Optional[List[Block]] = None) -> dict:
@@ -273,17 +332,6 @@ def backdrop_of(track: str, share: float = 0.45) -> List[int]:
     except (OSError, ValueError):
         return []
     return sorted(int(o["id"]) for o in meta.get("objects", []) if float(o.get("share", 0)) > share)
-
-
-def insert_at(layers: list, role: str) -> int:
-    """Where a new lane goes in the stack: a background (a clip lane or a Generator) right
-    above the base clips (so the background effects work on it), a character above the last
-    character (else at the top)."""
-    if role in ("background", GENERATOR):
-        return 1 if layers else 0
-    last = max((i for i, s in enumerate(layers) if isinstance(s, dict) and s.get("source") == "footage"
-                and role_of(s) == "foreground"), default=None)
-    return len(layers) if last is None else last + 1
 
 
 def list_clips(folder: str, pattern: str = "", limit: int = 2000) -> List[Path]:

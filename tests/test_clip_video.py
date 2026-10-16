@@ -689,3 +689,16 @@ def test_an_fx_mix_is_its_dry_wet():
     assert np.abs(wet - 120).mean() > 10                         # no mix: all of the noise
     assert abs(np.abs(half - 120).mean() - np.abs(wet - 120).mean() / 2) < 2
     assert (stack(mix=1.0) == wet).all()
+
+
+def test_a_sources_opacity_can_follow_the_music():
+    from core.rhythm.midi_reader import MidiNote
+    from core.video.layers import build_compositor
+    kick = [MidiNote(time=1.0, pitch=36, velocity=100, channel=9, duration=0.1)]
+    cfg = {"layers": [{"source": "solid", "color": [0, 0, 0]},
+                      {"source": "solid", "color": [200, 200, 200],
+                       "opacity": {"hits": {"notes": [36]}, "envelope": 0.5}}]}
+    stack = build_compositor(None, cfg, kick, 4, 4)
+    assert int(stack.frame_at(0.5)[0, 0, 0]) == 0                 # before the kick: none of it
+    assert int(stack.frame_at(1.0)[0, 0, 0]) == 200               # on the kick: all of it
+    assert 40 < int(stack.frame_at(1.25)[0, 0, 0]) < 160          # fading

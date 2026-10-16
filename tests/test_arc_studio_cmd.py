@@ -424,3 +424,14 @@ def test_every_shader_lists_its_uniforms():
     assert unis[4]["about"] == unis[5]["about"]                  # "u_cx, u_cy  ..."
     for f in Path("shaders/shadertoy").glob("*.glsl"):
         uniforms_of(f)
+
+
+def test_an_opacity_knob_survives_the_layer_editor():
+    from arc_studio import _layers_to_rows, _rows_to_layers
+    from core.scene_doc import SceneDoc
+    text = "video:\n  layers:\n    - source: clips\n    - source: julia\n      opacity: {hits: {track: kick}}\n"
+    doc = SceneDoc.from_text(text)
+    rows = _layers_to_rows(doc.plain_video(), doc)
+    assert "opacity" in rows[1]["params"]
+    assert _rows_to_layers(rows, doc)[1]["opacity"] == {"hits": {"track": "kick"}}
+    assert _rows_to_layers(_layers_to_rows({"layers": [{"source": "julia", "opacity": 0.5}]}))[0]["opacity"] == 0.5

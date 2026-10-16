@@ -219,3 +219,39 @@ que está embaixo. Um shader é FX quando alguma aba lê `frame`.
    "on lion only"), com compassos, plugin, bypass e Ctrl+Z; botão direito "Add FX to
    <faixa> only"; o inspector do personagem tem a caixa do spill. A cadeia mistura na CPU
    (um FX de shader nela ainda usa a GPU, a imagem indo e voltando a cada quadro).
+
+## 15. [x] O Arranjo como duas linhas: BG e FG, e os FX em três lugares
+
+**Problema (16/10/2026).** A timeline da fase 2 mostrava uma faixa por camada da cena: no
+elenco, 29 faixas. A ideia era outra: duas linhas no tempo, fundo e frente, cada uma com a
+sua lista de FX aplicados em sequência.
+
+**Feito.** A janela guarda a cena como a montagem de clipes, a linha **BG**, a linha **FG** e a
+**Master** (`core/arrangement.py`: `grouped`, `members_of`, `pack`):
+- cada linha é uma camada `source: group` com `layers:` (os membros: um clipe nos seus
+  blocos, um personagem, um Generator nos seus `bars:`) e `fx:`; o BG (`canvas: below`) é
+  desenhado sobre a montagem e os FX dele pegam tudo; o FG é desenhado à parte, com alfa,
+  e os FX dele pegam só os personagens (`core/video/track_fx.py`: `Group`; sem FX ele vai
+  direto para a pilha, sem custo);
+- coisas ao mesmo tempo numa linha empilham em sub-linhas (os cortes do REAPER pelos
+  compassos em que tocam); a última sub-linha de cada linha fica vazia para pôr algo novo;
+- escolher um clipe (Clips) ou um Generator (Generators) e arrastar numa linha o põe lá;
+- os FX moram no **bloco** (só nele), na **linha** (nela toda) e na **Master** (sobre tudo):
+  botão direito no bloco / na linha / em qualquer lugar; a lista (no inspector, clicando no
+  nome da linha, num bloco ou na MASTER) tem liga/desliga, compassos ("9-12, 30-33"),
+  plugin, ordem e apagar; os compassos dos FX da linha e da Master aparecem como traços finos;
+- uma cena plana (como era o elenco) é agrupada ao abrir, pelo lugar de cada camada: abaixo
+  do primeiro personagem é BG (os FX viram os FX do BG), até o último clipe acima dele é FG,
+  acima é Master. Salvar grava assim; os comentários das camadas que viram membros se perdem.
+
+**Pendências fechadas (16/10/2026):**
+- `opacity:` de uma camada aceita um knob da música (motor e editor de camadas); no plugin
+  de um Generator, a opacidade é um parâmetro com Link;
+- o recorte com "tudo menos o fundo" (`drop:`) deixava uma linha do fundo na borda do
+  quadro (pixels que o SAM2 não nomeou): os que tocam a borda agora contam como fundo;
+- "Who plays" no plugin: um parâmetro de disparo (`trigger: {track: piano, envelope: 0.4}`)
+  abre o editor no modo "quem toca", e o resto do disparo (o envelope) fica;
+- zoom na régua: − / + / all, a barra "from bar", Ctrl+roda (no compasso sob o mouse) e
+  Shift+roda (andar);
+- "Preview bars" num bloco (ou no botão direito): o preview do studio daqueles compassos
+  (até 8) com o arranjo como está, salvo ou não, numa janela própria.

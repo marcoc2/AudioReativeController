@@ -86,9 +86,9 @@ NATIVE = {
     "meters":      ("core.video.meters", "Meters", "Tools", ()),
 }
 
-# layer sources that are not a Generator or an FX: the clips themselves, and the shader
-# player (each shader is its own entry)
-NOT_LISTED = {"clips", "footage", "shadertoy"}
+# layer sources that are not a Generator or an FX: the clips themselves, the shader player
+# (each shader is its own entry) and the Arrange window's lanes
+NOT_LISTED = {"clips", "footage", "shadertoy", "group"}
 
 # shader (file or folder name under shaders/shadertoy): category
 SHADER_CATEGORIES = {

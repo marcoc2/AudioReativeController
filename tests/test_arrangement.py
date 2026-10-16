@@ -3,9 +3,9 @@ from pathlib import Path
 
 import numpy as np
 
-from core.arrangement import (Block, block_at, blocks_of, find_mask_track, insert_at, lanes_of,
-                              list_clips, master_at, new_background, new_foreground, place, remove,
-                              role_of, with_blocks, with_windows)
+from core.arrangement import (Block, block_at, blocks_of, find_mask_track, grouped, list_clips,
+                              members_of, new_foreground, pack, place, remove, role_of, with_blocks,
+                              with_windows)
 
 LAYERS = [
     {"source": "clips"},
@@ -16,19 +16,6 @@ LAYERS = [
     {"source": "footage", "file": "bottles.mp4", "cues": {"reaper": "song.rpp"}},
     {"source": "rgb_split"},
 ]
-
-
-def test_lanes_are_the_layers():
-    lanes = lanes_of(LAYERS)
-    assert [(l.kind, l.label) for l in lanes] == [
-        ("clips", "clip montage"), ("fx", "pixel_sort"), ("clip", "background"), ("clip", "lion"),
-        ("clip", "bottles"), ("fx", "rgb_split")]
-    lanes = [l for l in lanes if l.kind == "clip"]
-    assert [(l.index, l.role, l.label, l.cued) for l in lanes] == [
-        (2, "background", "background", False), (3, "foreground", "lion", False),
-        (4, "foreground", "bottles", True)]
-    assert lanes[0].blocks == [Block(1, 4, 2.0, 1.0, "a.mp4")]
-    assert role_of({"source": "footage", "fit": "cover"}) == "background"
 
 
 def test_a_new_block_takes_the_bars_it_covers():
@@ -59,9 +46,6 @@ def test_new_lanes_and_where_they_go(tmp_path, monkeypatch):
     assert fg["cutout"]["track"].endswith("lion_segments") and fg["blocks"] == [{"bars": [2, 3]}]
     assert fg["cutout"]["drop"] == [1]                             # the white behind him
     assert "cutout" not in new_foreground("C:/x/nobody.mp4")
-    assert new_background()["fit"] == "cover"
-    assert insert_at(LAYERS, "background") == 1
-    assert insert_at(LAYERS, "foreground") == 5                    # above the last character
 
 
 def test_list_clips_filters_by_path(tmp_path):
@@ -74,25 +58,40 @@ def test_list_clips_filters_by_path(tmp_path):
     assert len(list_clips(str(tmp_path))) == 4
 
 
+def test_a_flat_scene_is_grouped_by_where_its_layers_sit():
+    layers, converted = grouped(LAYERS)
+    assert converted
+    assert [(l["source"], l.get("name")) for l in layers] == [("clips", None), ("group", "BG"), ("group", "FG"),
+                                                              ("rgb_split", None)]
+    bg, fg = layers[1], layers[2]
+    assert bg["canvas"] == "below" and bg["fx"] == [{"source": "pixel_sort", "amount": 0.5}]
+    assert [m.label for m in members_of(bg)] == ["a"]                 # named by its clip
+    assert [m.label for m in members_of(fg)] == ["lion", "bottles"]  # a clip above the characters: FG
+    assert grouped(layers) == (layers, False)                      # grouped already: left so
+
+
+def test_a_background_lane_of_several_clips_becomes_a_member_each():
+    spec = {"source": "footage", "role": "background", "fit": "cover",
+            "blocks": [{"bars": [1, 4], "file": "a.mp4", "from": 2.0}, {"bars": [5, 6], "file": "b.mp4"}]}
+    bg = grouped([{"source": "clips"}, spec, {"source": "footage", "file": "lion.mp4", "cutout": {"track": "x"}}])[0][1]
+    assert [(m.label, [(b.first, b.last, b.start) for b in m.blocks]) for m in members_of(bg)] == [
+        ("a", [(1, 4, 2.0)]), ("b", [(5, 6, 0.0)])]
+
+
+def test_members_at_the_same_time_stack_up():
+    lane = {"layers": [{"source": "julia", "bars": [[1, 4]]}, {"source": "julia", "bars": [[5, 8]]},
+                       {"source": "julia", "bars": [[3, 6]]}, {"source": "julia"}]}
+    mems = members_of(lane)
+    assert pack(mems, 16) == 3
+    assert [m.row for m in mems] == [2, 2, 1, 0]                   # the topmost (last) on top
+    assert mems[3].always and with_windows(mems[0].spec, [Block(2, 3)])["bars"] == [[2, 3]]
+
+
 def test_bars_windows_show_as_blocks_and_become_blocks():
     spec = {"source": "footage", "file": "lion.mp4", "loop": True, "bars": [[5, 17], [36, 39]], "fade_out": 2}
-    lane = lanes_of([spec])[0]
-    assert lane.blocks == [Block(5, 17), Block(36, 39)] and not lane.always
-    out = with_blocks(spec, place(lane.blocks, Block(20, 21)))
+    (mem,) = members_of({"layers": [spec]})
+    assert mem.blocks == [Block(5, 17), Block(36, 39)] and not mem.always
+    out = with_blocks(spec, place(mem.blocks, Block(20, 21)))
     assert "bars" not in out and "fade_out" not in out
     assert out["blocks"] == [{"bars": [5, 17]}, {"bars": [20, 21]}, {"bars": [36, 39]}]
-    assert lanes_of([{"source": "footage", "file": "x.mp4"}])[0].always
-
-
-def test_generator_and_fx_lanes_are_shown_by_bars():
-    layers = [{"source": "clips"}, {"source": "shadertoy", "file": "shaders/shadertoy/nebulosa_arc.glsl",
-                                    "bars": [5, 17]},
-              {"source": "grain", "enabled": False}, {"source": "meters"}]
-    _, gen, grain, meters = lanes_of(layers)
-    assert (gen.kind, gen.label, gen.blocks, gen.always) == ("generator", "nebulosa_arc", [Block(5, 17)], False)
-    assert (grain.kind, grain.always, grain.enabled) == ("fx", True, False)
-    spec = with_windows(gen.spec, place(gen.blocks, Block(30, 33)))
-    assert spec["bars"] == [[5, 17], [30, 33]] and "blocks" not in spec
-    assert "bars" not in with_windows(gen.spec, [])                  # none: the whole song
-    assert master_at(layers) == 3                                    # under the meters read-out
-    assert insert_at(layers, "generator") == 1                       # right above the montage
+    assert members_of({"layers": [{"source": "footage", "file": "x.mp4"}]})[0].always
