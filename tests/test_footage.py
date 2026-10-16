@@ -167,3 +167,46 @@ def test_an_empty_background_lane_shows_nothing():
     assert f.frame_at_over(np.zeros((32, 64, 3), np.uint8), 1.0) is None
     with pytest.raises(ValueError, match="needs file"):
         Footage({"source": "footage"}, 64, 32)
+
+
+def test_a_tracks_own_fx_work_on_it_alone(tmp_path):
+    from core.rhythm.grid import RhythmGrid
+    still = tmp_path / "dot.png"
+    cv2.imwrite(str(still), np.full((16, 16, 3), 200, np.uint8))
+    grid = RhythmGrid(bpm=120.0, fps=30, beats=np.arange(32) * 0.5, downbeats=np.arange(8) * 2.0)
+    def frame(**over):
+        layers = [{"source": "solid", "color": [40, 40, 40]},
+                  {"source": "footage", "file": str(still), "scale": 0.25, **over}]
+        return build_compositor(None, {"layers": layers}, [], 64, 32, grid=grid).frame_at(1.0).astype(int)
+    plain = frame()
+    noisy = frame(fx=[{"source": "rgb_noise", "amount": 0.6, "seed": 2}])
+    inside, outside = (slice(13, 19), slice(29, 35)), (slice(0, 6), slice(0, 6))
+    assert (plain[outside] == 40).all() and (plain[inside] == 200).all()
+    assert (noisy[outside] == 40).all()                              # the stack under it untouched
+    assert np.abs(noisy[inside] - 200).mean() > 5                    # the dot got the noise
+    gated = frame(fx=[{"source": "rgb_noise", "amount": 0.6, "seed": 2, "bars": [[3, 4]]}])
+    assert (gated[inside] == 200).all()                              # bar 1: the FX not on yet
+
+
+def test_spill_lets_what_an_fx_spreads_show():
+    from core.video.track_fx import TrackFXOver, _Given
+
+    class Dot:                                       # a placed layer: one pixel, alpha 1 there
+        def frame_at_over(self, below, t): ...
+        def frame_rgba(self, t):
+            rgb, a = np.zeros((4, 4, 3), np.uint8), np.zeros((4, 4), np.float32)
+            rgb[1, 1], a[1, 1] = 200, 1.0
+            return rgb, a
+
+    class Trail:                                     # an FX that spreads it to the next pixel
+        def frame_at(self, t):
+            f = given.frame.copy()
+            f[1, 2] = 100
+            return f
+    given = _Given()
+    below = np.full((4, 4, 3), 40, np.uint8)
+    kept = TrackFXOver(Dot(), Trail(), given).frame_at_over(below, 0.0)
+    spilled = TrackFXOver(Dot(), Trail(), given, spill=True).frame_at_over(below, 0.0)
+    assert kept[1, 1, 0] == 200 and kept[1, 2, 0] == 40             # no spill: the trail goes
+    assert spilled[1, 2, 0] == 100                                  # spill: the trail covers it
+    assert (kept[3, 3] == 40).all() and (spilled[3, 3] == 40).all()

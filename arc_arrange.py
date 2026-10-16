@@ -62,6 +62,7 @@ class _A:
     thumbing = False
     entry = None               # the Generator or FX chosen in the browser (catalog key)
     plugin = None              # the layer (uid) the plugin window shows
+    plugin_sub = None          # and which of its own FX (its place in fx:), or None: the layer
     catalog_drawn = False
     undo: list = []            # the arrangement before each edit, newest last
     redo: list = []            # what undo took back, newest last
@@ -151,7 +152,10 @@ def _specs() -> list:
 
 
 def _relane() -> None:
-    A.lanes = list(reversed(arr.lanes_of(_specs())))      # the top of the picture on top
+    A.lanes = []
+    for lane in reversed(arr.lanes_of(_specs())):        # the top of the picture on top,
+        A.lanes.append(lane)                             # each track's own FX under it
+        A.lanes.extend(lane.chain)
     _draw()
     _draw_inspector()
     _draw_plugin()
@@ -189,6 +193,13 @@ def _flow_blocks(doc) -> None:
         if isinstance(bars, list) and not isinstance(bars, CommentedSeq):   # just written: [[5, 8], [12, 16]]
             seq = CommentedSeq([_flow(CommentedSeq(w)) if isinstance(w, list) else w for w in bars])
             node["bars"] = _flow(seq)
+        if isinstance(node, dict) and isinstance(node.get("fx"), list):    # a track's own FX, one a line
+            from core.scene_doc import flow
+            for j, fx in enumerate(node["fx"]):
+                if isinstance(fx, dict) and not isinstance(fx, CommentedMap):
+                    node["fx"][j] = flow(fx)
+                elif isinstance(fx, CommentedMap) and isinstance(fx.get("bars"), list)                         and not isinstance(fx["bars"], CommentedSeq):
+                    fx["bars"] = flow(fx["bars"])
         if not isinstance(node, dict) or node.get("source") != "footage":
             continue
         if node.get("blocks"):
@@ -301,7 +312,14 @@ def on_key_y(sender, app_data) -> None:
 
 
 def _set_spec(lane_k: int, spec: dict, remember: bool = True) -> None:
-    i = A.lanes[lane_k].index
+    lane = A.lanes[lane_k]
+    i = lane.index
+    if lane.sub is not None:                             # one of the layer's own FX
+        parent = dict(A.items[i][2])
+        chain = list(parent.get("fx") or [])
+        chain[lane.sub] = spec
+        parent["fx"] = chain
+        spec = parent
     if spec == A.items[i][2]:                            # nothing changed: nothing to undo
         return
     if remember:
@@ -382,6 +400,28 @@ def insert_above(key: str, lane_k: int) -> None:
     insert_entry(key, A.lanes[lane_k].index + 1, f" above {A.lanes[lane_k].label}")
 
 
+def insert_into(key: str, lane_k: int) -> None:
+    """An FX on one track only: the end of that track's own chain (``fx:``)."""
+    from core import catalog
+    e = catalog.by_key(key)
+    lane = A.lanes[lane_k]
+    if A.doc is None or e is None:
+        return
+    item = A.items[lane.index]
+    parent = dict(item[2])
+    parent["fx"] = list(parent.get("fx") or []) + [e.spec()]
+    _checkpoint()
+    item[2] = parent
+    A.dirty = True
+    _relane()
+    host = next(k for k, ln in enumerate(A.lanes) if ln.index == lane.index and ln.sub is None)
+    A.sel = (host + len(A.lanes[host].chain), None)
+    _draw()
+    _draw_inspector()
+    _status(f"{e.label} added to {A.lanes[host].label} only: it plays the whole song - drag across "
+            f"its track to give it bars")
+
+
 def insert_background(key: str) -> None:
     insert_entry(key, arr.insert_at(_specs(), arr.GENERATOR), " as the background")
 
@@ -402,7 +442,14 @@ def _toggle(lane_k: int) -> None:
 
 def _is_master(lane_k: int) -> bool:
     """An FX with only FX above it: it works on the whole picture."""
-    return all(lane.kind == arr.FX for lane in A.lanes[:lane_k + 1])
+    return A.lanes[lane_k].sub is None and all(
+        lane.kind == arr.FX for lane in A.lanes[:lane_k + 1] if lane.sub is None)
+
+
+def _host_of(lane_k: int):
+    """The track a chain FX belongs to."""
+    lane = A.lanes[lane_k]
+    return next(ln for ln in A.lanes if ln.index == lane.index and ln.sub is None)
 
 
 def _close_menu() -> None:
@@ -438,6 +485,9 @@ def context_menu(x: float, y: float) -> None:
             lane = A.lanes[k]
             dpg.add_text(lane.label, color=(230, 210, 140))
             _catalog_menu("Insert generator above", catalog.GENERATOR, lambda key: insert_above(key, k))
+            if lane.sub is not None or lane.kind != arr.FX:
+                host = _host_of(k)
+                _catalog_menu(f"Add FX to {host.label} only", catalog.FX, lambda key: insert_into(key, k))
             _catalog_menu("Add FX above (works on it and what is under it)", catalog.FX,
                           lambda key: insert_above(key, k))
             if lane.kind in (arr.GENERATOR, arr.FX):
@@ -457,6 +507,19 @@ def context_menu(x: float, y: float) -> None:
 
 
 def _delete_lane(lane_k: int) -> None:
+    lane = A.lanes[lane_k]
+    if lane.sub is not None:                             # one of a track's own FX
+        parent = dict(A.items[lane.index][2])
+        chain = [fx for j, fx in enumerate(parent.get("fx") or []) if j != lane.sub]
+        if chain:
+            parent["fx"] = chain
+        else:
+            parent.pop("fx", None)
+        _checkpoint()
+        A.items[lane.index][2] = parent
+        A.sel, A.dirty = None, True
+        _relane()
+        return
     _checkpoint()
     del A.items[A.lanes[lane_k].index]
     A.sel, A.dirty = None, True
@@ -624,11 +687,14 @@ def _draw() -> None:
                            fill=(34, 38, 50, 255) if chosen else (26, 29, 38, 255),
                            color=(0, 0, 0, 0), parent="arr_canvas")
         tag, colour = _lane_tag(lane)
+        if lane.sub is not None:
+            tag = "  > " + tag
         name = lane.label if len(lane.label) <= 16 else "..." + lane.label[-13:]
         if not lane.enabled:
             colour = (110, 110, 120, 255)
         dpg.draw_text([6, y + 4], f"{tag} {name}", size=13, color=colour, parent="arr_canvas")
         note = ("off (bypassed)" if not lane.enabled else
+                f"    on {_host_of(k).label[:18]} only" if lane.sub is not None else
                 "master: over everything" if lane.kind == arr.FX and _is_master(k) else
                 "on the tracks under it" if lane.kind == arr.FX else
                 "under everything" if lane.kind == arr.MONTAGE else "")
@@ -758,6 +824,7 @@ def _draw_inspector() -> None:
     if lane.kind != arr.CLIP:
         _draw_effect_inspector(k, p)
         return
+    _draw_spill(k, p)
     # the lane
     dpg.add_text(f"lane {lane.label} ({lane.role})" + (f" · {lane.file}" if lane.file else ""),
                  parent=p, color=(150, 210, 240))
@@ -804,6 +871,18 @@ def _draw_inspector() -> None:
         dpg.add_button(label="delete lane", callback=lambda: _delete_lane(k))
 
 
+def _draw_spill(k: int, p) -> None:
+    """A placed track with its own FX: may they show outside the figure?"""
+    lane = A.lanes[k]
+    if not lane.chain or lane.kind != arr.CLIP:
+        return
+    dpg.add_checkbox(label="its FX may spill outside the figure (trails, glow, split edges)", parent=p,
+                     default_value=bool(lane.spec.get("spill", False)),
+                     callback=lambda s, v: (_set_spec(k, {**{a: b for a, b in A.lanes[k].spec.items()
+                                                             if a != "spill"}, **({"spill": True} if v else {})}),
+                                            _relane()))
+
+
 def _draw_effect_inspector(k: int, p) -> None:
     """A Generator's or FX's track (or the montage's): what it is, on/off, how a Generator
     mixes in, and delete."""
@@ -836,7 +915,8 @@ def _draw_effect_inspector(k: int, p) -> None:
             else:
                 dpg.add_text("(follows the music - layer editor)", color=(200, 160, 100))
         else:
-            dpg.add_text("master: works on the whole picture" if _is_master(k)
+            dpg.add_text(f"works on {_host_of(k).label} only" if lane.sub is not None else
+                         "master: works on the whole picture" if _is_master(k)
                          else "works on every track under it", color=(150, 150, 160))
         dpg.add_button(label="delete track", callback=lambda: _delete_lane(k))
         dpg.add_button(label="Open plugin...", callback=lambda: open_plugin(k))
@@ -892,12 +972,16 @@ def set_param(uid, path: tuple, value, anchor=None, links=None) -> str:
     it = _item(uid)
     if it is None:
         return "that track is not in the arrangement any more"
-    spec = plain_keeping_signals(it[2])
-    holder = spec
+    spec = plain_keeping_signals(it[2])                  # a copy: the signals in it stay shared
+    holder, parents = spec, []
     for k in path[:-1]:
-        nxt = holder.get(k)
-        nxt = dict(nxt) if isinstance(nxt, dict) else {}
+        nxt = holder[k] if isinstance(holder, list) else holder.get(k)
+        if isinstance(nxt, dict) and _anchor_name(nxt):  # editing inside a signal: this place's own
+            nxt = dict(nxt)
+        elif not isinstance(nxt, (dict, list)):
+            nxt = {}
         holder[k] = nxt
+        parents.append((holder, k))
         holder = nxt
     last = path[-1]
     old = holder.get(last)
@@ -906,8 +990,8 @@ def set_param(uid, path: tuple, value, anchor=None, links=None) -> str:
     if value is None and not links:
         new = None
         holder.pop(last, None)
-        if len(path) == 2 and not holder:                # no uniforms left
-            spec.pop(path[0], None)
+        if parents and parents[-1][1] == "uniforms" and not holder:    # no uniforms left
+            parents[-1][0].pop("uniforms", None)
     elif () in links:
         new = links[()]
         holder[last] = new
@@ -960,7 +1044,7 @@ class PluginTarget:
 def open_plugin(lane_k: int) -> None:
     """A Generator's or FX's window: each parameter with its value and a Link to the music."""
     lane = A.lanes[lane_k]
-    A.plugin = next(it[3] for it in A.items if it[2] is lane.spec)
+    A.plugin, A.plugin_sub = A.items[lane.index][3], lane.sub
     if not dpg.does_item_exist("arr_plugin"):
         with dpg.window(tag="arr_plugin", width=560, height=640, pos=(560, 60), on_close=_plugin_closed):
             dpg.add_group(tag="arr_plugin_body")
@@ -970,7 +1054,7 @@ def open_plugin(lane_k: int) -> None:
 
 
 def _plugin_closed(*_):
-    A.plugin = None
+    A.plugin = A.plugin_sub = None
 
 
 def _summary(value) -> str:
@@ -984,7 +1068,7 @@ def _summary(value) -> str:
 def _draw_plugin() -> None:
     from core import catalog
     from core.knob_forms import form_of
-    from core.scene_doc import _anchor_name, plain
+    from core.scene_doc import _anchor_name, get_path, plain
     if not dpg.does_item_exist("arr_plugin") or not dpg.is_item_shown("arr_plugin") or A.plugin is None:
         return
     body = "arr_plugin_body"
@@ -995,26 +1079,33 @@ def _draw_plugin() -> None:
         dpg.add_text("this track is not in the arrangement now (undone or deleted)", parent=body,
                      color=(200, 160, 100))
         return
-    uid, spec = it[3], it[2]
+    uid = it[3]
+    at = () if A.plugin_sub is None else ("fx", A.plugin_sub)    # a track's own FX: in its fx: list
+    spec = get_path(it[2], at) if at else it[2]
+    if not isinstance(spec, dict):
+        dpg.add_text("this FX is not in its track now (undone or deleted)", parent=body, color=(200, 160, 100))
+        return
     e = catalog.of_layer(spec)
     kind = "FX" if e and e.kind == catalog.FX else "Generator"
     name = e.label if e else str(spec.get("source"))
-    dpg.configure_item("arr_plugin", label=f"{name} - {kind}" + (f" · {e.category}" if e else ""))
+    whose = f" on {_layer_name(it[2])} only" if at else ""
+    dpg.configure_item("arr_plugin", label=f"{name} - {kind}{whose}" + (f" · {e.category}" if e else ""))
     if e:
         dpg.add_text(e.about, parent=body, wrap=530)
     on = spec.get("enabled", True) is not False
     with dpg.group(horizontal=True, parent=body):
         dpg.add_checkbox(label="on", default_value=on,
-                         callback=lambda s, v: set_param(uid, ("enabled",), None if v else False))
+                         callback=lambda s, v: set_param(uid, at + ("enabled",), None if v else False))
         if kind == "Generator":
             dpg.add_text("blend")
             dpg.add_combo(["normal", "add", "screen", "multiply"], default_value=spec.get("blend", "normal"),
-                          width=90, callback=lambda s, v: set_param(uid, ("blend",), None if v == "normal" else v))
+                          width=90, callback=lambda s, v: set_param(uid, at + ("blend",), None if v == "normal" else v))
             op = spec.get("opacity", 1.0)
             dpg.add_text("opacity")
             if isinstance(op, (int, float)):
                 dpg.add_slider_float(default_value=float(op), min_value=0.0, max_value=1.0, width=120,
-                                     callback=lambda s, v: set_param(uid, ("opacity",), None if v >= 1.0 else round(v, 3)))
+                                     callback=lambda s, v: set_param(uid, at + ("opacity",),
+                                                                     None if v >= 1.0 else round(v, 3)))
     params = list(e.params) if e else []
     if kind == "FX":
         params.insert(0, catalog.Param("mix", 1.0, "dry/wet: 0 the picture it was given .. 1 all of its result"))
@@ -1030,9 +1121,8 @@ def _draw_plugin() -> None:
         dpg.add_table_column(width_stretch=True)
         dpg.add_table_column(width_fixed=True, init_width_or_weight=110)
         for prm in params:
-            path = _param_path(spec, prm.name)
-            from core.scene_doc import get_path
-            value = get_path(spec, path)
+            path = at + _param_path(spec, prm.name)
+            value = get_path(it[2], path)
             with dpg.table_row():
                 label = dpg.add_text(("~ " if prm.knob else "  ") + prm.name,
                                      color=(230, 210, 140) if value is not None else (170, 170, 180))
@@ -1060,15 +1150,23 @@ def _draw_plugin() -> None:
                             dpg.add_text("back to its default")
 
 
+def _layer_name(spec: dict) -> str:
+    from core import catalog
+    e = catalog.of_layer(spec)
+    if e:
+        return e.label
+    return Path(str(spec["file"])).stem if spec.get("file") else str(spec.get("source"))
+
+
 def _link(uid, path: tuple, default) -> None:
     """The studio's knob editor on this parameter."""
     it = _item(uid)
     if it is None or not hasattr(A.host, "edit_knob"):
         _status("Link needs the studio's knob editor")
         return
-    from core import catalog
-    e = catalog.of_layer(it[2])
-    title = e.label if e else str(it[2].get("source"))
+    from core.scene_doc import get_path
+    at = path[:2] if path[:1] == ("fx",) else ()
+    title = _layer_name(get_path(it[2], at) if at else it[2])
     A.host.edit_knob(PluginTarget(uid, title), path, default if isinstance(default, (int, float)) else 0.0)
 
 

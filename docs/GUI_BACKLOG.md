@@ -210,3 +210,12 @@ que está embaixo. Um shader é FX quando alguma aba lê `frame`.
    parte (a imagem dela + os seus FX, com o recorte) e só então misturado. É a mudança de
    motor (CPU e GPU). Antes dela, a saída barata é o FX valer só dentro da máscara do
    personagem (`mask:`, já existe).
+   **Feito (16/10/2026):** `fx: [...]` numa camada (clipe, personagem, Generator, a
+   montagem): os FX dela, em ordem, trabalham só na imagem dela (`core/video/track_fx.py`,
+   uma pilha pequena com a imagem da faixa como base: os FX mantêm `bars:`, `mix:` e
+   knobs). Um personagem vai para a cadeia sobre preto, com o seu alfa; o que os FX deixam
+   fora da figura some, a não ser com `spill: true` (rastros, bordas, brilho: o que for
+   claro aparece). Na timeline os FX da faixa aparecem embaixo dela ("> FX pixel_sort",
+   "on lion only"), com compassos, plugin, bypass e Ctrl+Z; botão direito "Add FX to
+   <faixa> only"; o inspector do personagem tem a caixa do spill. A cadeia mistura na CPU
+   (um FX de shader nela ainda usa a GPU, a imagem indo e voltando a cada quadro).

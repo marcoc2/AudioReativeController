@@ -244,7 +244,9 @@ class Footage:
             m = cv2.GaussianBlur(m, (0, 0), feather)
         return m
 
-    def frame_at_over(self, below: np.ndarray, t: float) -> Optional[np.ndarray]:
+    def _placed(self, t: float):
+        """(patch, its alpha or None, (X0, Y0, X1, Y1)) the clip puts in the frame at ``t``,
+        or None when nothing shows."""
         found = self._cue_at(t)
         scale = float(self._scale(t))                   # the knobs are asked every frame, in order
         cx, cy = float(self._x(t)) * self.W, float(self._y(t)) * self.H
@@ -269,14 +271,34 @@ class Footage:
             m = None if m is None else m[:, ::-1]
         sx, sy = X0 - x0, Y0 - y0
         patch = img[sy:sy + Y1 - Y0, sx:sx + X1 - X0]
+        a = None if m is None else m[sy:sy + Y1 - Y0, sx:sx + X1 - X0]
+        return patch, a, (X0, Y0, X1, Y1)
+
+    def frame_at_over(self, below: np.ndarray, t: float) -> Optional[np.ndarray]:
+        got = self._placed(t)
+        if got is None:
+            return None
+        patch, a, (X0, Y0, X1, Y1) = got
         out = below.copy()
-        if m is None:
+        if a is None:
             out[Y0:Y1, X0:X1] = patch
         else:
-            a = m[sy:sy + Y1 - Y0, sx:sx + X1 - X0, None]
             dst = out[Y0:Y1, X0:X1].astype(np.float32)
-            out[Y0:Y1, X0:X1] = (dst + (patch.astype(np.float32) - dst) * a + 0.5).astype(np.uint8)
+            out[Y0:Y1, X0:X1] = (dst + (patch.astype(np.float32) - dst) * a[..., None] + 0.5).astype(np.uint8)
         return out
+
+    def frame_rgba(self, t: float):
+        """(the clip on black, its alpha 0..1 (H, W)) at ``t``, or None when nothing shows:
+        what a track's own FX work on (core/video/track_fx.py)."""
+        got = self._placed(t)
+        if got is None:
+            return None
+        patch, a, (X0, Y0, X1, Y1) = got
+        rgb = np.zeros((self.H, self.W, 3), np.uint8)
+        alpha = np.zeros((self.H, self.W), np.float32)
+        rgb[Y0:Y1, X0:X1] = patch if a is None else (patch.astype(np.float32) * a[..., None] + 0.5).astype(np.uint8)
+        alpha[Y0:Y1, X0:X1] = 1.0 if a is None else a
+        return rgb, alpha
 
     def frame_at(self, t: float) -> np.ndarray:
         """As the base layer: on black (black also outside the cues)."""

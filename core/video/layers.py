@@ -2774,6 +2774,8 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
     A layer with ``enabled: false`` is skipped (kept in the scene, left out of the picture).
     An FX (a post-op) with ``mix:`` (a number or a music knob, 0..1) shows that much of its
     result over the picture it was given: its dry/wet.
+    A source layer with ``fx:`` (a list of FX layers) puts its own picture through them
+    before it joins the stack (core/video/track_fx.py).
     A layer with ``mask:`` shows only inside or outside the objects of a mask track
     (core/video/matte.py); ``masks`` is the track used when its ``mask:`` names none.
     Layer triggers accept MIDI ``notes`` or ``audio`` onset sources.
@@ -2999,6 +3001,17 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             continue
         raise ValueError(f"unknown layer source {src_name!r}")
     enabled = [spec for spec in layers_cfg if spec.get("enabled", True) is not False]
+    for i, spec in enumerate(enabled):                  # a track's own FX (core/video/track_fx.py)
+        src, blend, opacity, matte = comp._layers[i]
+        if spec.get("fx") and not hasattr(src, "process"):
+            from core.video.track_fx import with_fx
+
+            def build(layers, given):
+                return build_compositor(given, {"layers": layers}, notes, width, height,
+                                        onset_loader=onset_loader, fps=fps, features_at=features_at,
+                                        grid=grid, masks=masks)
+            comp._layers[i] = (with_fx(src, spec["fx"], build, base, bool(spec.get("spill", False))),
+                               blend, opacity, matte)
     for i, (window, spec) in enumerate(zip(windows, enabled)):   # post-ops are added without opacity:
         src, blend, opacity, matte = comp._layers[i]                # their window and mix set it here
         if not hasattr(src, "process"):

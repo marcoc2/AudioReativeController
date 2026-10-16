@@ -16,6 +16,7 @@ cut out by its own mask track and placed in the frame, shown in its blocks' bars
 A Generator or FX lane (core/catalog.py) is shown in its ``bars:`` windows, so its blocks
 are bars and nothing else: ``bars: [[5, 8], [17, 20]]``; without them it plays the whole
 song. The base clip montage (``source: clips``) is a lane too, always on, under the rest.
+A lane's own FX (``fx:``, core/video/track_fx.py) are lanes too, in its ``chain``.
 
 This module is the window's model, kept apart from the widgets so it can be tested:
 reading the lanes of a layer list, placing and removing blocks (a new block takes the
@@ -69,6 +70,8 @@ class Lane:
     always: bool = False       # no cues, blocks nor bars: it plays the whole song
     kind: str = CLIP           # clip | generator | fx | clips (the base montage)
     name: str = ""             # a Generator's or FX's name (catalog)
+    sub: Optional[int] = None  # one of a layer's own FX: its place in the layer's ``fx:``
+    chain: List["Lane"] = field(default_factory=list)   # the layer's own FX, in order
 
     @property
     def label(self) -> str:
@@ -121,6 +124,7 @@ def lanes_of(layers: list) -> List[Lane]:
             continue
         if spec.get("source", "clips") != "footage":
             lanes.append(_effect_lane(i, spec))
+            lanes[-1].chain = _chain(i, spec)
             continue
         cued = spec.get("cues") is not None
         blocks = blocks_of(spec)
@@ -128,8 +132,19 @@ def lanes_of(layers: list) -> List[Lane]:
             blocks = windows_of(spec)
         lanes.append(Lane(index=i, role=role_of(spec), file=str(spec["file"]) if spec.get("file") else None,
                           blocks=blocks, cued=cued, spec=spec,
-                          always=not blocks and not cued and not spec.get("bars")))
+                          always=not blocks and not cued and not spec.get("bars"), chain=_chain(i, spec)))
     return lanes
+
+
+def _chain(i: int, spec: dict) -> List[Lane]:
+    """A layer's own FX (``fx:``) as lanes."""
+    out = []
+    for j, fx in enumerate(spec.get("fx") or []):
+        if isinstance(fx, dict):
+            lane = _effect_lane(i, fx)
+            lane.sub = j
+            out.append(lane)
+    return out
 
 
 def _effect_lane(i: int, spec: dict) -> Lane:

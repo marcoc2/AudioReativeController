@@ -232,3 +232,30 @@ def test_the_plugin_window_sets_and_links_parameters(window):
     assert "&kick" in text and "*kick" in text
     R.btn_undo()                                                        # the plugin follows the undo
     R._draw_plugin()
+
+
+def test_an_fx_on_one_track_only(window):
+    R, host, path = window
+    lion = next(k for k, l in enumerate(R.A.lanes) if l.label == "lion")
+    R.insert_into("pixel_sort", lion)
+    assert [(l.label, l.sub) for l in R.A.lanes] == [("lion", None), ("pixel_sort", 0), ("clip montage", None)]
+    fx = 1
+    assert not R._is_master(fx)
+    R.press(_x(R, 9), R._lane_y(fx) + 10)                                 # its own bars
+    R.release(_x(R, 12))
+    R.insert_into("rgb_split", fx)                                        # from the chain: same track
+    R.open_plugin(2)
+    assert R.A.plugin_sub == 1 and "rgb_split - FX on lion only" in dpg.get_item_label("arr_plugin")
+    assert R.set_param(R.A.plugin, ("fx", 1, "mix"), 0.6) == ""
+    R._set_spec(0, {**R.A.lanes[0].spec, "spill": True})
+    R.context_menu(_x(R, 3), R._lane_y(fx) + 10)
+    R.btn_save()
+    text = path.read_text(encoding="utf-8")
+    layer = yaml.safe_load(text)["video"]["layers"][1]
+    assert layer["fx"] == [{"source": "pixel_sort", "bars": [[9, 12]]}, {"source": "rgb_split", "mix": 0.6}]
+    assert layer["spill"] is True and "- {source: pixel_sort, bars: [[9, 12]]}" in text
+    fx = next(k for k, l in enumerate(R.A.lanes) if l.label == "pixel_sort")
+    R._delete_lane(fx)
+    assert [l.label for l in R.A.lanes[0].chain] == ["rgb_split"]
+    R.btn_undo()
+    assert [l.label for l in R.A.lanes[0].chain] == ["pixel_sort", "rgb_split"]
