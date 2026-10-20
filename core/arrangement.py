@@ -180,7 +180,10 @@ def kind_of(spec: dict) -> str:
 
 
 def label_of(spec: dict) -> str:
-    """What the window calls a layer: its clip, its Generator or FX."""
+    """What the window calls a layer: its ``name:`` (given in the window, or read from the
+    scene's comments), else its clip, its Generator or FX."""
+    if spec.get("name") and spec.get("source") != "group":
+        return str(spec["name"])
     if spec.get("source") == "footage" and spec.get("file"):
         return Path(str(spec["file"])).stem
     if spec.get("source") == "footage":
@@ -207,25 +210,44 @@ def members_of(group: dict) -> List[Member]:
     return out
 
 
+ROW_KEY = "lane_row"   # the sub-row the Arrange window put a member on (the user's choice)
+
+
 def pack(members: List[Member], n_bars: int, cue_bars: Optional[dict] = None) -> int:
-    """Each member a sub-row, the topmost (the last in the lane) first: one that overlaps
-    nothing already on a row shares it; a cued one by its cues' bars (``cue_bars``: member's
-    place -> [(first, last)]) once they are known. Returns how many rows."""
+    """Each member a sub-row. One put on a sub-row (``lane_row``) stays there while nothing
+    there overlaps it; the rest, the topmost (the last in the lane) first: one that overlaps
+    nothing already on a row shares it. A cued one by its cues' bars (``cue_bars``: member's
+    place -> [(first, last)]) once they are known. Empty rows close up. Returns how many rows."""
     rows: List[list] = []
-    for mem in reversed(members):
+
+    def spans_of(mem):
         if mem.cued and (cue_bars or {}).get(mem.at):
-            spans = cue_bars[mem.at]
-        else:
-            spans = [(1, n_bars)] if mem.always or mem.cued else [(b.first, b.last) for b in mem.blocks]
-        for r, taken in enumerate(rows):
-            if not any(a <= d and c <= b for a, b in spans for c, d in taken):
-                mem.row = r
-                taken.extend(spans)
-                break
-        else:
-            mem.row = len(rows)
-            rows.append(list(spans))
-    return len(rows)
+            return cue_bars[mem.at]
+        return [(1, n_bars)] if mem.always or mem.cued else [(b.first, b.last) for b in mem.blocks]
+
+    def free(r, spans):
+        return r >= len(rows) or not any(a <= d and c <= b for a, b in spans for c, d in rows[r])
+
+    def put(mem, r, spans):
+        while len(rows) <= r:
+            rows.append([])
+        mem.row = r
+        rows[r].extend(spans)
+
+    placed = set()
+    for mem in reversed(members):                        # where the user put them
+        want = mem.spec.get(ROW_KEY)
+        if isinstance(want, int) and not isinstance(want, bool) and want >= 0 and free(want, spans_of(mem)):
+            put(mem, want, spans_of(mem))
+            placed.add(id(mem))
+    for mem in reversed(members):
+        if id(mem) not in placed:
+            spans = spans_of(mem)
+            put(mem, next(r for r in range(len(rows) + 1) if free(r, spans)), spans)
+    used = {r: i for i, r in enumerate(sorted({m.row for m in members}))}
+    for mem in members:
+        mem.row = used[mem.row]
+    return len(used)
 
 
 def group(name: str, layers: Optional[list] = None, fx: Optional[list] = None) -> dict:
@@ -381,6 +403,43 @@ def thumbnail(path: str, t: float = 0.0, size: int = 192, cache: Path = THUMBS) 
     except (OSError, subprocess.SubprocessError):
         return None
     return out if out.is_file() else None
+
+
+def cover(path: str, size: int = 96, cache: Path = THUMBS) -> Optional[Path]:
+    """A frame that shows what ``path`` is (a third of the way in, past fades and black
+    openings; an image: itself) as a PNG at most ``size`` px a side (cached)."""
+    import cv2
+    p = Path(path)
+    try:
+        stamp = p.stat().st_mtime_ns
+    except OSError:
+        return None
+    cache.mkdir(parents=True, exist_ok=True)
+    out = cache / (hashlib.sha1(f"cover|{p.resolve()}|{stamp}|{size}".encode()).hexdigest()[:16] + ".png")
+    if out.is_file():
+        return out
+    img = None
+    if p.suffix.lower() in IMAGES:
+        import numpy as np                               # (imread can't open every path name)
+        img = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_COLOR)
+    else:
+        cap = cv2.VideoCapture(str(p))
+        if cap.isOpened():
+            n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            if n > 3:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, n // 3)
+            ok, img = cap.read()
+            if not ok:
+                img = None
+        cap.release()
+        if img is None:                                  # a codec OpenCV lacks: ffmpeg's frame
+            return thumbnail(str(p), 1.0, size, cache)
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    s = size / max(h, w)
+    img = cv2.resize(img, (max(1, int(w * s)), max(1, int(h * s))), interpolation=cv2.INTER_AREA)
+    return out if cv2.imwrite(str(out), img) else None
 
 
 def colour(file: Optional[str]) -> tuple:

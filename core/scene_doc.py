@@ -509,8 +509,11 @@ class SceneDoc:
             _replace_ids(self.data, table)
 
     def dumps(self) -> str:
+        """The scene as text. A copy is written: ruamel's emitter moves the comment tokens
+        it writes (one before a list's first item came back as ``layers:   -``, which no
+        layer's text could be read from again)."""
         out = io.StringIO()
-        _yaml().dump(self.data, out)
+        _yaml().dump(copy.deepcopy(self.data), out)
         return out.getvalue()
 
     def save(self, path: str) -> None:

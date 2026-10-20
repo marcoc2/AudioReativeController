@@ -45,7 +45,8 @@ FX_CATEGORIES = ("Colour & light", "Time & trails", "Lens & distortion", "Matter
 SETUP_KEYS = {"seed", "supersample", "oversample", "resolution", "samples", "subframes"}
 
 # keys every layer has: the GUI sets them itself (the layer row, the timeline's blocks)
-COMMON_KEYS = {"source", "enabled", "blend", "opacity", "bars", "fade_in", "fade_out", "mask", "role"}
+COMMON_KEYS = {"source", "enabled", "blend", "opacity", "bars", "fade_in", "fade_out", "mask", "role",
+               "mute", "lane_row"}
 
 # source: (module, class, category, needs)
 #   needs: what it cannot do without: "masks" (a SAM2 mask track), "cuts" (the clip montage's cuts)
@@ -57,6 +58,7 @@ NATIVE = {
     "orbiters":    ("core.video.layers", "OrbitersLayer", "Organic & particles", ()),
     "particles":   ("core.video.layers", "ParticlesLayer", "Organic & particles", ()),
     "ferrofluid":  ("core.video.layers", "FerrofluidLayer", "Organic & particles", ()),
+    "sam_cutout":  ("core.video.sam_cutout", "SamCutout", "Figures", ()),
     "eyes":        ("core.video.layers", "EyesLayer", "Faces", ()),
     "mouths":      ("core.video.layers", "MouthsLayer", "Faces", ()),
     "flame":       ("core.video.layers", "FlameLayer", "Fractals", ()),

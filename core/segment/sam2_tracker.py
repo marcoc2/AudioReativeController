@@ -137,11 +137,15 @@ class RegionTracker:
 
     # ----------------------------------------------------------------- regions
     def add(self, region_id, frames: int, mask: Optional[np.ndarray] = None,
-            point: Optional[Tuple[float, float]] = None) -> None:
+            point: Optional[Tuple[float, float]] = None, prompt: Optional[dict] = None) -> None:
         """A region born on the current frame, to follow for ``frames`` frames (this one
-        included): from a mask (bool H×W, the best prompt) or a point (x, y in pixels)."""
-        if (mask is None) == (point is None):
-            raise ValueError("give a mask or a point")
+        included): from a mask (bool H×W, the best prompt), a point (x, y in pixels), or a
+        ``prompt``: {box: [x0, y0, x1, y1], points: [[x, y, 1 keep | 0 leave out], ...]}
+        (pixels; a box, points, or both)."""
+        if prompt is not None and not (prompt.get("box") or prompt.get("points")):
+            raise ValueError("a prompt needs a box or points")
+        if sum(v is not None for v in (mask, point, prompt)) != 1:
+            raise ValueError("give a mask, a point or a prompt")
         if region_id in self._regions:
             raise ValueError(f"region {region_id!r} is already being followed")
         import sam2.sam2_video_predictor as vp
@@ -154,6 +158,13 @@ class RegionTracker:
                 state = self.predictor.init_state(video_path=None)
                 if mask is not None:
                     self.predictor.add_new_mask(state, frame_idx=0, obj_id=1, mask=np.asarray(mask, bool))
+                elif prompt is not None:
+                    pts = prompt.get("points") or []
+                    self.predictor.add_new_points_or_box(
+                        state, frame_idx=0, obj_id=1,
+                        points=np.array([p[:2] for p in pts], np.float32) if pts else None,
+                        labels=np.array([int(p[2]) for p in pts], np.int32) if pts else None,
+                        box=np.array(prompt["box"], np.float32) if prompt.get("box") else None)
                 else:
                     self.predictor.add_new_points_or_box(
                         state, frame_idx=0, obj_id=1,

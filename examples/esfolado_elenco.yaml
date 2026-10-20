@@ -22,12 +22,15 @@
 #   48-51  outro           a slow tunnel; one masked dancer; then black
 #
 #   python clip_generator.py --file input/esfolado/esfolado_mix_15_10_2026-full.mp3 \
-#       --midi input/esfolado/esfolado_piano.mid --clips render_output/esfolado_fundo \
+#       --midi input/esfolado/esfolado_reaper.mid --clips render_output/esfolado_fundo \
 #       --clip-fit cover --seed 5 --scene examples/esfolado_elenco.yaml \
 #       --bars 0 --resolution 480x854 --fps 30 --output render_output/esfolado_elenco.mp4
 #
-# esfolado_piano.mid is esfolado.mid plus the piano, taken from the REAPER project
-# (core/reaper_project.write_midi). The chords come from the SheetSage run of the
+# The MIDI: esfolado_reaper.mid, every part taken from the REAPER project in its own time
+# (tools/reaper_midi.py). REAPER starts bar 2 at 2.0 s (a meter marker there makes bar 1
+# three beats long), so the file has a 3/4 bar 1; REAPER's own MIDI export (esfolado.mid)
+# padded that bar and came one beat late. The audio needs no offset: its attacks fall on the notes.
+# The chords come from the SheetSage run of the
 # September mix (same harmony).
 video:
   clip_per_bar: true
@@ -36,189 +39,388 @@ video:
     snare_flip: {track: snare, actions: [reverse]}
   layers:
     - source: clips
-
-    # ------------------------------------------------------------- background
-    - source: feedback
-      bars: [[1, 4]]
-      decay: 0.86
-      base_scale: 0.96
-      max_scale: 1.08
-      max_rotate: 0.06
-      zoom_pulse: {track: kick, envelope: 0.25}
-    - source: pixel_sort
-      bars: [[5, 8]]
-      amount: {hits: {track: snare}, envelope: 0.35, gain: 0.8}
-      direction: [vertical, horizontal]
-    - source: shadertoy
-      bars: [[9, 12]]
-      file: shaders/shadertoy/fluxo_cromatico_arc.glsl
-      uniforms:
-        u_flow: {relative: subbands.bass, window: 6, gain: 2.0}
-        u_keep: 0.9
-        u_kick: {hits: {track: kick}, envelope: 0.25}
-        u_turn: {random_on: {track: snare}, ease: 0.2, gain: 6.283}
-    - source: flame_lens
-      bars: [[13, 17]]
-      variations:
-        swirl: {hits: {track: snare}, envelope: 0.5, amount: 1.0}
-        bubble: {hits: {track: acid-tb-303, notes: [48, 52, 53]}, envelope: 0.4, amount: 0.8}
-      turn: {rate: 1.5, base: 0.15, from: {hits: {track: kick}, envelope: 0.4}}
-      zoom: 1.3
-    - source: shadertoy
-      bars: [[18, 21]]
-      file: shaders/shadertoy/octagrams_arc.glsl
-      uniforms:
-        u_shape: {bar: {step: 1, morph: 0.35}}
-        u_fly: {rate: 10.0, base: 4.0, from: {hits: {track: kick}, envelope: 0.3}}
-        u_hue: {pitch: {track: "FM5 MIDI (patches 2, 5, 10, 11, 12, 14)"}, low: 70, high: 86, glide: 0.15}
-        u_sat: 0.8
-    - source: shadertoy
-      bars: [[22, 32]]
-      fade_in: 1
-      file: shaders/shadertoy/nebulosa_arc.glsl
-      speed: 0.6
-      rush: {hits: {track: piano}, amount: 1.5, envelope: 0.6}
-      uniforms:
-        u_form: 0.53
-        u_hue: {lfo: sine, period: 8/1, gain: 0.08, bias: 0.6}
-        u_dark: 0.35
-        u_bright: {adsr: {track: piano}, attack: 0.05, decay: 0.6, sustain: 0.5, release: 1.0, gain: 0.8, bias: 0.8}
-    - source: deep_zoom
-      bars: [[33, 35]]
-      from: 88.0
-      decades: 2.0
-      depth: 13
-      iterations: 2500
-      hue: 0.62
-      flow: {rate: 0.0, base: 0.4}
-    - source: shadertoy
-      bars: [[36, 39]]
-      file: shaders/shadertoy/kaleidoscope_arc.glsl
-      uniforms:
-        u_ring0: {since: {track: kick}, nth: 0}
-        u_ring1: {since: {track: kick}, nth: 1}
-        u_ring2: {since: {track: kick}, nth: 2}
-        u_hue: {harmony: {score: input/esfolado/sheetsage, snap: beat}, glide: 0.8}
-    - source: shadertoy
-      bars: [[40, 43]]
-      file: shaders/shadertoy/droste_arc.glsl
-      uniforms:
-        u_phase: {bar: {step: 1, morph: 0.6}}
-        u_kick: {hits: {track: kick}, envelope: 0.3}
-    - source: datamosh
-      bars: [[44, 47]]
-      length: 1/1
-      block: 16
-      push: 2.0
-      leak: 0.015
-    - source: feedback
-      bars: [[48, 54]]
-      decay: 0.9
-      base_scale: 0.98
-      max_scale: 1.02
-      max_rotate: 0.02
-      hue_shift: 0.01
-
-    # ------------------------------------------------------------- foreground
-    # reggaeton: two dancers at the sides, bouncing on the kick
-    - source: footage
-      bars: [[5, 17], [36, 39]]
-      file: input/esfolado/dancing/WanimateInterpolated_00063-audio.mp4      # the lion
-      loop: true
-      scale: 0.55
-      x: 0.22
-      y: {hits: {track: kick}, envelope: 0.2, gain: -0.025, bias: 0.72}
-      cutout: {track: render_output/footage/dancing/WanimateInterpolated_00063-audio_segments, drop: [1], feather: 1}
-    - source: footage
-      bars: [[5, 17], [36, 39]]
-      file: input/esfolado/dancing/WanimateInterpolated_00064-audio.mp4      # Cebolinha
-      loop: true
-      scale: 0.55
-      x: 0.78
-      y: {hits: {track: kick}, envelope: 0.2, gain: -0.025, bias: 0.72}
-      cutout: {track: render_output/footage/dancing/WanimateInterpolated_00064-audio_segments, drop: [1], feather: 1}
-    # the FM5 lead: the drawn boy rises with its notes, the creature answers mirrored
-    - source: footage
-      bars: [[18, 21], [40, 43]]
-      file: input/esfolado/dancing/WanimateInterpolated_00068-audio.mp4      # the drawn boy
-      loop: true
-      scale: 0.7
-      x: 0.3
-      y: {pitch: {track: "FM5 MIDI (patches 2, 5, 10, 11, 12, 14)"}, low: 70, high: 86, glide: 0.1, gain: -0.25, bias: 0.75}
-      cutout: {track: render_output/footage/dancing/WanimateInterpolated_00068-audio_segments, drop: [1], feather: 1}
-    - source: footage
-      bars: [[18, 21], [40, 43]]
-      file: input/esfolado/dancing/WanimateInterpolated_00061-audio.mp4      # the creature
-      loop: true
-      flip: true
-      scale: 0.6
-      x: 0.72
-      y: {hits: {track: snare}, envelope: 0.25, gain: -0.04, bias: 0.7}
-      cutout: {track: render_output/footage/dancing/WanimateInterpolated_00061-audio_segments, drop: [1], feather: 1}
-    # the masked pair, at the end of the second reggaeton, and one alone in the outro
-    - source: footage
-      bars: [[44, 51]]
-      fade_out: 3
-      file: input/esfolado/dancing/WanimateInterpolated_00069-audio.mp4
-      loop: true
-      scale: 0.6
-      x: {lfo: sine, period: 4/1, gain: 0.1, bias: 0.25}
-      y: 0.68
-      cutout: {track: render_output/footage/dancing/WanimateInterpolated_00069-audio_segments, drop: [1], feather: 1}
-    - source: footage
-      bars: [[44, 47]]
-      file: input/esfolado/dancing/WanimateInterpolated_00070-audio.mp4
-      loop: true
-      flip: true
-      scale: 0.6
-      x: {lfo: sine, period: 4/1, phase: 0.5, gain: 0.1, bias: 0.75}
-      y: 0.68
-      cutout: {track: render_output/footage/dancing/WanimateInterpolated_00070-audio_segments, drop: [1], feather: 1}
-    # stickers: the stills pop on the open hi-hat, somewhere new each time
-    - source: footage
-      bars: [[5, 21], [36, 47]]
-      file: input/esfolado/dancing/WanimateInterpolated_00057.png
-      scale: {hits: {track: ez-hihat, notes: [46]}, envelope: 0.3, gain: 0.4}
-      x: {random_on: {track: ez-hihat, notes: [46]}, seed: 1, gain: 0.7, bias: 0.15}
-      y: {random_on: {track: ez-hihat, notes: [46]}, seed: 2, gain: 0.35, bias: 0.2}
-      cutout: {track: render_output/footage/dancing/WanimateInterpolated_00057_segments, drop: [1], feather: 1}
-    - source: footage
-      bars: [[5, 21], [36, 47]]
-      file: input/esfolado/dancing/WanimateInterpolated_00065.png
-      scale: {hits: {track: snare}, envelope: 0.25, gain: 0.35}
-      x: {random_on: {track: snare}, seed: 3, gain: 0.7, bias: 0.15}
-      y: {random_on: {track: snare}, seed: 4, gain: 0.3, bias: 0.25}
-      cutout: {track: render_output/footage/dancing/WanimateInterpolated_00065_segments, drop: [1], feather: 1}
-    # the bottles sing the voice, swaying, a little bigger on each kick
-    - source: footage
-      file: input/esfolado/MiniMax_H3_00039_.mp4
-      cues: {reaper: C:/Audio/recordings/nao_ser/reggaetoner/reggaetoner.rpp}
-      scale: {hits: {track: kick}, envelope: 0.25, gain: 0.06, bias: 0.72}
-      x: {lfo: sine, period: 2/1, gain: 0.16, bias: 0.42}
-      y: 0.55
-      cutout: {track: render_output/footage/MiniMax_H3_00039_segments, objects: [2, 3], feather: 2}
-    # the sad middle: Verity wails, swelling with the piano
-    - source: footage
-      file: input/esfolado/video4.mp4
-      cues: {reaper: C:/Audio/recordings/nao_ser/reggaetoner/reggaetoner.rpp}
-      scale: {adsr: {track: piano}, attack: 0.1, decay: 0.8, sustain: 0.6, release: 1.2, gain: 0.15, bias: 0.75}
-      x: {lfo: sine, period: 4/1, gain: 0.08, bias: 0.46}
-      y: 0.5
-      cutout: {track: render_output/footage/video4_segments, objects: [1, 4], feather: 3}
-    - source: footage
-      file: input/esfolado/LTX23_multiframe_00775_.mp4
-      cues: {reaper: C:/Audio/recordings/nao_ser/reggaetoner/reggaetoner.rpp}
-      scale: 1.2
-      x: 0.55
-      y: 0.6
-      cutout: {track: render_output/footage/LTX23_multiframe_00775_segments, objects: [2, 3, 4], feather: 2}
-    # the slap: Peppa's burst, the whole frame, the burst (clip 5.0 s) on the clap
-    - source: footage
-      file: input/esfolado/LTX23_multiframe_00775_.mp4
-      cues: [[92.14, 4.02, 1.193, 0.822], [93.333, 5.0, 1.45]]
-      fit: cover
+      pins: {9: none}
+    - source: group
+      name: BG
+      canvas: below
+      layers:
+        - source: shadertoy
+          bars: [[18, 21]]
+          file: shaders/shadertoy/octagrams_arc.glsl
+          uniforms:
+            u_shape:
+              bar:
+                step: 1
+                morph: 0.35
+            u_fly:
+              rate: 10.0
+              base: 4.0
+              from:
+                hits:
+                  track: kick
+                envelope: 0.3
+            u_hue:
+              pitch:
+                track: FM5 MIDI (patches 2, 5, 10, 11, 12, 14)
+              low: 70
+              high: 86
+              glide: 0.15
+            u_sat: 0.8
+        - source: shadertoy
+          bars: [[22, 32]]
+          fade_in: 1
+          file: shaders/shadertoy/nebulosa_arc.glsl
+          speed: 0.6
+          rush:
+            hits:
+              track: piano
+            amount: 1.5
+            envelope: 0.6
+          uniforms:
+            u_form: 0.53
+            u_hue:
+              lfo: sine
+              period: 8/1
+              gain: 0.08
+              bias: 0.6
+            u_dark: 0.35
+            u_bright:
+              adsr:
+                track: piano
+              attack: 0.05
+              decay: 0.6
+              sustain: 0.5
+              release: 1.0
+              gain: 0.8
+              bias: 0.8
+        - source: deep_zoom
+          bars: [[33, 35]]
+          from: 88.0
+          decades: 2.0
+          depth: 13
+          iterations: 2500
+          hue: 0.62
+          flow:
+            rate: 0.0
+            base: 0.4
+        - source: shadertoy
+          bars: [[36, 39]]
+          file: shaders/shadertoy/kaleidoscope_arc.glsl
+          uniforms:
+            u_ring0:
+              since:
+                track: kick
+              nth: 0
+            u_ring1:
+              since:
+                track: kick
+              nth: 1
+            u_ring2:
+              since:
+                track: kick
+              nth: 2
+            u_hue:
+              harmony:
+                score: input/esfolado/sheetsage
+                snap: beat
+              glide: 0.8
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-06-18_DZvh1y4j0vq_01__result (1).mp4
+          blocks:
+            - {bars: [2, 2]}
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-03-16_DV8paYKgG3A__00095__and_others_concat_20260315_235038.mp4
+          blocks:
+            - {bars: [3, 3], from: 8.0}
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-03-06_DVhkZvzABSL__Wanimate_Interpolated_00003_and_others_concat_20260305_221514_newaudio_20260305_222259.mp4
+          blocks:
+            - {bars: [4, 4], from: 5.333}
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-01-14_DTeM3gdAFQ0__LTX-2_00007_.mp4
+          blocks:
+            - {bars: [9, 9], from: 2.667}
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-04-03_DWrj4OqRNZU__final.mp4
+          blocks:
+            - {bars: [10, 10], from: 13.333}
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-04-15_DXIciYbMfEW__final.mp4
+          blocks:
+            - {bars: [11, 12]}
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-05-08_DYF2HntitR5__LTX23_multiframe_00511__newaudio_20260508_173141.mp4
+          blocks:
+            - {bars: [13, 14], from: 2.667}
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-04-15_DXIciYbMfEW__final.mp4
+          blocks:
+            - {bars: [15, 15]}
+          lane_row: 0
+      fx:
+        - {source: pixel_sort, bars: [[5, 8]], amount: {hits: {track: snare}, envelope: 0.35, gain: 0.8}, direction: [vertical, horizontal]}
+        - {source: shadertoy, bars: [[9, 12]], file: shaders/shadertoy/fluxo_cromatico_arc.glsl, uniforms: {u_flow: {relative: subbands.bass, window: 6, gain: 2.0}, u_keep: 0.9, u_kick: {hits: {track: kick}, envelope: 0.25}, u_turn: {random_on: {track: snare}, ease: 0.2, gain: 6.283}}}
+        - {source: flame_lens, bars: [[13, 17]], variations: {swirl: {hits: {track: snare}, envelope: 0.5, amount: 1.0}, bubble: {hits: {track: acid-tb-303, notes: [48, 52, 53]}, envelope: 0.4, amount: 0.8}}, turn: {rate: 1.5, base: 0.15, from: {hits: {track: kick}, envelope: 0.4}}, zoom: 1.3}
+        - {source: shadertoy, bars: [[40, 43]], file: shaders/shadertoy/droste_arc.glsl, uniforms: {u_phase: {bar: {step: 1, morph: 0.6}}, u_kick: {hits: {track: kick}, envelope: 0.3}}}
+        - {source: datamosh, bars: [[44, 47]], length: 1/1, block: 16, push: 2.0, leak: 0.015}
+        - {source: feedback, bars: [[48, 54]], decay: 0.9, base_scale: 0.98, max_scale: 1.02, max_rotate: 0.02, hue_shift: 0.01}
+    - source: group
+      name: FG
+      layers:
 
     # ------------------------------------------------------------- over everything
+        - source: footage
+          file: input/esfolado/dancing/WanimateInterpolated_00063-audio.mp4
+          loop: true
+          scale: 0.55
+          x: 0.22
+          y:
+            hits:
+              track: kick
+            envelope: 0.2
+            gain: -0.025
+            bias: 0.72
+          cutout: {track: render_output/footage/dancing/WanimateInterpolated_00063-audio_segments, drop: [1], feather: 1}
+          name: the lion
+          blocks:
+            - {bars: [5, 10]}
+            - {bars: [36, 39]}
+        - source: footage
+          file: input/esfolado/dancing/WanimateInterpolated_00064-audio.mp4
+          loop: true
+          scale: 0.55
+          x: 0.78
+          y:
+            hits:
+              track: kick
+            envelope: 0.2
+            gain: -0.025
+            bias: 0.72
+          cutout: {track: render_output/footage/dancing/WanimateInterpolated_00064-audio_segments, drop: [1], feather: 1}
+          name: Cebolinha
+          blocks:
+            - {bars: [5, 10]}
+            - {bars: [36, 39]}
+        - source: footage
+          role: foreground
+          file: C:\Users\marco\Videos\ltx2\published\2026-09-23_DdpE4awGc_x_02__LTX23_V2V_api_01739_.mp4
+          fit: contain
+          loop: true
+          scale: 0.6
+          x: 0.5
+          y: 0.62
+          blocks:
+            - {bars: [16, 17], from: 13.333}
+          lane_row: 5
+        - source: footage
+          bars: [[18, 21], [40, 43]]
+          file: input/esfolado/dancing/WanimateInterpolated_00068-audio.mp4
+          loop: true
+          scale: 0.7
+          x: 0.3
+          y:
+            pitch:
+              track: FM5 MIDI (patches 2, 5, 10, 11, 12, 14)
+            low: 70
+            high: 86
+            glide: 0.1
+            gain: -0.25
+            bias: 0.75
+          cutout: {track: render_output/footage/dancing/WanimateInterpolated_00068-audio_segments, drop: [1], feather: 1}
+          name: the drawn boy
+        - source: footage
+          bars: [[18, 21], [40, 43]]
+          file: input/esfolado/dancing/WanimateInterpolated_00061-audio.mp4
+          loop: true
+          flip: true
+          scale: 0.6
+          x: 0.72
+          y:
+            hits:
+              track: snare
+            envelope: 0.25
+            gain: -0.04
+            bias: 0.7
+          cutout: {track: render_output/footage/dancing/WanimateInterpolated_00061-audio_segments, drop: [1], feather: 1}
+          name: the creature
+        - source: footage
+          bars: [[44, 51]]
+          fade_out: 3
+          file: input/esfolado/dancing/WanimateInterpolated_00069-audio.mp4
+          loop: true
+          scale: 0.6
+          x:
+            lfo: sine
+            period: 4/1
+            gain: 0.1
+            bias: 0.25
+          y: 0.68
+          cutout: {track: render_output/footage/dancing/WanimateInterpolated_00069-audio_segments, drop: [1], feather: 1}
+          name: the masked pair
+        - source: footage
+          bars: [[44, 47]]
+          file: input/esfolado/dancing/WanimateInterpolated_00070-audio.mp4
+          loop: true
+          flip: true
+          scale: 0.6
+          x:
+            lfo: sine
+            period: 4/1
+            phase: 0.5
+            gain: 0.1
+            bias: 0.75
+          y: 0.68
+          cutout: {track: render_output/footage/dancing/WanimateInterpolated_00070-audio_segments, drop: [1], feather: 1}
+        - source: footage
+          file: input/esfolado/dancing/WanimateInterpolated_00057.png
+          scale:
+            hits:
+              track: ez-hihat
+              notes:
+                - 46
+            envelope: 0.3
+            gain: 0.4
+          x:
+            random_on:
+              track: ez-hihat
+              notes:
+                - 46
+            seed: 1
+            gain: 0.7
+            bias: 0.15
+          y:
+            random_on:
+              track: ez-hihat
+              notes:
+                - 46
+            seed: 2
+            gain: 0.35
+            bias: 0.2
+          cutout: {track: render_output/footage/dancing/WanimateInterpolated_00057_segments, drop: [1], feather: 1}
+          name: stickers
+          blocks:
+            - {bars: [36, 47]}
+        - source: footage
+          file: input/esfolado/dancing/WanimateInterpolated_00065.png
+          scale:
+            hits:
+              track: snare
+            envelope: 0.25
+            gain: 0.35
+          x:
+            random_on:
+              track: snare
+            seed: 3
+            gain: 0.7
+            bias: 0.15
+          y:
+            random_on:
+              track: snare
+            seed: 4
+            gain: 0.3
+            bias: 0.25
+          cutout: {track: render_output/footage/dancing/WanimateInterpolated_00065_segments, drop: [1], feather: 1}
+          blocks:
+            - {bars: [36, 47]}
+        - source: footage
+          role: foreground
+          file: C:\Users\marco\Videos\ltx2\published\2026-09-02_Dcyg-ItkeJs_07__LTX23_multifram_api_05955_.mp4
+          fit: contain
+          loop: true
+          scale: 0.6
+          x: 0.5
+          y: 0.62
+          blocks:
+            - {bars: [15, 16], from: 8.0}
+          lane_row: 4
+          fx:
+            - {source: sam_cutout, seeds: auto, max_objects: 4, granularity: whole, reseed: 2.0, keep: figures, feather: 2}
+        - source: footage
+          file: input/esfolado/MiniMax_H3_00039_.mp4
+          cues:
+            reaper: C:/Audio/recordings/nao_ser/reggaetoner/reggaetoner.rpp
+          scale:
+            hits:
+              track: kick
+            envelope: 0.25
+            gain: 0.06
+            bias: 0.72
+          x:
+            lfo: sine
+            period: 2/1
+            gain: 0.16
+            bias: 0.42
+          y: 0.55
+          cutout: {track: render_output/footage/MiniMax_H3_00039_segments, objects: [2, 3], feather: 2}
+          name: the bottles sing the voice
+          mute:
+            -   - 18
+                - 21
+        - source: footage
+          file: input/esfolado/video4.mp4
+          cues:
+            reaper: C:/Audio/recordings/nao_ser/reggaetoner/reggaetoner.rpp
+          scale:
+            adsr:
+              track: piano
+            attack: 0.1
+            decay: 0.8
+            sustain: 0.6
+            release: 1.2
+            gain: 0.15
+            bias: 0.75
+          x:
+            lfo: sine
+            period: 4/1
+            gain: 0.08
+            bias: 0.46
+          y: 0.5
+          cutout: {track: render_output/footage/video4_segments, objects: [1, 4], feather: 3}
+          name: the sad middle
+        - source: footage
+          file: input/esfolado/LTX23_multiframe_00775_.mp4
+          cues:
+            reaper: C:/Audio/recordings/nao_ser/reggaetoner/reggaetoner.rpp
+          scale: 1.2
+          x: 0.55
+          y: 0.6
+          cutout: {track: render_output/footage/LTX23_multiframe_00775_segments, objects: [2, 3, 4], feather: 2}
+        - source: footage
+          file: input/esfolado/LTX23_multiframe_00775_.mp4
+          cues:
+            -   - 92.14
+                - 4.02
+                - 1.193
+                - 0.822
+            -   - 93.333
+                - 5.0
+                - 1.45
+          fit: cover
+          name: the slap
     - source: rgb_split
       bars: [[5, 21], [36, 47]]
       amount: 10

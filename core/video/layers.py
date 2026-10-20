@@ -370,6 +370,8 @@ class BarWindow:
         bars: [[2, 21], [36, 51]]     # DAW bar numbers, inclusive
         fade_in: 1                    # bars the layer takes to come up (inside the window)
         fade_out: 2                   # bars it takes to go down (inside the window)
+        mute: [[9, 12]]               # bars it is hidden in (the opposite: any layer, e.g. a
+                                      # character cut by its REAPER cues, kept in sync)
 
     Works on every layer, post-ops included; the grid answers where the bars are,
     so meter changes are honoured.
@@ -2789,6 +2791,8 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
     # used as-is (first layer = canvas), so pure-generative scenes work
     from core.video.track_fx import expand_groups
     layers_cfg = expand_groups(video_cfg.get("layers") or [{"source": "clips"}])   # the background lane, spliced
+    from core.video import sam_cutout                   # a clip's sam_cutout FX: its cutout (SAM2 once, cached)
+    layers_cfg = [sam_cutout.resolve(spec) for spec in layers_cfg]
     windows: list = []
     tracks: dict = {}                                   # one mask-track reader per folder, shared
     for spec in layers_cfg:
@@ -2806,6 +2810,9 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
         windows.append(window)
         if window is not None:
             op_fn = (lambda t, w=window, f=op_fn: w(t) * (f(t) if f is not None else 1.0))
+        if spec.get("mute"):                            # bars it is hidden in (it goes on underneath:
+            hush = BarWindow({"bars": spec["mute"]}, grid)  # a cued character stays in sync)
+            op_fn = (lambda t, m=hush, f=op_fn: (1.0 - m(t)) * (f(t) if f is not None else 1.0))
         if src_name == "clips":
             comp.add(base, blend if len(comp) else "normal", op_fn)
             continue

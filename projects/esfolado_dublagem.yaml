@@ -1,5 +1,5 @@
 audio: F:\workspace\AudioReativeController\input\esfolado\esfolado_mix_15_10_2026-full.mp3
-midi: F:\workspace\AudioReativeController\input\esfolado\esfolado.mid
+midi: F:\workspace\AudioReativeController\input\esfolado\esfolado_reaper.mid
 scene: F:\workspace\AudioReativeController\examples\esfolado_dublagem.yaml
 skip_separation: true
 midi_offset: 0.0

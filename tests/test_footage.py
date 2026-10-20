@@ -244,3 +244,20 @@ def test_drop_leaves_out_the_unnamed_edge_but_not_a_hole(clip, tmp_path):
     out = f.frame_at_over(np.zeros((32, 64, 3), np.uint8), 0.0)
     assert (out[:, 63] == 0).all()                       # the unnamed edge: backdrop, not drawn
     assert _index(out[15:17, 45:47]) == 24               # the hole stays with the figure
+
+
+def test_mute_hides_a_cued_clip_in_those_bars_and_it_stays_in_sync(clip):
+    """mute: [[a, b]] hides a layer in those bars; after them it shows the frame its cue is at
+    then (it went on underneath), in the stack and in a lane drawn on its own."""
+    from core.rhythm.grid import RhythmGrid
+    grid = RhythmGrid(bpm=120.0, fps=30, beats=np.arange(32) * 0.5, downbeats=np.arange(8) * 2.0)
+    cued = {"source": "footage", "file": clip, "cues": [[0.0, 0.0, 1.9]]}       # bar 1 (0-2 s)
+    for wrap in (lambda l: l, lambda l: {"source": "group", "name": "FG", "layers": [l]}):
+        def at(t, **over):
+            comp = build_compositor(_Grey(), {"layers": [{"source": "clips"}, wrap({**cued, **over})]},
+                                    [], 64, 32, fps=FPS, grid=grid)
+            comp.use_gpu = False
+            return comp.frame_at(t)
+        assert _index(at(1.0)) == 24                                       # 1 s into the clip
+        assert (at(0.5, mute=[[1, 1]]) == 200).all()                       # hidden: the clips under it
+        assert _index(at(1.0, mute=[[2, 3]])) == 24                        # not in those bars: shown

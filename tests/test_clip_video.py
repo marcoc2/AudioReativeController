@@ -1,4 +1,6 @@
 """Tests for core.video: ClipTransport ping-pong/reverse and ClipComposer triggers."""
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -439,7 +441,69 @@ def test_override_pins_clip_for_bar():
     comp.frame_at(5.0)                         # snare next_clip inside pinned bar
     assert comp.transport.clip_idx == 2        # ...pin still wins
     comp.frame_at(8.0)
-    assert comp.transport.clip_idx != 2 or comp.transport.pos == 0.0  # bar 2: rule again
+    assert comp.transport.clip_idx == 2 and comp.transport.pos == 1.0  # bar 2: the rule, as if
+    # bar 1 had not been pinned (its clip 1, then 2), from its start (one frame played)
+
+
+
+class _Named(StubLibrary):
+    """A library whose clips have names (pins name them)."""
+    def __init__(self, n, clip_len=8):
+        super().__init__([StubClip(clip_len) for _ in range(n)])
+        self.paths = [Path(f"c{i}.mp4") for i in range(n)]
+
+
+def _clips_by_bar(cfg, n_bars=8, n_clips=6, clip_len=8):
+    grid = RhythmGrid(bpm=60.0, time_signature=(4, 4), fps=4)    # bar = 4s
+    comp = ClipComposer(_Named(n_clips, clip_len), grid, [], cfg)
+    out = []
+    for b in range(n_bars):
+        frame = comp.frame_at(b * 4.0)
+        out.append("none" if comp.blank else comp.transport.clip_idx)
+        assert (frame == 0).all() or not comp.blank              # nothing there: black
+    return out
+
+
+def test_pins_on_the_clips_layer_leave_the_other_bars_as_drawn():
+    base = {"clip_per_bar": True, "clip_order": "random", "seed": 5}
+    drawn = _clips_by_bar(base)
+    other = next(i for i in range(6) if i not in drawn[2:4])
+    pinned = _clips_by_bar({**base, "layers": [{"source": "clips", "pins": {3: f"c{other}", 4: "none"}}]})
+    assert pinned[2] == other and pinned[3] == "none"          # bars 3 and 4 (from 1)
+    assert pinned[:2] == drawn[:2] and pinned[4:] == drawn[4:] # the rest as the montage drew them
+
+
+def test_a_clip_pinned_to_bars_in_a_row_plays_on():
+    grid = RhythmGrid(bpm=60.0, time_signature=(4, 4), fps=4)
+    cfg = {"clip_per_bar": True, "clip_order": "sequential", "clip_end": "loop",
+           "layers": [{"source": "clips", "pins": {2: "c3", 3: "c3"}}]}
+    comp = ClipComposer(_Named(4, clip_len=100), grid, [], cfg)
+    for k in range(32):                                        # 8 s, 4 frames a second
+        comp.frame_at(k / 4)
+    assert comp.transport.clip_idx == 3 and comp.transport.pos >= 15   # not started over at bar 3
+
+
+def test_a_composer_goes_on_from_one_that_played_the_bars_before():
+    grid = RhythmGrid(bpm=60.0, time_signature=(4, 4), fps=4)
+    cfg = {"clip_per_bar": True, "clip_order": "random", "seed": 3,
+           "triggers": {"snare": {"notes": [38], "actions": ["reverse"]}}}
+    notes = [snare(t) for t in (5.0, 13.5, 21.0)]
+    whole = ClipComposer(_Named(6, clip_len=30), grid, notes, cfg)
+    seq = [(int(whole.frame_at(k / 4)[0, 0, 0]), whole.transport.clip_idx) for k in range(4 * 24)]
+    dry = ClipComposer(_Named(6, clip_len=30), grid, notes, cfg)    # the bars before, played cheaply
+    for k in range(4 * 12):
+        dry.frame_at(k / 4)
+    late = ClipComposer(_Named(6, clip_len=30), grid, notes, cfg)
+    late.take_state(dry)
+    assert [(int(late.frame_at(k / 4)[0, 0, 0]), late.transport.clip_idx) for k in range(4 * 12, 4 * 24)] == seq[48:]
+
+
+def test_the_resolver_names_a_bar_pinned_to_nothing():
+    from core.video.resolver import resolve_song
+    grid = RhythmGrid(bpm=60.0, time_signature=(4, 4), fps=4)
+    cfg = {"clip_per_bar": True, "layers": [{"source": "clips", "pins": {2: "none"}}]}
+    segs, _, _ = resolve_song(_Named(3, clip_len=100), grid, [], cfg, 4, 0.0, 12.0)
+    assert [(s.t0, s.clip_name) for s in segs] == [(0.0, "c0"), (4.0, "none"), (8.0, "c2")]
 
 
 # ---------------------------------------------------------------------------

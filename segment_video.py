@@ -43,12 +43,23 @@ def main():
     ap.add_argument("--min-stability", type=float, default=0.7,
                     help="How steady its outline must be (lower: more, rougher objects)")
     ap.add_argument("--preview", action="store_true", help="Also write a video with the objects tinted")
+    ap.add_argument("--seeds", default=None,
+                    help="A JSON file of one's own seeds: {at: clip s, objects: [{box: [x0, y0, x1, y1], "
+                         "points: [[x, y, 1|0], ...]}]} (0..1 of the frame); only those objects are "
+                         "followed, from that frame on (no automatic search)")
     args = ap.parse_args()
     if not args.sam2_weights:
         ap.error("give --sam2-weights (or set ARC_SAM2_WEIGHTS)")
 
     from core.segment.sam2_tracker import RegionTracker
     W, H, fps = probe_video(args.video)
+    seeds = None
+    if args.seeds:
+        from core.segment.mask_track import seeds_in_pixels
+        seeds = seeds_in_pixels(json.loads(Path(args.seeds).read_text(encoding="utf-8")), W, H, fps)
+        if not seeds["objects"]:
+            ap.error(f"{args.seeds}: no object has a box or points")
+        print(f"seeds: {len(seeds['objects'])} object(s) on frame {seeds['frame']}", flush=True)
     out = Path(args.output) if args.output else default_folder(args.video)
     print(f"SAM2 {args.sam2_model} on {args.video} ({W}x{H} @ {fps:g}) -> {out}", flush=True)
     cuts = None
@@ -71,7 +82,7 @@ def main():
                          granularity=args.granularity, reseed=args.reseed, cut=args.cut,
                          points_per_side=args.points, min_iou=args.min_iou,
                          min_stability=args.min_stability, preview=preview, model=args.sam2_model,
-                         log=lambda m: print(m, flush=True), cuts=cuts)
+                         log=lambda m: print(m, flush=True), cuts=cuts, seeds=seeds)
     finally:
         if preview is not None:
             preview.stdin.close()

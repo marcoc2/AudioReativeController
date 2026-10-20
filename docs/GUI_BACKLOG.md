@@ -255,3 +255,131 @@ sua lista de FX aplicados em sequência.
   Shift+roda (andar);
 - "Preview bars" num bloco (ou no botão direito): o preview do studio daqueles compassos
   (até 8) com o arranjo como está, salvo ou não, numa janela própria.
+
+## 16. [x] Tudo o que aparece no Arranjo se edita
+
+Pedido (16/10/2026): "agora eu vejo o lofi mas não posso remover pra editar". Regra: o que
+está desenhado é um bloco que se escolhe com um clique, se arrasta, se redimensiona pelas
+pontas, se apaga com Delete e tem menu no botão direito (duplo clique: o plugin).
+
+- **Trilhas de FX:** os FX do FG, do BG e do Master são blocos nas suas trilhas (FX que
+  não se cruzam dividem a linha), não mais tracinhos. Arrastar um FX escolhido em FX
+  numa trilha o põe ali; earlier/later mudam a ordem da cadeia.
+- **CLIPS (a montagem):** mostra o clipe de cada compasso como ele toca (seed, ordem,
+  cortes). Um clique, ou um arrasto, escolhe compassos. Daí:
+  - "Put" fixa ali o clipe escolhido à esquerda;
+  - "Nothing here" / Delete deixa vazio (o BG, ou preto);
+  - "Back to the montage" volta à escolha da montagem;
+  - "Make it a BG block" vira um bloco do BG.
+
+  Os pins ficam na camada `clips` (`pins: {3: lofi_2, 9: none}`, compassos a partir de 1).
+  Um compasso fixado não muda os clipes que a montagem sorteia para os outros, e um clipe
+  fixado em compassos seguidos continua tocando em vez de recomeçar. Um clipe de outra
+  pasta, ou de outro ponto, vai para o BG.
+- **Nomes:** cada camada sem `name:` ganha o do seu comentário na cena (`# the lion` no fim
+  da linha, ou a linha acima: "the bottles sing the voice"). Salvar grava `name:`, e o
+  inspetor tem um campo para dar ou trocar o nome.
+- **Compassos escolhidos e preview (16/10/2026):** "seleciono tantos bars na lane de bg,
+  mando preview e nada acontece". Agora:
+  - arrastar sobre os números dos compassos (a régua) escolhe compassos; numa lane, sem nada
+    escolhido à esquerda para pôr, também. Escolher um bloco escolhe os compassos dele;
+  - o botão "Preview bars a-b (Space)" na barra de cima, ou Espaço, toca esses compassos;
+  - a janela do preview mostra o andamento, ou por que falhou (antes isso só aparecia na
+    barra do Studio, atrás da janela), mostra o quadro em pé e tem Stop.
+
+  O preview também começava a montagem do zero no compasso pedido, então mostrava outros
+  clipes. Agora ele a reproduz desde o começo da música (sem decodificar), e os clipes
+  batem com a linha CLIPS e o render.
+- **O Preview nunca recusa calado (16/10/2026):** "clico em preview e nada acontece". As
+  recusas só apareciam na linha verde da barra de cima, cortada na borda da janela. Agora a
+  janela do preview sempre abre e diz o que acontece:
+  - projeto sem Load: carrega e toca quando terminar;
+  - o Studio ainda faz outro preview: estes compassos vêm em seguida;
+  - nenhum compasso escolhido: toca os 8 primeiros à vista.
+
+  A linha de status quebra a linha. A Arrange aberta antes do Load se refaz com os
+  compassos reais da música quando ela carrega.
+- **Botões mortos (17/10/2026):** o Preview do inspetor da linha CLIPS não fazia nada. O
+  DearPyGui passa o `user_data` (None) como terceiro argumento posicional, então
+  `lambda s, a, fn=fn: fn()` chamava `None()`, e o erro era engolido calado. Isso quebrava
+  todos os botões e menus feitos em laço:
+  - os botões da montagem e o menu do botão direito;
+  - na lista de FX: on/off, plugin, ^, v e x;
+  - no plugin: Who plays e x;
+  - no Studio: as camadas, os gatilhos e os uniforms.
+
+  Agora o valor capturado vem depois de `*` (keyword-only). Um teste impede que o padrão
+  volte.
+
+## 17. [x] Demos de cada Generator e FX
+"Muito nome de efeito ou gerador não quer dizer nada até que você veja ele funcionando."
+
+**O demo**
+- Um vídeo de 512×512, ~10 s, 30 fps, pré-renderizado e **só visual, sem música**.
+- Arquivos: `render_output/demos/<chave>.mp4`, mais um `.json` com a receita e um hash
+  (spec, arquivo do shader ou da camada, fundo). Só o que mudou é re-renderizado.
+- Ao escolher um Generator ou FX na lista, o demo toca em loop no painel embaixo dela.
+  Clicar abre em 512. Sem demo: "no demo yet" e o botão Make demo.
+
+**O movimento**
+- Sem áudio, os knobs que a música moveria são varridos por `lfo:` numa grade sintética
+  fixa, de ponta a ponta da faixa de cada um. Assim se vê o que o parâmetro faz.
+- Uma faixa `meters` fina diz qual knob está variando.
+- O render recebe um WAV mudo com a grade fixa: o `clip_generator` exige `--file`.
+- Camadas que só se mexem com features de áudio (sem knob) ficam marcadas e ganham ajuste
+  próprio.
+
+**Generator:** tela cheia.
+
+**FX:** metade sem / metade com. Esquerda sem o efeito, direita com, uma linha no meio. O
+fundo é escolhido por categoria para o efeito saltar aos olhos:
+
+| Categoria | Fundo |
+|---|---|
+| Lens & distortion | grade quadriculada com anel e texto em movimento |
+| Time & trails | figura clara atravessando um fundo liso |
+| Colour & light, Matter | um clipe colorido e contrastado da biblioteca, sempre o mesmo |
+| Cuts | a montagem cortando a cada compasso |
+| Figures | `me_diz_capa_base` e as máscaras SAM2 que já existem |
+
+**Ajustes:** `demos.yaml`, só o que foge do padrão. 28 dos 66 entries têm specs afinadas
+em `examples/me_diz_*.yaml`, de onde vêm as formas dos knobs (o áudio troca por LFO).
+
+**Fases**
+1. Receita, fundos, WAV mudo e grade, e o comando `python -m tools.demos render [--only]
+   [--force]`, com 3 amostras: um Generator, um FX de lente, um FX de rastro.
+2. O player no painel do catálogo: thread de decodificação (cv2), textura no `tick()`, para
+   ao trocar de entry.
+3. Lote dos 66 na GPU, em background e retomável (estimativa de 30–60 min; os fractais 3D
+   são os lentos), folha de contato e ajuste dos fracos.
+4. Testes:
+   - toda entry tem receita válida e as necessidades atendidas;
+   - o hash muda com o shader;
+   - o player faz loop.
+
+**Feito (17/10/2026):** `core/demos.py` e `core/demos.yaml`. Os 66 demos estão em
+`render_output/demos/`, cerca de 120 MB, 2 a 30 s cada.
+
+- **O que move o demo:** um loop sintético a 120 BPM, que ninguém ouve: bateria em
+  "drums (midi)", acordes em "organ", "e-piano", "bass acid" e uma partitura dos acordes.
+  As cenas `examples/me_diz_*` funcionam nele sem mudança, então 28 receitas vêm delas.
+- **`core/demos.yaml`:** uma receita própria (`layer:`) ou ajustes sobre a afinada
+  (`set:`, `drop:`). Hoje cobre:
+  - meters e cast;
+  - cubes, que precisa de uma pasta de clipes;
+  - solid, que pisca no kick;
+  - flame, sem pintar com o vídeo de baixo;
+  - rgb_noise, mais forte;
+  - shockwave e drops, que só agem com notas;
+  - pixel_sort, varrido de 0 a 1;
+  - kifs_acorde, com o fatiamento mais estreito;
+  - sombras_2d_kicks, com os knobs ligados;
+  - mouths, que abrem com os médios em vez da voz;
+  - time_map, que usa as figuras.
+
+  Camadas que seguem figuras (`figure:`, `map: figures`) vão sozinhas para o fundo com
+  máscaras.
+- **Comandos:** `python -m core.demos render` (só os que faltam ou ficaram velhos),
+  `list` e `sheet` (folha de contato).
+- **Na GUI:** o demo toca embaixo da lista de Generators e FX; clicar abre em 512. "no demo
+  yet" e o demo velho têm botão para refazer, em background.

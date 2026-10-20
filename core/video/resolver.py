@@ -98,11 +98,12 @@ def resolve_song(library, grid, notes: Sequence, video_cfg: dict, fps: int,
         tp = comp.transport
         times[fi] = t
         speeds[fi] = tp.speed
-        if cur is None or (tp.clip_idx, tp.direction) != (cur.clip_idx, cur.direction):
+        idx = -1 if comp.blank else tp.clip_idx          # -1: pinned to nothing
+        if cur is None or (idx, tp.direction) != (cur.clip_idx, cur.direction):
             if cur is not None:
                 cur.t1 = t
-            name = (Path(library.paths[tp.clip_idx]).stem
-                    if hasattr(library, "paths") else str(tp.clip_idx))
-            cur = Segment(t, end, tp.clip_idx, name, tp.direction)
+            name = ("none" if idx < 0 else Path(library.paths[idx]).stem
+                    if hasattr(library, "paths") else str(idx))
+            cur = Segment(t, end, idx, name, tp.direction)
             segments.append(cur)
     return segments, times, speeds

@@ -158,3 +158,60 @@ def test_midi_items_give_their_notes_and_a_midi_file(tmp_path):
     read = read_midi(str(out))
     got = read[1] if isinstance(read, tuple) else read
     assert any(getattr(n, "track", "") == "piano" for n in got)
+
+
+SHORT_FIRST_BAR_RPP = """<REAPER_PROJECT 0.1 "7.0" 1
+  TEMPO 90 4 4
+  <TEMPOENVEX
+    PT 0.000000000000 90.0000000000 1 262148 0 1
+    PT 2.000000000000 90.0000000000 1 262148 0 5
+  >
+  <TRACK {K}
+    NAME kick
+    <ITEM
+      POSITION 2
+      LENGTH 2.6666667
+      <SOURCE MIDI
+        HASDATA 1 960 QN
+        E 0 99 24 64
+        E 240 89 24 00
+        E 3600 b0 7b 00
+      >
+    >
+  >
+  <TRACK {K2}
+    NAME kick
+    <ITEM
+      POSITION 2
+      LENGTH 2.6666667
+      <SOURCE MIDI
+        HASDATA 1 960 QN
+        E 0 99 24 50
+        E 240 89 24 00
+        E 3600 b0 7b 00
+      >
+    >
+  >
+>
+"""
+
+
+def test_a_meter_marker_mid_bar_makes_a_short_bar_and_the_midi_keeps_reapers_bars(tmp_path):
+    """REAPER starts a bar at each meter marker: one 3 beats in (90 BPM, 2.0 s) makes bar 1
+    a 3/4 bar and bar 2 start at 2.0 s; the MIDI written says so, and the notes keep their
+    time (REAPER's own export pads bar 1 to 4/4 and puts everything a beat late). Two tracks
+    of one name playing the same note: it is written once."""
+    from core.reaper_project import midi_meters, write_midi
+    from core.rhythm.midi_reader import read_midi
+    (tmp_path / "s.rpp").write_text(SHORT_FIRST_BAR_RPP, encoding="utf-8")
+    proj = read_project(str(tmp_path / "s.rpp"))
+    assert proj.meters == [(0.0, (4, 4)), (2.0, (4, 4))]
+    assert midi_meters(proj.meters, 90.0) == [(0.0, (3, 4)), (3.0, (4, 4))]
+    assert midi_meters([(0.0, (4, 4))], 90.0) == [(0.0, (4, 4))]
+    assert midi_meters([(0.0, (4, 4)), (2.0 + 2 * 8 / 3, (7, 8))], 90.0) == [(0.0, (4, 4)), (8.0, (3, 4)), (11.0, (7, 8))]
+    out = tmp_path / "s.mid"
+    assert write_midi(str(tmp_path / "s.rpp"), ["kick"], str(out)) == {"kick": 1}
+    grid, notes = read_midi(str(out))
+    assert [round(float(d), 3) for d in grid.downbeats[:2]] == [0.0, 2.0]               # bar 2: at 2.0 s
+    assert grid.time_signature == (4, 4) and abs(grid.bar_duration - 8 / 3) < 1e-4   # the song's: not bar 1's
+    assert [(round(n.time, 3), n.pitch, n.velocity) for n in notes] == [(2.0, 36, 100)]

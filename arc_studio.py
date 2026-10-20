@@ -105,6 +105,9 @@ class _State:
 
     # preview playback
     preview_frames:   list  = []
+    preview_error:    str   = ""       # why the last preview made nothing
+    preview_making:   bool  = False    # the rendering going on is a preview's (not the video's)
+    preview_cancel:   bool  = False    # Stop (or another preview) asked it to give up
     preview_idx:      int   = 0
     preview_playing:  bool  = False
     preview_start_t:  float = 0.0   # song time of the preview's first frame
@@ -155,6 +158,9 @@ class _State:
 
     # resolved output arrangement (dry-run of the composer; no decoding)
     resolved_segments: list = []
+    resolved_paths: list = []  # the clips the segments' clip_idx point at
+    resolved_lib = None        # their MetaLibrary (probed once)
+    arrange_montage = (None, [])   # (the Arrange's pins, the montage resolved with them)
     resolved_times = None    # np arrays: speed curve samples
     resolved_speeds = None
 
@@ -784,15 +790,15 @@ def _add_trigger_row(cfg: Optional[dict] = None) -> None:
     S.trig_rows.append(row)
 
     def _set(key):
-        return lambda s, v, u=row: u.update({key: v})
+        return lambda s, v, *, u=row: u.update({key: v})
 
-    def _on_source(s, v, u=row):
+    def _on_source(s, v, *, u=row):
         u["source"] = v
         for src in TRIG_SOURCES:
             if dpg.does_item_exist(f"trig_{src}_{rid}"):
                 dpg.configure_item(f"trig_{src}_{rid}", show=(src == v))
 
-    def _add_track(s, v, u=row):
+    def _add_track(s, v, *, u=row):
         from core.knob_forms import split_tracks
         names = split_tracks(u["track"])
         if v and v not in names:
@@ -823,7 +829,7 @@ def _add_trigger_row(cfg: Optional[dict] = None) -> None:
             with dpg.group(horizontal=True, tag=f"trig_audio_{rid}",
                            show=row["source"] == "audio"):
                 dpg.add_button(label="Audio…", width=60,
-                               callback=lambda s, a, u=row: (
+                               callback=lambda s, a, *, u=row: (
                                    _trig_audio_target.update({"row": u}),
                                    dpg.show_item("dlg_trig_audio")))
                 dpg.add_text(Path(row["audio"]).name if row["audio"] else "(none)",
@@ -840,13 +846,13 @@ def _add_trigger_row(cfg: Optional[dict] = None) -> None:
                 dpg.add_input_text(default_value=row["voice"], width=80,
                                    hint="voice (melody)", callback=_set("voice"))
             dpg.add_button(label="x", width=24,
-                           callback=lambda s, a, u=(tag, row): _remove_trigger_row(*u))
+                           callback=lambda s, a, *, u=(tag, row): _remove_trigger_row(*u))
         active = {a.strip() for a in str(row["actions"]).split(",") if a.strip()}
         with dpg.group(horizontal=True):
             dpg.add_text("   actions:")
             for act in _action_options():
                 dpg.add_checkbox(label=act, default_value=act in active,
-                                 callback=lambda s, v, u=(row, act):
+                                 callback=lambda s, v, *, u=(row, act):
                                      _toggle_action(u[0], u[1], v))
             dpg.add_text("until:")
             dpg.add_input_text(default_value=row["until"], width=60,
@@ -1080,7 +1086,7 @@ def _draw_uniforms(row: dict) -> None:
             with dpg.group(horizontal=True):
                 name, set_ = u["name"], u["name"] in given
                 dpg.add_button(label="knob", width=40,
-                               callback=lambda s, a, u=(row, ("uniforms", name), u["default"]):
+                               callback=lambda s, a, *, u=(row, ("uniforms", name), u["default"]):
                                    _open_knob_editor(*u))
                 dpg.add_text(f"{name:<10}", color=(230, 210, 140) if set_ else (150, 150, 150))
                 if set_:
@@ -1089,7 +1095,7 @@ def _draw_uniforms(row: dict) -> None:
                                  color=(170, 210, 170))
                 else:
                     dpg.add_button(label="+", width=20,
-                                   callback=lambda s, a, u=(row, name, u["default"]): _add_uniform(*u))
+                                   callback=lambda s, a, *, u=(row, name, u["default"]): _add_uniform(*u))
                     dpg.add_text(f"default {u['default']:g}", color=(110, 110, 110))
             if u["about"]:
                 dpg.add_text(f"   {u['about']}", wrap=560, color=(120, 120, 140))
@@ -1251,13 +1257,13 @@ def _draw_knob_link(parent, ctx: dict) -> None:
     own = ctx["shared"][1:] if ctx["shared"] and ctx["shared"][0] == "&" else None
     others = [n for n in sigs if n != own]
 
-    def use(s, v, ctx=ctx):
+    def use(s, v, *, ctx=ctx):
         if v in sigs:
             ctx["link"] = v
             ctx["state"] = state_of(sigs[v]["value"])
             _knob_draw()
 
-    def unlink(s, a, ctx=ctx):
+    def unlink(s, a, *, ctx=ctx):
         ctx["link"] = None
         _knob_draw()
 
@@ -1271,7 +1277,7 @@ def _draw_knob_link(parent, ctx: dict) -> None:
             dpg.add_text("or name this one")
             dpg.add_input_text(default_value=own or ctx.get("anchor", ""), width=110,
                                hint="kick", enabled=own is None,
-                               callback=lambda s, v, ctx=ctx: ctx.update({"anchor": v}))
+                               callback=lambda s, v, *, ctx=ctx: ctx.update({"anchor": v}))
 
 
 def _knob_spec(ctx: dict):
@@ -1312,7 +1318,7 @@ def _draw_knob_source_link(st: dict, kind: str, pad: str) -> bool:
     src = st["source"]
     sigs = {v["name"]: v for v in _knob_signals() if v["kind"] == kind}
 
-    def use(s, v, src=src):
+    def use(s, v, *, src=src):
         if v not in sigs:
             return
         value = sigs[v]["value"]
@@ -1325,7 +1331,7 @@ def _draw_knob_source_link(st: dict, kind: str, pad: str) -> bool:
         src["link"] = v
         _knob_draw()
 
-    def unlink(s, a, src=src):
+    def unlink(s, a, *, src=src):
         src.pop("link", None)
         _knob_draw()
 
@@ -1355,7 +1361,7 @@ def _draw_knob_state(parent, st: dict, depth: int, only_source: bool = False) ->
             _knob_show_yaml()
         return cb
 
-    def on_form(s, v, st=st):
+    def on_form(s, v, *, st=st):
         st.update(new_state(by_label[v], like=st))
         _knob_draw()
 
@@ -1380,14 +1386,14 @@ def _draw_knob_state(parent, st: dict, depth: int, only_source: bool = False) ->
         if tied:
             pass
         elif f["source"] == "trigger":
-            def on_kind(s, v, src=src):
+            def on_kind(s, v, *, src=src):
                 src["kind"] = v
                 _knob_draw()
             with dpg.group(horizontal=True):
                 dpg.add_text(f"{pad}  from")
                 dpg.add_combo(TRIGGER_KINDS, default_value=src["kind"], width=80, callback=on_kind)
                 if src["kind"] == "track":
-                    def add_track(s, v, src=src):
+                    def add_track(s, v, *, src=src):
                         from core.knob_forms import split_tracks
                         names = split_tracks(src["track"])
                         if v and v not in names:
@@ -1420,7 +1426,7 @@ def _draw_knob_state(parent, st: dict, depth: int, only_source: bool = False) ->
                 dpg.add_combo(SNAPS, default_value=src.get("snap", "auto"), width=60,
                               callback=upd(src, "snap"))
         elif f["source"] == "feature":
-            def on_feature(s, v, st=st):
+            def on_feature(s, v, *, st=st):
                 st["source"] = v
                 _knob_show_yaml()
             with dpg.group(horizontal=True):
@@ -1442,14 +1448,14 @@ def _draw_knob_state(parent, st: dict, depth: int, only_source: bool = False) ->
                     _knob_setting(st, name, st.get(name, default), kind, "")
         if st["form"] == "rate":
             if st.get("from") is None:
-                def follow(s, a, st=st):
+                def follow(s, a, *, st=st):
                     st["from"] = new_state("hits")
                     _knob_draw()
                 with dpg.group(horizontal=True):
                     dpg.add_text(f"{pad}  rate x 1 (a steady drift)")
                     dpg.add_button(label="make the rate follow the music", callback=follow)
             else:
-                def steady(s, a, st=st):
+                def steady(s, a, *, st=st):
                     st["from"] = None
                     _knob_draw()
                 with dpg.group(horizontal=True):
@@ -1594,7 +1600,7 @@ def _draw_signals() -> None:
         with dpg.group(parent="signals_panel"):
             with dpg.group(horizontal=True):
                 dpg.add_button(label="edit", width=40, enabled=v["kind"] != "other",
-                               callback=lambda s, a, u=(row, path, v["kind"]):
+                               callback=lambda s, a, *, u=(row, path, v["kind"]):
                                    _open_knob_editor(u[0], u[1], mode=u[2]))
                 dpg.add_text(f"&{v['name']}", color=(230, 210, 140))
                 dpg.add_text(v["kind"], color=(150, 180, 220))
@@ -1642,18 +1648,18 @@ def _draw_layer_rows() -> None:
                 dpg.add_input_text(default_value=row["bars"], width=130,
                                    hint="[[21, 33]]", callback=_set("bars"))
                 dpg.add_button(label="^", width=20, enabled=i > 0,
-                               callback=lambda s, a, u=i: _move_layer(u, -1))
+                               callback=lambda s, a, *, u=i: _move_layer(u, -1))
                 dpg.add_button(label="v", width=20, enabled=i < n - 1,
-                               callback=lambda s, a, u=i: _move_layer(u, +1))
+                               callback=lambda s, a, *, u=i: _move_layer(u, +1))
                 dpg.add_button(label="x", width=20,
-                               callback=lambda s, a, u=i: _remove_layer(u))
+                               callback=lambda s, a, *, u=i: _remove_layer(u))
             if row["source"] == "shadertoy":
                 with dpg.group(horizontal=True):
                     dpg.add_text("     shader")
                     choices = shaders if row["file"] in shaders or not row["file"] \
                         else [row["file"]] + shaders
                     dpg.add_combo(choices, default_value=row["file"], width=360,
-                                  callback=lambda s, v, row=row: (row.update({"file": v}),
+                                  callback=lambda s, v, *, row=row: (row.update({"file": v}),
                                                                   _draw_layer_rows()))
                 _draw_uniforms(row)
             lines = max(2, min(14, str(row["params"]).count("\n") + 2))
@@ -1943,7 +1949,7 @@ def _apply_project(data: dict):
     dpg.set_value("scene_label",  Path(S.scene_path).name)
     dpg.configure_item("skip_sep_check", default_value=S.skip_separation)
     dpg.set_value("mode_combo", S.mode)
-    dpg.set_value("res_input",  f"{S.width}x{S.height}")
+    _show_resolution()
     dpg.set_value("clips_label", Path(S.clips_dir).name if S.clips_dir else "(none)")
     dpg.set_value("clip_order_combo", S.clip_order)
     dpg.set_value("full_song_check", S.full_song)
@@ -2416,6 +2422,8 @@ def _resolve_output_lane():
         segs, times, speeds = resolve_song(
             lib, S.grid, S.midi_notes, _effective_video_cfg(), S.fps, start, end)
         S.resolved_segments = segs
+        S.resolved_paths = list(lib.paths)
+        S.resolved_lib, S.arrange_montage = lib, (None, [])
         S.resolved_times, S.resolved_speeds = times, speeds
         _log(f"Output lane: {len(segs)} segmentos, seed={S.clips_seed}")
     except Exception as exc:
@@ -2444,7 +2452,18 @@ def _clip_preview_frames(start_t: float, n_frames: int, layers=None) -> list:
         lib  = ClipLibrary(S.clips_dir, pw, ph, S.fps, cache_size=4, fit=S.clip_fit,
                            turn_wide=S.clip_turn_wide)
         comp = ClipComposer(lib, S.grid, S.midi_notes, video_cfg)
-        comp.seek(start_t)
+        song_t0 = float(S.grid.start_offset or 0.0)
+        meta = S.resolved_lib
+        if meta is not None and start_t > song_t0 and [Path(x).name for x in meta.paths] == \
+                [Path(x).name for x in lib.paths]:
+            dry = ClipComposer(meta, S.grid, S.midi_notes, video_cfg)   # the montage from the song's
+            for fi in range(int(round((start_t - song_t0) * S.fps))):  # start: no frame decoded
+                if fi % 100 == 0:
+                    _check_cancel()
+                dry.frame_at(song_t0 + fi / S.fps)
+            comp.take_state(dry)
+        else:
+            comp.seek(start_t)
 
     features_at = None
     if S.extractor is not None:
@@ -2457,10 +2476,37 @@ def _clip_preview_frames(start_t: float, n_frames: int, layers=None) -> list:
 
     frames = []
     for fi in range(n_frames):
+        _check_cancel()
         arr = stack.frame_at(start_t + fi / S.fps)
         frames.append(_np_to_dpg(arr))
         _set_status(f"Rendering preview… {int((fi+1)/n_frames*100)}%")
     return frames
+
+
+class _PreviewCancelled(Exception):
+    pass
+
+
+def _check_cancel() -> None:
+    """The preview being made gives up here when Stop (or another preview) asked it to."""
+    if S.preview_cancel:
+        raise _PreviewCancelled()
+
+
+def _start_preview(*args) -> None:
+    """A preview made in the background (busy from now: no second one starts meanwhile)."""
+    S.rendering, S.preview_making, S.preview_cancel = True, True, False
+    threading.Thread(target=_do_preview, args=args, daemon=True).start()
+
+
+def cancel_preview() -> bool:
+    """The preview being made gives up (as soon as its frame is done); False when what is
+    being made is the video (a full render), not a preview."""
+    if S.rendering and S.preview_making:
+        S.preview_cancel = True
+        _set_status("Stopping the preview being made…")
+        return True
+    return False
 
 
 def _do_preview(at: Optional[float] = None, bars: Optional[int] = None, layers=None):
@@ -2470,6 +2516,7 @@ def _do_preview(at: Optional[float] = None, bars: Optional[int] = None, layers=N
     from core.particles import ParticleSystem
 
     S.rendering = True
+    S.preview_error = ""
     S.preview_playing = False
     if S._preview_audio and S.player:
         S.player.pause()
@@ -2494,7 +2541,10 @@ def _do_preview(at: Optional[float] = None, bars: Optional[int] = None, layers=N
             start_t = scrub_t
 
         n_bars   = max(1, int(S.preview_bars if bars is None else bars))
-        n_frames = int(S.pipeline.bar_duration * n_bars * S.fps)
+        # as long as those bars really are (a bar of another meter, a short first bar)
+        later = [float(d) for d in downbeats if float(d) > start_t + 1e-3]
+        end_t = later[n_bars - 1] if len(later) >= n_bars else start_t + S.pipeline.bar_duration * n_bars
+        n_frames = int((end_t - start_t) * S.fps)
         dt       = 1.0 / S.fps
 
         _log(f"Preview: {n_bars} bar(s), {n_frames} frames @ {S.fps}fps  "
@@ -2504,6 +2554,7 @@ def _do_preview(at: Optional[float] = None, bars: Optional[int] = None, layers=N
             frames = _clip_preview_frames(start_t, n_frames, layers)
         else:
             for fi in range(n_frames):
+                _check_cancel()
                 t  = start_t + fi * dt
                 sl = S.pipeline.query(t, frame_idx=fi)
                 if sl is None:
@@ -2522,9 +2573,9 @@ def _do_preview(at: Optional[float] = None, bars: Optional[int] = None, layers=N
                 _set_status(f"Rendering preview… {int((fi+1)/n_frames*100)}%")
 
         if not frames:
+            S.preview_error = "no frames were made (see the log)"
             _set_status("Preview FAILED — no frames generated.")
             _log("No frames generated. Check pipeline / grid / fps.")
-            S.rendering = False
             return
 
         _log(f"Preview: generated {len(frames)} frames, frame size {len(frames[0])} floats")
@@ -2538,11 +2589,15 @@ def _do_preview(at: Optional[float] = None, bars: Optional[int] = None, layers=N
         S.preview_playing = True   # main loop takes over from here
         _set_status(f"Preview ready — {len(frames)} frames. Playing…")
 
-    except Exception:
+    except _PreviewCancelled:
+        _log("Preview stopped before it was done.")
+        _set_status("Preview stopped.")
+    except Exception as exc:
         _log("Preview crashed:\n" + traceback.format_exc())
+        S.preview_error = f"{type(exc).__name__}: {exc}"
         _set_status("Preview crashed — see log.")
     finally:
-        S.rendering = False
+        S.rendering = S.preview_making = S.preview_cancel = False
         from core import gpu
         gpu.release()          # this thread's GPU context (and all the layers made in it) goes
 
@@ -2553,10 +2608,12 @@ def btn_preview():
         return
     if S.rendering:
         return
-    threading.Thread(target=_do_preview, daemon=True).start()
+    _start_preview()
 
 
 def btn_stop_preview():
+    """The preview stops: the one playing, and the one being made (it gives up)."""
+    cancel_preview()
     S.preview_playing = False
     S.preview_idx = 0
     if S._preview_audio and S.player:
@@ -2976,16 +3033,47 @@ def _mode_script(mode: str) -> str:
     return "clip_generator.py" if mode == "clips" else _MODE_SCRIPTS.get(mode, "?")
 
 
-def _on_res_change(s, v):
-    """Parse LARGURAxALTURA (applied on Enter or preset pick)."""
+RESOLUTIONS = (("9:16 portrait", ("480x854", "720x1280", "1080x1920")),
+               ("1:1 square", ("480x480", "720x720", "1080x1080", "2160x2160")),
+               ("16:9 landscape", ("854x480", "1280x720", "1920x1080", "2560x1440", "3840x2160")))
+RES_CHOICES = [f"{r}  {shape}" for shape, sizes in RESOLUTIONS for r in sizes]
+RES_TAGS = ("video_res", "arr_video_res")          # the choosers: the preview's, the Arrange's
+
+
+def _res_choice(w: int, h: int) -> str:
+    """The chooser's line for a size: a preset's, else the size as typed."""
+    return next((c for c in RES_CHOICES if c.split()[0] == f"{w}x{h}"), f"{w}x{h}")
+
+
+def set_resolution(v) -> str:
+    """The final video's size from "WxH" (a chooser's line or typed): what is wrong, or ""."""
     try:
-        w, h = (int(x) for x in str(v).lower().replace(" ", "").split("x"))
+        w, h = (int(x) for x in str(v).split()[0].lower().split("x"))
         if w < 16 or h < 16 or w % 2 or h % 2:
             raise ValueError
-        S.width, S.height = w, h
-        _set_status(f"Resolução de render: {w}x{h}")
     except Exception:
-        _set_status(f"Resolução inválida: {v!r} — use LARGURAxALTURA com valores pares (ex.: 3840x2160)")
+        err = f"not a size: {v!r} - width x height, both even (e.g. 1080x1920)"
+        _set_status(err)
+        _show_resolution()
+        return err
+    S.width, S.height = w, h
+    _show_resolution()
+    shape = _res_choice(w, h).partition("  ")[2] or "an own size"
+    _set_status(f"Final video: {w}x{h}, {shape} - the next preview shows it; Save Project keeps it")
+    return ""
+
+
+def _show_resolution() -> None:
+    """Every chooser and the typed field show the size the video is made at."""
+    for tag in RES_TAGS:
+        if dpg.does_item_exist(tag):
+            dpg.set_value(tag, _res_choice(S.width, S.height))
+    if dpg.does_item_exist("res_input"):
+        dpg.set_value("res_input", f"{S.width}x{S.height}")
+
+
+def _on_res_change(s, v):
+    set_resolution(v)
 
 
 def _on_mode_change(s, v):
@@ -3023,6 +3111,29 @@ class _ArrangeHost:
     def status(self, msg):
         _set_status(msg)
 
+    def resolutions(self):
+        """The sizes to choose from, each with its shape (9:16 portrait...)."""
+        return RES_CHOICES
+
+    def resolution(self):
+        """The final video's "WxH" line, as the choosers show it."""
+        return _res_choice(S.width, S.height)
+
+    def set_resolution(self, v):
+        return set_resolution(v)
+
+    def preview_state(self):
+        """"unloaded", "loading", "busy" (a preview is being made) or "ready"."""
+        return ("loading" if S.loading else "busy" if S.rendering else "ready" if S.loaded
+                else "unloaded")
+
+    def load(self):
+        """Load the project (the song, its MIDI and stems): what is wrong, or ""."""
+        if not S.loading and not S.audio_path:
+            return "the project has no song (audio file): open the project first"
+        btn_load_project()
+        return ""
+
     def preview(self, at, bars, layers):
         """The studio's preview of ``bars`` bars from ``at`` (s) of these layers; its frames
         play in ``preview_texture()``."""
@@ -3031,11 +3142,51 @@ class _ArrangeHost:
             return False
         if S.rendering:
             return False
-        threading.Thread(target=_do_preview, args=(at, bars, layers), daemon=True).start()
+        _start_preview(at, bars, layers)
         return True
 
+    def cancel_preview(self):
+        """The preview being made gives up (another is wanted): False when the studio is
+        rendering the video instead."""
+        return cancel_preview()
+
     def preview_texture(self):
-        return "preview_tex", PREV_W, PREV_H
+        """The preview's texture, its size, and the part of it the frame fills (a portrait
+        render is centred between black bars)."""
+        return "preview_tex", PREV_W, PREV_H, _preview_size(S.width, S.height)
+
+    def preview_progress(self):
+        """(rendering, the studio's status line, why the last preview failed or "")."""
+        status = dpg.get_value("status_text") if dpg.does_item_exist("status_text") else ""
+        return S.rendering, str(status or ""), S.preview_error
+
+    def stop_preview(self):
+        btn_stop_preview()
+
+    def montage(self, layers=None):
+        """The clip montage as the composer plays it: (t0, t1, clip name, clip path) per cut
+        ("none", "": a bar pinned to nothing), or [] before the project is loaded.
+        ``layers``: the Arrange window's (its clips layer's pins, saved or not)."""
+        from core.video.composer import pins_of
+        from core.video.resolver import resolve_song
+        segs = S.resolved_segments or []
+        if layers is not None and S.resolved_lib is not None and segs:
+            pins = repr(sorted(pins_of(layers).items()))
+            if S.arrange_montage[0] != pins:
+                cfg = {**_effective_video_cfg(), "layers": layers}
+                start = float(S.grid.start_offset or 0.0)
+                got, _, _ = resolve_song(S.resolved_lib, S.grid, S.midi_notes, cfg, S.fps, start,
+                                         _full_duration() or (start + 60.0))
+                S.arrange_montage = (pins, got)
+            segs = S.arrange_montage[1]
+        paths = S.resolved_paths
+        return [(seg.t0, seg.t1, seg.clip_name,
+                 str(paths[seg.clip_idx]) if 0 <= seg.clip_idx < len(paths) else "")
+                for seg in segs]
+
+    def montage_clips(self):
+        """The clips the montage draws from (the project's clips folder)."""
+        return list(S.resolved_paths)
 
     def edit_knob(self, target, path, default=0.0, mode="knob"):
         """The studio's knob editor on a parameter the Arrange window owns (``mode``
@@ -3126,6 +3277,8 @@ def _build_ui():
 
     import arc_arrange
     arc_arrange.build(_ArrangeHost())
+    from core.video import sam_cutout                   # SAM2 cutting a clip out at a preview: said
+    sam_cutout.status = lambda msg: (_set_status(msg), _log(msg))
 
     with dpg.window(label="New Scene", modal=True, show=False, tag="dlg_new_scene",
                     width=360, height=90, pos=(300, 120), no_resize=True):
@@ -3243,7 +3396,16 @@ def _build_ui():
 
             # RIGHT — preview + render
             with dpg.child_window(width=650, height=420, border=True):
-                dpg.add_text("PREVIEW", color=(160, 160, 160))
+                with dpg.group(horizontal=True):
+                    dpg.add_text("PREVIEW", color=(160, 160, 160))
+                    dpg.add_text("   final video:")
+                    dpg.add_combo(RES_CHOICES, default_value=_res_choice(S.width, S.height),
+                                  tag="video_res", width=200, callback=_on_res_change)
+                    dpg.add_input_text(default_value=f"{S.width}x{S.height}", tag="res_input",
+                                       width=90, hint="width x height", on_enter=True,
+                                       callback=_on_res_change)
+                    with dpg.tooltip("res_input"):
+                        dpg.add_text("an own size: width x height, both even, then Enter")
                 dpg.add_image("preview_tex", width=PREV_W, height=PREV_H)
                 with dpg.group(horizontal=True):
                     dpg.add_text("Frame 0/0", tag="frame_label")
@@ -3278,21 +3440,6 @@ def _build_ui():
                     dpg.add_text("FPS:")
                     dpg.add_input_int(default_value=S.fps, width=55,
                                       callback=lambda s, v: setattr(S, "fps", v))
-                with dpg.group(horizontal=True):
-                    dpg.add_text("Resolution:")
-                    dpg.add_input_text(default_value=f"{S.width}x{S.height}",
-                                       tag="res_input", width=110,
-                                       hint="LxA", on_enter=True,
-                                       callback=_on_res_change)
-                    dpg.add_combo(["854x480", "1280x720", "1920x1080",
-                                   "2560x1440", "3840x2160",
-                                   "480x480", "720x720", "1080x1080",
-                                   "2160x2160", "480x854", "720x1280", "1080x1920"],
-                                  default_value="", tag="res_preset",
-                                  width=110,
-                                  callback=lambda s, v: (
-                                      dpg.set_value("res_input", v),
-                                      _on_res_change(s, v)))
                 with dpg.group(tag="clips_group", show=(S.mode == "clips")):
                     with dpg.group(horizontal=True):
                         dpg.add_button(label="Clips Folder", width=95,
@@ -3522,6 +3669,8 @@ def _parse_args():
     ap.add_argument("--skip-separation", action="store_true",
                     help="Skip AI stem separation")
     ap.add_argument("--project", default=None, help="Open a project YAML file")
+    ap.add_argument("--arrange", action="store_true",
+                    help="Load the project at once and open the Arrange window")
     return ap.parse_args()
 
 
@@ -3573,9 +3722,19 @@ def main():
     dpg.setup_dearpygui()
     dpg.show_viewport()
     dpg.set_primary_window("main_win", True)
+    __import__("arc_window").install("ARC Studio")   # clips dropped from the Explorer, cursors
+    if args.arrange:                            # straight to the Arrange window, the song loading
+        if S.audio_path:
+            btn_load_project()
+        __import__("arc_arrange").open_window()
 
+    was_loaded = S.loaded
     while dpg.is_dearpygui_running():
-        __import__("arc_arrange").tick()       # the Arrange window's thumbnails and redraws
+        arrange = __import__("arc_arrange")
+        if S.loaded != was_loaded:              # loaded (again): the montage's clips, bar by bar
+            was_loaded = S.loaded
+            arrange.A.redraw = True
+        arrange.tick()                          # the Arrange window's thumbnails and redraws
 
         # Deck thumbnails ready -> load textures (must run on main thread)
         if S._deck_ready:

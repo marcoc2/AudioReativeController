@@ -20,7 +20,7 @@ import math
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 
 @dataclass
@@ -124,6 +124,10 @@ class Project:
     path: str
     tempo: Optional[float]
     tracks: List[Track]
+    # the time signatures, [(s, (numerator, denominator))]: the project's at 0, then its
+    # tempo map's markers (each starts a new bar in REAPER, even mid-bar: the bar before it
+    # is short)
+    meters: List[Tuple[float, Tuple[int, int]]] = field(default_factory=list)
 
     def track(self, name: str) -> Track:
         found = [t for t in self.tracks if t.name.lower() == name.lower()]
@@ -249,7 +253,47 @@ def read_project(path: str) -> Project:
                             muted=_f(c.get("MUTESOLO")) == 1, depth=depth))
         if bus and len(bus) > 1:
             depth += int(_f(bus, 1))
-    return Project(path=str(p), tempo=_f(tempo) if tempo else None, tracks=tracks)
+    return Project(path=str(p), tempo=_f(tempo) if tempo else None, tracks=tracks,
+                   meters=_meters(root))
+
+
+def _meters(root: Chunk) -> List[Tuple[float, Tuple[int, int]]]:
+    """[(s, (numerator, denominator))]: TEMPO's meter at 0, then each tempo-map point that
+    sets one ("PT s bpm shape sig ..."; sig = numerator + denominator * 65536, 0: none)."""
+    tempo = root.get("TEMPO")
+    first = (int(_f(tempo, 1, 4)), int(_f(tempo, 2, 4))) if tempo and len(tempo) > 2 else (4, 4)
+    out = [(0.0, first)]
+    env = root.child("TEMPOENVEX")
+    for row in env.lines if env is not None else []:
+        if row[:1] != ["PT"] or len(row) < 5:
+            continue
+        sig = int(_f(row, 4))
+        if sig <= 0:
+            continue
+        num, den = sig & 0xFFFF, sig >> 16
+        at = _f(row, 1)
+        if num and den:
+            out = [m for m in out if abs(m[0] - at) > 1e-6] + [(at, (num, den))]
+    return sorted(out)
+
+
+def midi_meters(meters, tempo: float) -> List[Tuple[float, Tuple[int, int]]]:
+    """REAPER's meters as a MIDI file can hold them, [(quarter-note beat, signature)]: a
+    marker that comes mid-bar makes the bar before it short, written as a bar of its own
+    meter (3 beats of 4/4 before it: a 3/4 bar)."""
+    beats = [(t * tempo / 60.0, sig) for t, sig in sorted(meters)]
+    out = []
+    for k, (b, sig) in enumerate(beats):
+        bar = sig[0] * 4.0 / sig[1]                               # the bar in quarter notes
+        end = beats[k + 1][0] if k + 1 < len(beats) else None
+        full = int(math.floor((end - b) / bar + 1e-6)) if end is not None else 1
+        if full > 0:
+            out.append((b, sig))
+        rest = (end - b) - full * bar if end is not None else 0.0
+        if rest > 1e-6:
+            den = next((d for d in (sig[1], 8, 16, 32) if abs(rest * d / 4 - round(rest * d / 4)) < 1e-4), 32)
+            out.append((b + full * bar, (max(1, int(round(rest * den / 4))), den)))
+    return [m for k, m in enumerate(out) if k == 0 or m[1] != out[k - 1][1]]
 
 
 # ----------------------------------------------------------- a clip cut as its sound was
@@ -509,7 +553,8 @@ def write_midi(project: str, tracks: Sequence[str], out: str, merge: Optional[st
     """The notes of the REAPER ``tracks`` (by name; unmuted items) as a MIDI file ``out``,
     one MIDI track each, named as in REAPER; ``merge``: a MIDI file whose tracks go first
     (the song's own export, so a render reads them all from one file). Tempo: the
-    project's (a single tempo). -> {track name: notes written}."""
+    project's (a single tempo); meters: the project's (``midi_meters``), unless merged into
+    a file that has its own. -> {track name: notes written}."""
     import mido
     proj = read_project(project)
     tempo = proj.tempo or 120.0
@@ -521,6 +566,12 @@ def write_midi(project: str, tracks: Sequence[str], out: str, merge: Optional[st
         mid = mido.MidiFile(type=1, ticks_per_beat=ppq)
         meta = mido.MidiTrack()
         meta.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(tempo), time=0))
+        now = 0
+        for beat, (num, den) in midi_meters(proj.meters or [(0.0, (4, 4))], tempo):
+            at = int(round(beat * ppq))
+            meta.append(mido.MetaMessage("time_signature", numerator=num, denominator=den, time=at - now))
+            now = at
+        meta.append(mido.MetaMessage("end_of_track", time=0))
         mid.tracks.append(meta)
     tick = ppq * tempo / 60.0                                  # ticks a second
     written = {}
@@ -529,6 +580,13 @@ def write_midi(project: str, tracks: Sequence[str], out: str, merge: Optional[st
         if not found:
             raise KeyError(f"no unmuted track {name!r} in {project}")
         notes = sorted(n for t in found for it in t.items for n in item_notes(it, tempo))
+        # tracks of one name playing the same note at once (a doubled part): it sounds once
+        once = {}
+        for n in notes:
+            key = (round(n[0], 3), n[1], n[4])
+            if key not in once or n[2] > once[key][2]:
+                once[key] = n
+        notes = sorted(once.values())
         msgs = []
         for t0, pitch, vel, dur, ch in notes:
             msgs.append((round(t0 * tick), 1, mido.Message("note_on", note=pitch, velocity=vel, channel=ch)))

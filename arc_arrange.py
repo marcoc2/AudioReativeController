@@ -1,15 +1,26 @@
 """ARC Studio's Arrange window: what plays in the background and in the foreground, bar
 by bar, and the FX on each.
 
-Left, the browser: the Clips (a folder, a filter such as "final.mp4", the clip's frame at
-the point it would start from), the Generators (they make a picture: a fractal, cells) and
+Left, the browser: the Clips (a folder, a filter such as "final.mp4", the clip playing from
+the point it would start at, muted until its sound is turned on; a clip is dragged from the
+list (each with its picture and length) or its picture onto the BG, the FG or CLIPS, or
+dropped there from the Explorer: arc_window.py), the Generators (they make a picture: a fractal, cells) and
 the FX (they work on the picture they get), by category (core/catalog.py). Right, two
 lanes over the song's bars (core/arrangement.py): the FG (the characters, drawn on their
 own and put over the rest) and the BG (over the clip montage). Pick a clip or a Generator
 and drag across a lane to put it there; things at the same time stack up in sub-rows.
-FX live in three places: on a block (it alone), on a lane (all of it) and on the master
-(over everything): a right click adds them, a click on a lane's name or a block lists
-them, each with its own bars and its plugin (its parameters, linked to the music).
+FX live in three places: on a block (it alone), on a lane (all of it: the lane's FX
+track) and on the master (over everything: its track). Everything drawn is a block that
+is chosen by a click, moved by a drag, resized by a Shift+drag of its ends (the cursor
+shows them; where two blocks meet, the one the mouse is in), deleted with Delete, and has
+its menu on a right click; an FX's or a Generator's block opens its plugin (its parameters,
+linked to the music) with a double click. The CLIPS row is the montage as it plays: a
+click (or a drag) chooses bars; a clip picked on the left is pinned there, or nothing,
+or they go back to the montage's choice; a clip of it can become a BG block.
+Bars are chosen by a drag on the ruler (or on a lane, with nothing picked to put there);
+choosing a block chooses its bars. Preview (or Space) plays the chosen bars with the
+arrangement as it is, saved or not: the studio renders them (its progress, or why it
+failed, shows in the preview window).
 Members cued from REAPER show their cues in grey (edited in REAPER). A scene written as a
 flat stack is grouped into BG / FG / master when opened; Save writes it so (SceneDoc,
 anchors kept). Ctrl+Z undoes an edit, Ctrl+Y (or Ctrl+Shift+Z) redoes it; the history
@@ -32,16 +43,29 @@ from pathlib import Path
 import dearpygui.dearpygui as dpg
 import numpy as np
 
+import arc_window
 from core import arrangement as arr
 
 LABEL_W = 150          # the lane names
-CANVAS_W = 720
+CANVAS_W = 720                 # the canvas' narrowest: it widens with the window
 RULER_H = 30
 DENSITY_H = 10
-LANE_H = 34
+LANE_H = 30                    # a row's height at the vertical zoom's 1 (its least with the notes)
+LANE_MIN, LANE_MAX = 20, 120   # the vertical zoom's range
 THUMB = 192
+COVER = 72                     # a clip's picture in the list
+COVERS_MAX = 400               # pictures made for a list (a filter narrows a bigger one)
+NAME_CHARS = 27                # a name's line beside its picture
+STATE_FILE = Path("render_output") / ".arrange.json"   # what the window remembers: the last clips folder
+DEMO = 512                     # a demo's frame (core/demos.py)
+DEMO_SHOWN = 300               # how big it plays under the catalog's list
 SAM2_DEFAULTS = ("F:/AppsCrucial/ComfyUI_phoenix3/ComfyUI/models/sam2",)
 UNDO_MAX = 200         # edits remembered
+
+FG_FX, BG_FX, MASTER = "FG fx", "BG fx", "master"     # the tracks of FX: a lane's, the master's
+TRACKS = (MASTER, arr.FG, FG_FX, arr.BG, BG_FX)       # top to bottom, over the montage
+TRACK_TITLES = {MASTER: "MASTER", arr.FG: "FG", FG_FX: "FX on the whole FG", arr.BG: "BG",
+                BG_FX: "FX on the whole BG"}
 
 
 class _A:
@@ -49,25 +73,50 @@ class _A:
     doc = None                 # SceneDoc of the scene being arranged
     items: list = []           # [node or None, base or None, spec, uid] per layer, in stack order
     rows: list = []            # what each row of the canvas shows, top to bottom
-    members: dict = {}         # lane name -> [core.arrangement.Member]
+    members: dict = {}         # track (FG, BG, FG fx, BG fx, master) -> [core.arrangement.Member]
     converted = False          # the scene was flat: grouped into BG / FG / master on opening
     content = None             # what a drag puts in a lane: ("clip", path, from) or ("gen", key)
     clips: list = []           # the browser's clips (Path)
     clip = None                # the chosen clip (str)
     clip_len = 0.0
     start = 0.0                # where in it a new block starts (s)
-    sel = None                 # ("block", lane, member, block) | ("lane", lane) | ("master",) | ("montage",)
+    sel = None                 # ("block", track, member, block) | ("lane", lane) | ("master",)
+    #                            | ("montage",) | ("montage", first bar, last bar)
+    runs: list = []            # the montage as it plays: [(first, last) bar positions, clip, path]
+    span = None                # (first, last): the bars chosen (dragged on the ruler, or what is
+    #                            chosen plays there): what Preview (Space) plays
+    previewing = None          # (asked at, seen rendering): a preview the studio is making
+    queued = None              # (first, last, asked at): bars to preview once the studio can
     zoom = 1.0                 # 1: the whole song across the canvas
+    canvas_w = CANVAS_W        # the canvas' width: the window's, as it is resized
+    lane_h = LANE_H            # a row's height: the vertical zoom
+    scroll_to = None           # the lanes' scroll to set on the next frame (a vertical zoom's)
     view0 = 1                  # the first bar shown
     drag = None                # (row, first bar, mode, (member, block)) while dragging
-    want_thumb = None          # (path, t, asked at)
-    thumb_ready = None         # RGBA float list for the texture
+    clip_play = None           # (path, start): what plays in the browser's picture
+    clip_frame = None          # its next frame (RGBA floats), from the player's thread
+    clip_pos = 0.0             # where it is (s in the clip)
+    clip_restart = 0.0         # "from" moved at (s): it plays from there once it rests
+    clip_sound = False         # its sound on (off: it plays muted)
+    clip_audio: dict = {}      # path -> its sound (mono float32 at CLIP_SR; None: it has none)
+    clip_mixer = None          # the clip's sound's own mixer (core.audio_player), beside the studio's
+    clip_drag = None           # (path, start, seconds): a clip dragged from the browser to a lane
+    sam = None                 # the SAM2 seeds window's state (open_sam), or None
+    asking = None              # (lane, first bar, clips to put): a long clip waits for its bars
+    list_items: dict = {}      # the list's rows (their picture, their name) -> their clips
+    list_names: dict = {}      # the list's names (selectables) -> their clips
+    list_pics: dict = {}       # a clip -> its pictures in the list
+    covers: dict = {}          # a clip -> its picture's texture (made once)
+    covers_ready: list = []    # (list's generation, clip, RGBA floats, seconds) from the worker
+    covers_gen = 0             # the list's generation (a new list stops the old one's worker)
+    demo_key = None            # the catalog entry whose demo plays
+    demo_frame = None          # its next frame (RGBA floats), from the player's thread
+    demo_making: dict = {}     # key -> the process making its demo
     busy = False
     cues: dict = {}            # a cued member's [(t0, t1)] seconds (REAPER / seconds cues)
     dirty = False
     redraw = False             # set by workers: the main thread redraws at its next tick
     relane = False
-    thumbing = False
     pending = None             # (uid, fn): an edit a worker asks of the main thread
     entry = None               # the Generator or FX chosen in the browser (catalog key)
     plugin = None              # the layer (uid) the plugin window shows
@@ -118,7 +167,7 @@ def _shown() -> int:
 
 
 def _bw() -> float:
-    return (CANVAS_W - LABEL_W - 8) / _shown()
+    return (A.canvas_w - LABEL_W - 8) / _shown()
 
 
 def _x_of(bar: float) -> float:
@@ -148,14 +197,37 @@ def set_view(zoom: float = None, first: int = None, keep: int = None) -> None:
     _draw()
 
 
+def set_lane_height(h: float, keep_y: float = None) -> None:
+    """The vertical zoom: a row's height; ``keep_y``: a point on the canvas that stays where
+    it is on the screen (the row under the mouse)."""
+    old = A.lane_h
+    A.lane_h = int(np.clip(round(h), LANE_MIN, LANE_MAX))
+    if dpg.does_item_exist("arr_rows_text"):
+        dpg.set_value("arr_rows_text", f"{A.lane_h} px")
+    if A.lane_h == old:
+        return
+    if keep_y is not None and dpg.does_item_exist("arr_tracks"):
+        moved = (keep_y - _row_y(0)) * (A.lane_h / old - 1)
+        A.scroll_to = max(0.0, dpg.get_y_scroll("arr_tracks") + moved)   # once the canvas has grown
+    _draw()
+
+
 def on_wheel(sender, delta) -> None:
-    """Over the canvas: Ctrl+wheel zooms around the bar under the mouse, Shift+wheel moves along."""
-    if not dpg.does_item_exist("arr_canvas") or not dpg.is_item_hovered("arr_canvas"):
+    """Over the lanes: the wheel scrolls up and down, Ctrl+wheel zooms along the song around the
+    bar under the mouse, Shift+wheel makes the rows taller or lower, Alt+wheel moves along."""
+    if not delta or not dpg.does_item_exist("arr_canvas"):
+        return
+    if not (dpg.is_item_hovered("arr_canvas") or dpg.is_item_hovered("arr_tracks")):
         return
     if _down("mvKey_ModCtrl", "mvKey_LControl", "mvKey_RControl"):
         set_view(zoom=A.zoom * (1.25 if delta > 0 else 0.8), keep=_bar_of_x(_mouse_in_canvas()[0]))
     elif _down("mvKey_ModShift", "mvKey_LShift", "mvKey_RShift"):
+        set_lane_height(A.lane_h * (1.2 if delta > 0 else 1 / 1.2), keep_y=_mouse_in_canvas()[1])
+    elif _down("mvKey_ModAlt", "mvKey_LAlt", "mvKey_RAlt"):
         set_view(first=A.view0 - int(np.sign(delta)) * max(1, _shown() // 8))
+    else:
+        y = dpg.get_y_scroll("arr_tracks") - np.sign(delta) * 3 * A.lane_h
+        dpg.set_y_scroll("arr_tracks", float(np.clip(y, 0, dpg.get_y_scroll_max("arr_tracks"))))
 
 
 # ----------------------------------------------------------------------- the scene
@@ -172,6 +244,11 @@ def _load() -> None:
     A.doc = SceneDoc.load(path)
     nodes = A.doc.layers()
     specs = [plain_keeping_signals(node) for node in nodes]
+    _name_from_comments(specs, A.doc.data["video"]["layers"])
+    for spec, node in zip(specs, nodes):                 # a lane's members and FX too
+        for key in ("layers", "fx"):
+            if spec.get("source") == "group" and isinstance(node.get(key), list):
+                _name_from_comments(spec.get(key) or [], node[key])
     known = {id(s): node for s, node in zip(specs, nodes)}
     layers, A.converted = arr.grouped(specs)
     A.items = [[known.get(id(s)), plain(known[id(s)]) if id(s) in known else None, s, _uid()] for s in layers]
@@ -179,6 +256,40 @@ def _load() -> None:
     _status(f"arranging {Path(path).name}"
             + (" - a flat scene, grouped into BG / FG / master: Save writes it so" if A.converted else ""))
     _load_cues()
+
+
+def _comment_names(seq) -> list:
+    """Names for a YAML list of layers, from the scene's comments: the one at the end of a
+    line of a layer (``file: lion.mp4  # the lion``), else the line just above it (its
+    first clause: ``# the bottles sing the voice, swaying`` -> "the bottles sing the voice";
+    a ``# ---- section`` line is no name)."""
+    import re
+    out = []
+    for k, node in enumerate(seq):
+        eol = ""
+        ca = getattr(node, "ca", None)
+        for toks in (ca.items.values() if ca is not None else []):
+            tok = toks[2] if isinstance(toks, list) and len(toks) > 2 else None
+            line0 = (getattr(tok, "value", "") or "").partition("\n")[0]
+            if "#" in line0:
+                eol = line0.split("#", 1)[1].strip()
+                break
+        above = ""
+        lead = seq.ca.items.get(k) if getattr(seq, "ca", None) is not None else None
+        for tok in (lead[1] or []) if isinstance(lead, list) and len(lead) > 1 and isinstance(lead[1], list) else []:
+            for line in (getattr(tok, "value", "") or "").split("\n"):
+                line = line.strip().lstrip("#").strip()
+                if line and not line.startswith("--"):
+                    above = re.split(r"[:,;(]", line)[0].strip()
+        out.append((eol or above)[:40])
+    return out
+
+
+def _name_from_comments(specs: list, seq) -> None:
+    """A layer without a ``name:`` takes the one its comment gives it (written on Save)."""
+    for spec, name in zip(specs, _comment_names(seq)):
+        if name and isinstance(spec, dict) and not spec.get("name") and spec.get("source") not in ("group", "clips"):
+            spec["name"] = name
 
 
 _UIDS = iter(range(1, 1 << 62))
@@ -207,20 +318,47 @@ def _montage_item():
     return next((it for it in A.items if it[2].get("source", "clips") == "clips"), None)
 
 
+def _owner(key: str) -> str:
+    """The lane a track belongs to (an FX track: its lane's), or the master."""
+    return {FG_FX: arr.FG, BG_FX: arr.BG}.get(key, key)
+
+
+def _is_fx(key: str) -> bool:
+    """A track of FX: a lane's, the master."""
+    return key in (FG_FX, BG_FX, MASTER)
+
+
+def _track_specs(key: str) -> list:
+    """The layers of a track, in order."""
+    if key == MASTER:
+        return [it[2] for it in _master_items()]
+    item = _lane_item(_owner(key))
+    return list(item[2].get("fx" if key in (FG_FX, BG_FX) else "layers") or []) if item else []
+
+
+def _where(key: str, at: int):
+    """(uid of the top-level layer, the path in it) of a track's member ``at``."""
+    if key == MASTER:
+        items = _master_items()
+        return (items[at][3], ()) if 0 <= at < len(items) else (None, ())
+    item = _lane_item(_owner(key))
+    return (item[3] if item else None), ("fx" if key in (FG_FX, BG_FX) else "layers", at)
+
+
 def _relane() -> None:
-    """The rows, top to bottom: the master, the FG's sub-rows and an empty one to put
-    something new on, the same for the BG, the clip montage."""
+    """The rows, top to bottom: each track's sub-rows (things at the same time stack up),
+    a lane's with an empty one more to put something new on; the clip montage last."""
     A.members, A.rows = {}, []
     if A.doc is not None:
-        A.rows.append({"kind": "master"})
-        for name in (arr.FG, arr.BG):
-            item = _lane_item(name)
-            mems = arr.members_of(item[2]) if item else []
+        for key in TRACKS:
+            if key != MASTER and _lane_item(_owner(key)) is None:
+                continue
+            mems = arr.members_of({"layers": _track_specs(key)})
             cue_bars = {m.at: [(int(_time_to_bar(t0)), int(_time_to_bar(t1))) for t0, t1 in A.cues[_cue_key(m.spec)]]
                         for m in mems if m.cued and A.cues.get(_cue_key(m.spec))}
             n = arr.pack(mems, _bars(), cue_bars)
-            A.members[name] = mems
-            A.rows += [{"kind": "lane", "lane": name, "sub": r} for r in range(n + 1)]
+            A.members[key] = mems
+            A.rows += [{"kind": "lane", "lane": key, "sub": r} for r in range(max(1, n if _is_fx(key) else n + 1))]
         if _montage_item() is not None:
             A.rows.append({"kind": "montage"})
     _draw()
@@ -277,7 +415,7 @@ def _tidy(node, key=None) -> None:
     if isinstance(node, dict) and not _anchor_name(node):
         for k in list(node.keys()):
             v = node[k]
-            if k in ("bars", "cutout", "at") and isinstance(v, (dict, list)):
+            if k in ("bars", "cutout", "at", "pins") and isinstance(v, (dict, list)):
                 node[k] = one_line(v)
             elif k in ("fx", "blocks") and isinstance(v, list):
                 seq = v if isinstance(v, CommentedSeq) else CommentedSeq(v)
@@ -300,13 +438,41 @@ def btn_save() -> None:
         _tidy(node)
     saved = list(A.doc.layers())
     path = A.host.scene_path()
-    A.doc.save(path)
+    try:
+        A.doc.save(path)
+    except OSError as exc:
+        _status(f"NOT saved: {exc}")
+        _show_saved(f"NOT saved: {exc}", error=True)
+        return
     A.host.log(f"Arrange: saved {Path(path).name}")
     A.host.reload_editor()
     history = (A.undo, A.redo)
     _load()
     A.undo, A.redo = (_rebase(h, saved) for h in history)
-    _status(f"saved {Path(path).name}")
+    when = time.strftime("%H:%M:%S")
+    A.saved_at, A.saved_flash = f"saved at {when} in {Path(path).name}", time.time()
+    _status(f"saved at {when}: {path} - the studio's editor, previews and renders use it now")
+    _show_saved()
+
+
+SAVED_FLASH = 2.5      # s the Save button says it saved
+
+
+def _show_saved(text: str = None, error: bool = False) -> None:
+    """Beside Save: unsaved changes, or when and where it was saved (the button says
+    "Saved!" a moment after a save)."""
+    if not dpg.does_item_exist("arr_save_state"):
+        return
+    if text is None:
+        text = "unsaved changes" if A.dirty else getattr(A, "saved_at", "") or ""
+    colour = (240, 120, 110) if error else (240, 190, 90) if A.dirty else (130, 220, 140)
+    if dpg.get_value("arr_save_state") != text:
+        dpg.set_value("arr_save_state", text)
+    dpg.configure_item("arr_save_state", color=colour)
+    flash = time.time() - getattr(A, "saved_flash", 0.0) < SAVED_FLASH
+    label = "Saved!" if flash and not A.dirty else "Save to scene *" if A.dirty else "Save to scene"
+    if dpg.get_item_label("arr_save_btn") != label:
+        dpg.configure_item("arr_save_btn", label=label)
 
 
 def _rebase(history: list, saved: list) -> list:
@@ -411,22 +577,26 @@ def _edit(uid, path: tuple, fn) -> None:
         _relane()
 
 
-def _set_member(lane: str, at: int, spec: dict) -> None:
-    _edit(_lane_item(lane)[3], ("layers", at), lambda _: spec)
+def _set_member(key: str, at: int, spec: dict) -> None:
+    uid, path = _where(key, at)
+    _edit(uid, path, lambda _: spec)
 
 
-def _set_blocks(lane: str, at: int, blocks: list) -> None:
-    mem = _member(lane, at)
+def _set_blocks(key: str, at: int, blocks: list) -> None:
+    mem = _member(key, at)
     if not blocks:                                       # no window left: the member goes
-        _remove_member(lane, at)
+        _remove_member(key, at)
         return
-    _set_member(lane, at, (arr.with_blocks if mem.kind == arr.CLIP else arr.with_windows)(mem.spec, blocks))
+    _set_member(key, at, (arr.with_blocks if mem.kind == arr.CLIP else arr.with_windows)(mem.spec, blocks))
 
 
-def _remove_member(lane: str, at: int) -> None:
-    item = _lane_item(lane)
-    _edit(item[3], ("layers",), lambda ls: [x for j, x in enumerate(ls or []) if j != at])
-    A.sel = ("lane", lane)
+def _remove_member(key: str, at: int) -> None:
+    uid, path = _where(key, at)
+    A.sel = ("master",) if key == MASTER else ("lane", _owner(key))
+    if key == MASTER:
+        _delete_master(uid)
+    else:
+        _edit(uid, path[:1], lambda ls: [x for j, x in enumerate(ls or []) if j != at])
     _draw_inspector()
 
 
@@ -446,20 +616,28 @@ def _content_spec(lane: str, first: int, last: int):
     return arr.new_foreground(clip, [block])
 
 
-def _new_member(lane: str, first: int, last: int) -> None:
-    spec = _content_spec(lane, first, last)
+def _new_member(key: str, first: int, last: int, sub=None) -> None:
+    """What is picked on the left, new in ``key`` over bars first..last; ``sub``: the sub-row
+    it was made on (it stays there, under the rows above it where they overlap)."""
+    if _is_fx(key):                                      # an FX track: the FX picked on the left
+        from core import catalog
+        e = catalog.by_key(A.entry) if A.entry else None
+        if e is None or e.kind != catalog.FX:
+            _status("pick an FX on the left (FX) first, or right-click the row")
+            return
+        _put_fx(key, {**e.spec(), "bars": [[first, last]]})
+        return
+    spec = _content_spec(key, first, last)
     if spec is None:
         _status("pick a clip (Clips) or a Generator (Generators) on the left first")
         return
-    item = _lane_item(lane)
-    _edit(item[3], ("layers",), lambda ls: list(ls or []) + [spec])
-    at = len(item[2].get("layers") or []) - 1
-    A.sel = ("block", lane, at, 0)
+    at = _insert_member(key, spec, sub, first, last)
+    A.sel = ("block", key, at, 0)
     _draw()
     _draw_inspector()
-    _status(f"{arr.label_of(spec)} in {lane}, bars {first}-{last}"
+    _status(f"{arr.label_of(spec)} in {key}, bars {first}-{last}"
             + (" - no mask track yet: Segment it to cut it out"
-               if lane == arr.FG and spec.get("source") == "footage" and not spec.get("cutout") else ""))
+               if key == arr.FG and spec.get("source") == "footage" and not spec.get("cutout") else ""))
 
 
 def add_fx(uid, path: tuple, key: str) -> None:
@@ -469,23 +647,60 @@ def add_fx(uid, path: tuple, key: str) -> None:
     if e is not None:
         _edit(uid, path, lambda fx: list(fx or []) + [e.spec()])
         _status(f"{e.label} added: it plays all the time its owner does - give it bars in the list")
+        if key == SAM:                                   # its seeds, first
+            from core.scene_doc import get_path
+            it = _item(uid)
+            got = get_path(it[2], path) if it is not None else None
+            if isinstance(got, list) and got:
+                open_sam(uid, tuple(path) + (len(got) - 1,), new=True)
 
 
 def add_master(key: str) -> None:
-    """An FX over everything: the top of the stack, under a ``meters`` read-out."""
+    """An FX over everything, all the song (its bars are given on its track)."""
     from core import catalog
     e = catalog.by_key(key)
-    if A.doc is None or e is None:
+    if A.doc is not None and e is not None:
+        _put_fx(MASTER, e.spec())
+
+
+def _put_fx(key: str, spec: dict) -> None:
+    """An FX at the end of a track's chain (the master's: under a ``meters`` read-out); it
+    is chosen."""
+    if A.doc is None:
         return
-    at = len(A.items)
-    while at > 0 and A.items[at - 1][2].get("source") == "meters":
-        at -= 1
-    _checkpoint()
-    A.items.insert(at, [None, None, e.spec(), _uid()])
-    A.dirty = True
-    A.sel = ("master",)
+    if key == MASTER:
+        at = len(A.items)
+        while at > 0 and A.items[at - 1][2].get("source") == "meters":
+            at -= 1
+        _checkpoint()
+        item = [None, None, spec, _uid()]
+        A.items.insert(at, item)
+        A.dirty = True
+        k = next(i for i, it in enumerate(_master_items()) if it is item)
+    else:
+        lane = _lane_item(_owner(key))
+        k = len(lane[2].get("fx") or [])
+        _edit(lane[3], ("fx",), lambda fx: list(fx or []) + [spec])
+    A.sel = ("block", key, k, 0 if spec.get("bars") else None)
     _relane()
-    _status(f"{e.label} added to the master")
+    bars = arr.windows_of(spec)
+    _status(f"{arr.label_of(spec)} on {TRACK_TITLES[key]}"
+            + (f", bars {bars[0].first}-{bars[-1].last}" if bars else ", all the song: drag its ends... or give it bars below"))
+
+
+def _reorder(key: str, at: int, d: int) -> None:
+    """An FX earlier (d -1) or later (+1) in its chain."""
+    n = len(_track_specs(key))
+    if not 0 <= at + d < n:
+        return
+    if key == MASTER:
+        _move_master(_where(key, at)[0], d)
+    else:
+        _swap(_where(key, at)[0], ("fx",), at, at + d)
+    if A.sel and A.sel[0] == "block" and A.sel[1:3] == (key, at):
+        A.sel = ("block", key, at + d, A.sel[3])
+    _draw()
+    _draw_inspector()
 
 
 def _toggle(uid, path: tuple) -> None:
@@ -551,58 +766,124 @@ def _put_generator(lane: str, bar: int, key: str) -> None:
     _new_member(lane, bar, min(_bars(), bar + 3))
 
 
+def _put_fx_at(key: str, bar: int, fx_key: str) -> None:
+    from core import catalog
+    e = catalog.by_key(fx_key)
+    if e is not None:
+        _put_fx(key, {**e.spec(), "bars": [[bar, min(_bars(), bar + 3)]]})
+
+
 def context_menu(x: float, y: float) -> None:
-    """The right click: on a block, its FX, plugin, on/off, delete; on a lane, a Generator
-    there, an FX on the lane; anywhere, an FX on the master."""
+    """The right click: on a block (any track), its menu; on a track, a Generator or an FX
+    put there; on the montage, its bars' clips; anywhere, an FX on the master."""
     from core import catalog
     if A.doc is None:
         return
     r = _row_at(y)
     row = A.rows[r] if r is not None else {"kind": "none"}
     bar = _bar_of_x(x)
+    if row["kind"] == "montage" and x >= LABEL_W:
+        if not (A.sel and A.sel[0] == "montage" and len(A.sel) > 2 and A.sel[1] <= bar <= A.sel[2]):
+            A.sel = _run_sel(bar)[0]                     # the clip under the mouse is chosen
+            _draw()
+            _draw_inspector()
 
     def build():
+        if row["kind"] == "montage" and x >= LABEL_W and A.sel and len(A.sel) > 2:
+            first, last = A.sel[1], A.sel[2]
+            dpg.add_text(f"CLIPS · bars {first}-{last}" if last > first else f"CLIPS · bar {first}",
+                         color=LANE_COLOURS["montage"])
+            for label, fn in _montage_actions(first, last):
+                dpg.add_menu_item(label=label, callback=lambda s, a, *, fn=fn: (_close_menu(), fn()))
+            dpg.add_separator()
         if row["kind"] == "lane":
-            lane = row["lane"]
+            key = row["lane"]
             hit = _block_at(r, bar)
-            uid = _lane_item(lane)[3]
-            if hit is not None and x >= LABEL_W:
-                mem = _member(lane, hit[0])
-                dpg.add_text(f"{lane} · {mem.label}", color=(230, 210, 140))
-                _catalog_menu("Add FX to this block", catalog.FX,
-                              lambda key: add_fx(uid, ("layers", mem.at, "fx"), key))
+            mem = None if x < LABEL_W else _member(key, hit[0]) if hit is not None else _unblocked_at(r, x)
+            uid, here = _where(key, mem.at) if mem is not None else (None, ())
+            if mem is not None:                          # a block, or a cued / whole-song member
+                dpg.add_text(f"{TRACK_TITLES[key]} · {mem.label}", color=LANE_COLOURS[key][:3])
+                if not _is_fx(key):
+                    _catalog_menu("Add FX to it", catalog.FX, lambda k: add_fx(uid, here + ("fx",), k))
                 if mem.kind != arr.CLIP:
                     dpg.add_menu_item(label="Open plugin (its parameters, linked to the music)...",
-                                      callback=lambda: (_close_menu(), open_plugin(uid, ("layers", mem.at))))
+                                      callback=lambda: (_close_menu(), open_plugin(uid, here)))
                 dpg.add_menu_item(label="Turn on" if not mem.enabled else "Turn off (bypass)",
-                                  callback=lambda: (_close_menu(), _toggle(uid, ("layers", mem.at))))
-                blk = mem.blocks[hit[1]]
-                dpg.add_menu_item(label=f"Preview its bars ({blk.first}-{blk.last})",
-                                  callback=lambda: (_close_menu(), preview_bars(blk.first, blk.last)))
-                dpg.add_menu_item(label="Delete this block", callback=lambda: (
-                    _close_menu(), _delete_block(lane, mem.at, hit[1])))
+                                  callback=lambda: (_close_menu(), _toggle(uid, here)))
+                if hit is None:                          # cued / whole song: hidden in some bars
+                    for label, (a, b, show) in _mute_choices(mem, bar):
+                        dpg.add_menu_item(label=label, callback=lambda s, d, *, a=a, b=b, show=show: (
+                            _close_menu(), mute_bars(key, mem.at, a, b, not show)))
+                if _is_fx(key):
+                    dpg.add_menu_item(label="Earlier in the chain (works before)",
+                                      callback=lambda: (_close_menu(), _reorder(key, mem.at, -1)))
+                    dpg.add_menu_item(label="Later in the chain (works after)",
+                                      callback=lambda: (_close_menu(), _reorder(key, mem.at, 1)))
+                if hit is not None:
+                    blk = mem.blocks[hit[1]]
+                    first, last = blk.first, blk.last
+                else:
+                    spans = _cue_bars(mem) or [(1, _bars())]
+                    first, last = int(spans[0][0]), int(spans[-1][1])
+                dpg.add_menu_item(label=f"Preview its bars ({first}-{min(last, first + PREVIEW_BARS - 1)})",
+                                  callback=lambda: (_close_menu(), preview_bars(first, last)))
+                if hit is not None and len(mem.blocks) > 1:
+                    dpg.add_menu_item(label="Delete this block (Delete)", callback=lambda: (
+                        _close_menu(), _delete_block(key, mem.at, hit[1])))
+                dpg.add_menu_item(label=f"Delete {mem.label}" + ("" if hit is not None and len(mem.blocks) > 1
+                                                                   else " (Delete)"),
+                                  callback=lambda: (_close_menu(), _remove_member(key, mem.at)))
                 dpg.add_separator()
             else:
-                dpg.add_text(lane, color=(230, 210, 140))
-            _catalog_menu(f"Put a Generator here (bar {bar})", catalog.GENERATOR,
-                          lambda key: _put_generator(lane, bar, key))
-            _catalog_menu(f"Add FX to the {lane} (all of it)", catalog.FX,
-                          lambda key: add_fx(uid, ("fx",), key))
+                dpg.add_text(TRACK_TITLES[key], color=LANE_COLOURS[key][:3])
+            if not _is_fx(key):
+                _catalog_menu(f"Put a Generator here (bar {bar})", catalog.GENERATOR,
+                              lambda k: _put_generator(key, bar, k))
+            fx_key = key if _is_fx(key) else {arr.FG: FG_FX, arr.BG: BG_FX}[key]
+            where = "the master" if fx_key == MASTER else f"the whole {_owner(key)}"
+            _catalog_menu(f"Add FX on {where} here (bars {bar}-{min(_bars(), bar + 3)})", catalog.FX,
+                          lambda k: _put_fx_at(fx_key, bar, k))
+            _catalog_menu(f"Add FX on {where}, all the song", catalog.FX,
+                          lambda k: _put_fx(fx_key, catalog.by_key(k).spec()))
             dpg.add_separator()
         _catalog_menu("Add FX to the master (over everything)", catalog.FX, add_master)
     _menu_at(build)
 
 
-def _delete_block(lane: str, at: int, i: int) -> None:
-    mem = _member(lane, at)
+def _delete_block(key: str, at: int, i: int) -> None:
+    mem = _member(key, at)
     if mem is None:
         return
-    if mem.cued or mem.always:
-        _remove_member(lane, at)
+    if mem.cued or mem.always or len(mem.blocks) <= 1:
+        _remove_member(key, at)
         return
-    _set_blocks(lane, at, arr.remove(mem.blocks, i))
-    A.sel = ("lane", lane)
+    _set_blocks(key, at, arr.remove(mem.blocks, i))
+    A.sel = ("master",) if key == MASTER else ("lane", _owner(key))
     _draw_inspector()
+
+
+def delete_selected() -> None:
+    """Delete: the chosen block (a member's last: the member), a cued member, or the
+    montage's chosen bars (nothing there)."""
+    sel = A.sel or (None,)
+    if sel[0] == "block" and _member(sel[1], sel[2]) is not None:
+        if sel[3] is None:
+            _remove_member(sel[1], sel[2])
+        else:
+            _delete_block(sel[1], sel[2], sel[3])
+    elif sel[0] == "montage" and len(sel) > 2:
+        _set_pins(sel[1], sel[2], "none")
+
+
+def _in_window() -> bool:
+    """The mouse or the keys are on the Arrange window (not on the studio behind it)."""
+    tags = ("arr_win", "arr_tracks", "arr_insp_win")
+    return any(dpg.does_item_exist(t) and (dpg.is_item_hovered(t) or dpg.is_item_focused(t)) for t in tags)
+
+
+def on_key_delete(sender, app_data) -> None:
+    if dpg.does_item_exist("arr_win") and dpg.is_item_shown("arr_win") and not _typing() and _in_window():
+        delete_selected()
 
 
 # ----------------------------------------------------------------------- mouse
@@ -613,12 +894,62 @@ def _mouse_in_canvas():
     return mx - rx, my - ry
 
 
+def hover_text(x: float, y: float) -> str:
+    """What is under the mouse at (x, y) on the canvas, named: the clip the montage plays
+    there, a member (its block's bars), else ''."""
+    r = _row_at(y)
+    if r is None or x < LABEL_W:
+        return ""
+    row = A.rows[r]
+    pos = (x - LABEL_W) / _bw() + A.view0                # the bar position under the mouse
+    if row["kind"] == "montage":
+        run = next((u for u in A.runs if u[0] <= pos < u[1]), None)
+        if run is None:
+            return ""
+        pinned = "  (pinned)" if int(pos) in _pins() else ""
+        return f"bar {int(pos)}: {run[2]}{pinned}" + (f"\n{run[3]}" if run[3] else "")
+    key = row["lane"]
+    hit = _block_at(r, int(pos))
+    if hit is not None:
+        mem = _member(key, hit[0])
+        blk = mem.blocks[hit[1]]
+        return f"{mem.label} ({mem.kind}), bars {blk.first}-{blk.last}"
+    mem = _unblocked_at(r, x)
+    if mem is None:
+        return ""
+    hidden = " - hidden in this bar" if any(a <= int(pos) <= b for a, b in _mutes(mem.spec)) else ""
+    return f"{mem.label} ({mem.kind}), " + ("cut by its cues (REAPER)" if mem.cued else "the whole song") + hidden
+
+
+def on_mouse_move(sender, app_data) -> None:
+    if not dpg.does_item_exist("arr_tip") or not dpg.is_item_shown("arr_win"):
+        return
+    text = hover_text(*_mouse_in_canvas()) if dpg.is_item_hovered("arr_canvas") and A.drag is None else ""
+    dpg.set_value("arr_tip_text", text)
+    dpg.configure_item("arr_tip", show=bool(text))
+
+
 def _row_y(r: int) -> float:
-    return RULER_H + DENSITY_H + 6 + r * LANE_H
+    return RULER_H + DENSITY_H + 6 + r * A.lane_h
+
+
+def _scroll() -> float:
+    """How far the lanes are scrolled down (the ruler stays on top of what shows)."""
+    try:
+        return float(dpg.get_y_scroll("arr_tracks"))
+    except Exception:
+        return 0.0
+
+
+def _in_ruler(y: float) -> bool:
+    """``y`` (on the canvas) is on the ruler, wherever the lanes are scrolled to."""
+    return y - _scroll() < _row_y(0)
 
 
 def _row_at(y: float):
-    r = int((y - _row_y(0)) // LANE_H)
+    if _in_ruler(y):                                     # a row scrolled under the ruler
+        return None
+    r = int((y - _row_y(0)) // A.lane_h)
     return r if 0 <= r < len(A.rows) else None
 
 
@@ -643,70 +974,324 @@ def on_canvas_click(sender, app_data) -> None:
 
 
 def on_canvas_double_click(sender, app_data) -> None:
+    """A double click on a Generator's or FX's block: its plugin."""
     x, y = _mouse_in_canvas()
     r = _row_at(y)
-    if r is None or A.rows[r]["kind"] != "lane":
+    if r is None or A.rows[r]["kind"] != "lane" or x < LABEL_W:
         return
+    key = A.rows[r]["lane"]
     hit = _block_at(r, _bar_of_x(x))
-    lane = A.rows[r]["lane"]
-    if hit is not None and _member(lane, hit[0]).kind != arr.CLIP:
-        open_plugin(_lane_item(lane)[3], ("layers", hit[0]))
+    mem = _member(key, hit[0]) if hit is not None else _unblocked_at(r, x)
+    if mem is not None and mem.kind != arr.CLIP:
+        open_plugin(*_where(key, mem.at))
 
 
 def on_mouse_release(sender, app_data) -> None:
+    if A.clip_drag is not None:                          # a clip from the browser
+        drag, A.clip_drag = A.clip_drag, None
+        if dpg.does_item_exist("arr_ghost"):
+            dpg.configure_item("arr_ghost", show=False)
+        if _over_lanes():
+            drop_clip(*_mouse_in_canvas(), drag)
+        return
     if A.drag is None or not dpg.is_item_shown("arr_win"):
         A.drag = None
         return
-    release(_mouse_in_canvas()[0])
+    release(*_mouse_in_canvas())
 
 
 def on_mouse_drag(sender, app_data) -> None:
+    if A.clip_drag is not None:
+        _show_clip_ghost()
+        return
     if A.drag is None or not dpg.does_item_exist("arr_ghost"):
         return
-    got = _dragged(_mouse_in_canvas()[0])
+    mx, my = _mouse_in_canvas()
+    got = _dragged(mx)
     if got is None:
         return
     r, a, b = got
-    y = _row_y(r)
-    dpg.configure_item("arr_ghost", pmin=[_x_of(a), y + 2], pmax=[_x_of(b + 1), y + LANE_H - 4], show=True)
+    if A.drag[2] == "move" and r >= 0:                   # onto another row: there
+        t = _target_row(A.rows[r]["lane"], my)
+        r = r if t is None else t
+    y0, y1 = ((_scroll(), _scroll() + RULER_H + DENSITY_H) if r < 0 else
+              (_row_y(r) + 2, _row_y(r) + A.lane_h - 4))
+    dpg.configure_item("arr_ghost", pmin=[_x_of(a), y0], pmax=[_x_of(b + 1), y1], show=True)
 
 
-EDGE = 5               # pixels at a block's ends that grab the end instead of the block
+EDGE = 8               # pixels at a block's ends that Shift+drag takes (its end, not the block)
 
 
 def press(x: float, y: float) -> None:
     """The mouse goes down on the canvas: on a row's name it picks the lane (or the
-    master, the montage); on a block's end it takes that end, on a block the block,
-    elsewhere on a lane it starts a new member there."""
+    master, the montage); with Shift, on a block's end it takes that end (``_edge_at``); on
+    a block the block, elsewhere on a track it starts a new member there; on the montage,
+    bars to choose."""
+    if _in_ruler(y) and x >= LABEL_W:                    # the ruler: bars to choose
+        A.drag = (-1, _bar_of_x(x), "span", None)
+        return
     r = _row_at(y)
     if r is None:
         return
     row = A.rows[r]
-    if row["kind"] != "lane" or x < LABEL_W:
-        A.sel = ("lane", row["lane"]) if row["kind"] == "lane" else (row["kind"],)
+    if x < LABEL_W:
+        A.sel = (("montage",) if row["kind"] == "montage" else ("master",) if row["lane"] == MASTER
+                 else ("lane", _owner(row["lane"])))
         _draw()
         _draw_inspector()
         return
     bar = _bar_of_x(x)
+    if row["kind"] == "montage":
+        A.drag = (r, bar, "range", None)
+        return
+    key = row["lane"]
+    edge = _edge_at(x, y) if _shift() else None
+    if edge is not None:                                 # Shift: an end, to resize the block
+        A.drag = (r, bar, edge[1], edge[2])
+        return
+    hit = _block_at(r, bar)
+    if hit is None:
+        other = _unblocked_at(r, x)
+        if other is not None:                            # cued (REAPER) or the whole song: chosen
+            A.sel = ("block", key, other.at, None)
+            _draw()
+            _draw_inspector()
+            return
+    A.drag = (r, bar, "new" if hit is None else "move", hit)
+
+
+def _insert_member(key: str, spec: dict, sub, first: int, last: int) -> int:
+    """``spec`` into the lane ``key`` (a lane's FX track: at the end of its chain), on the
+    sub-row ``sub`` (None: the topmost free one), under what is above it there over bars
+    first..last; -> its place."""
+    item = _lane_item(_owner(key))
+    where = "fx" if _is_fx(key) else "layers"
+    at = len(item[2].get(where) or [])
+    if sub is not None:
+        spec = {**spec, arr.ROW_KEY: int(sub)}
+        if not _is_fx(key):
+            above = [m.at for m in A.members.get(key, []) if m.row < sub
+                     and any(a <= last and first <= b for a, b in _spans_of(m))]
+            at = min(above, default=at)                  # drawn under what is above it
+    _edit(item[3], (where,), lambda ls, *, at=at, spec=spec: list(ls or [])[:at] + [spec] + list(ls or [])[at:])
+    return at
+
+
+def _recast(spec: dict, lane: str) -> dict:
+    """A clip moved to the other lane: a character in the FG (in its place in the frame), the
+    whole frame in the BG."""
+    out = dict(spec)
+    if spec.get("source") != "footage":
+        return out
+    if lane == arr.FG:
+        out["role"] = "foreground"
+        if out.get("fit", "contain") == "cover":
+            out["fit"] = "contain"
+        for k, v in (("scale", 0.6), ("x", 0.5), ("y", 0.62)):
+            out.setdefault(k, v)
+    else:
+        out.update(role="background", fit="cover")
+        for k in ("scale", "x", "y"):
+            out.pop(k, None)
+    return out
+
+
+def _target_row(key: str, y: float):
+    """The row a block of the lane ``key`` dragged to ``y`` would go to: another sub-row of
+    it, or one of the other lane of its kind (BG / FG; a lane's FX track); None: its own."""
+    t = _row_at(y)
+    if t is None or A.rows[t]["kind"] != "lane":
+        return None
+    dst = A.rows[t]["lane"]
+    kinds = ((arr.BG, arr.FG), (FG_FX, BG_FX))
+    if not any(key in k and dst in k for k in kinds):
+        return None
+    return t
+
+
+def _move_to_row(key: str, mem, i: int, first: int, last: int, t: int) -> None:
+    """Block ``i`` of ``mem`` (in ``key``) dragged to bars first..last on row ``t``: there
+    now. The member goes whole when it was its only block, else that block alone becomes a
+    member of its own; to the other lane a clip changes its role (``_recast``). One undo."""
+    from core.scene_doc import plain
+    dst, sub = A.rows[t]["lane"], A.rows[t]["sub"]
+    b = mem.blocks[i]
+    moved = arr.Block(first, last, b.start, b.rate, b.file)
+    shape = arr.with_blocks if mem.kind == arr.CLIP else arr.with_windows
+    spec = shape({k: v for k, v in plain(mem.spec).items() if k != arr.ROW_KEY}, [moved])
+    rest = [x for j, x in enumerate(mem.blocks) if j != i]
+    n = len(A.undo)
+    if dst == key and not rest:                          # its own lane: another sub-row
+        _set_member(key, mem.at, {**spec, arr.ROW_KEY: int(sub)})
+        at = mem.at
+    else:
+        if dst != key:
+            spec = _recast(spec, dst)
+        if rest:
+            _set_blocks(key, mem.at, rest)
+        else:
+            _remove_member(key, mem.at)
+        at = _insert_member(dst, spec, sub, first, last)
+    del A.undo[n + 1:]                                   # one step back undoes all of it
+    A.sel = ("block", dst, at, 0)
+    _status(f"{mem.label} -> {TRACK_TITLES[dst]}, row {sub + 1}, bars {first}-{last}"
+            + (" (Ctrl+Z puts it back)" if dst != key else ""))
+
+
+def _spans_of(mem) -> list:
+    """The bars a member is on: its blocks, its cues, or all of the song."""
+    if mem.blocks:
+        return [(b.first, b.last) for b in mem.blocks]
+    cues = _cue_bars(mem)
+    return [(int(a), int(b)) for a, b in cues] if cues else [(1, _bars())]
+
+
+def _shift() -> bool:
+    return _down("mvKey_ModShift", "mvKey_LShift", "mvKey_RShift")
+
+
+def _edge_at(x: float, y: float):
+    """(row, "first" | "last", (member, block), the end's x) Shift+drag takes at (x, y): an
+    end within EDGE px; where two blocks meet, the one the mouse is in (never the neighbour's)."""
+    if x < LABEL_W or _in_ruler(y):
+        return None
+    r = _row_at(y)
+    if r is None or A.rows[r]["kind"] != "lane":
+        return None
+    row, bar = A.rows[r], _bar_of_x(x)
+    near = []
     for mem in A.members.get(row["lane"], []):
         if mem.row != row["sub"]:
             continue
-        for i, b in enumerate(mem.blocks):               # an end within reach, on either side of it
-            if abs(x - _x_of(b.last + 1)) <= EDGE:
-                A.drag = (r, bar, "last", (mem.at, i))
-                return
-            if abs(x - _x_of(b.first)) <= EDGE:
-                A.drag = (r, bar, "first", (mem.at, i))
-                return
-    hit = _block_at(r, bar)
-    A.drag = (r, bar, "new" if hit is None else "move", hit)
+        for i, b in enumerate(mem.blocks):
+            for end, ex in (("last", _x_of(b.last + 1)), ("first", _x_of(b.first))):
+                if abs(x - ex) <= EDGE:
+                    inside = b.first <= bar <= b.last
+                    near.append((not inside, abs(x - ex), end, (mem.at, i), ex))
+    if not near:
+        return None
+    _, _, end, hit, ex = min(near, key=lambda n: n[:2])
+    return r, end, hit, ex
+
+
+def _show_edge() -> None:
+    """With Shift held over a block's end (or while one is dragged): the left-right cursor
+    and that end lit; else neither."""
+    got = None
+    resizing = A.drag is not None and A.drag[2] in ("first", "last")
+    if dpg.does_item_exist("arr_edge") and dpg.is_item_shown("arr_win"):
+        if resizing:
+            got = True
+        elif _shift() and dpg.is_item_hovered("arr_canvas") and A.clip_drag is None and A.asking is None:
+            got = _edge_at(*_mouse_in_canvas())
+    if isinstance(got, tuple):
+        r, _, _, ex = got
+        dpg.configure_item("arr_edge", p1=[ex, _row_y(r) + 1], p2=[ex, _row_y(r) + A.lane_h - 2], show=True)
+    elif not resizing and dpg.does_item_exist("arr_edge"):
+        dpg.configure_item("arr_edge", show=False)
+    arc_window.set_cursor("resize" if got else None)
+
+
+def _mutes(spec: dict) -> list:
+    """The bars a layer is hidden in (``mute:``), as sorted [first, last] spans."""
+    got = spec.get("mute") or []
+    got = [got] if got and not isinstance(got[0], (list, tuple)) else got
+    return sorted([int(a), int(b)] for a, b in got)
+
+
+def _spans(bars: set) -> list:
+    out = []
+    for b in sorted(bars):
+        if out and b == out[-1][1] + 1:
+            out[-1][1] = b
+        else:
+            out.append([b, b])
+    return out
+
+
+def mute_bars(key: str, at: int, first: int, last: int, hide: bool = True) -> None:
+    """A member hidden in bars first..last (``hide`` False: shown there again). It goes on
+    underneath: a character cut by its REAPER cues stays in sync with its sound."""
+    mem = _member(key, at)
+    if mem is None:
+        return
+    first, last = min(first, last), max(first, last)
+    bars = {b for a, z in _mutes(mem.spec) for b in range(a, z + 1)}
+    bars = bars | set(range(first, last + 1)) if hide else bars - set(range(first, last + 1))
+    spec = {k: v for k, v in mem.spec.items() if k != "mute"}
+    if bars:
+        spec["mute"] = _spans(bars)
+    _set_member(key, at, spec)
+    what = f"bar {first}" if first == last else f"bars {first}-{last}"
+    _status(f"{mem.label} hidden in {what} (its sound and sync go on)" if hide else
+            f"{mem.label} shown again in {what}")
+
+
+def _set_mutes(key: str, at: int, text: str) -> None:
+    """The inspector's "hidden in bars" field: 9-12, 30-33 (empty: shown wherever it plays)."""
+    mem = _member(key, at)
+    try:
+        bars = _parse_bars(text)
+    except ValueError:
+        _status(f"bars {text!r}: write them like 9-12, 30-33")
+        return
+    if mem is None:
+        return
+    spec = {k: v for k, v in mem.spec.items() if k != "mute"}
+    if bars:
+        spec["mute"] = _spans({b for a, z in bars for b in range(a, z + 1)})
+    _set_member(key, at, spec)
+
+
+def _mute_choices(mem, bar: int) -> list:
+    """[(menu label, (first, last, show))]: what can be hidden (or shown again) of a member
+    with no blocks at ``bar``: the cut there, the chosen bars, the bar."""
+    out = []
+    muted = next((m for m in _mutes(mem.spec) if m[0] <= bar <= m[1]), None)
+    if muted is not None:
+        a, b = muted
+        out.append((f"Show again in bars {a}-{b}" if b > a else f"Show again in bar {a}", (a, b, True)))
+        if b > a:
+            out.append((f"Show again in bar {bar}", (bar, bar, True)))
+        return out
+    cut = next(((int(np.floor(a + 1e-6)), max(int(np.floor(a + 1e-6)), int(np.ceil(b - 1e-6)) - 1))
+                for a, b in _cue_bars(mem) if a - 1e-6 <= bar + 0.999 and b + 1e-6 >= bar), None)
+    if cut is not None and cut != (bar, bar):
+        out.append((f"Hide this cut (bars {cut[0]}-{cut[1]})", (cut[0], cut[1], False)))
+    if A.span is not None and A.span[0] <= bar <= A.span[1] and tuple(A.span) != (bar, bar):
+        out.append((f"Hide in the chosen bars {A.span[0]}-{A.span[1]}", (A.span[0], A.span[1], False)))
+    out.append((f"Hide in bar {bar}", (bar, bar, False)))
+    return out
+
+
+def _cue_bars(mem) -> list:
+    """A cued member's cues as (first, last) bar positions (floats), once they are known."""
+    return [(_time_to_bar(t0), _time_to_bar(t1)) for t0, t1 in A.cues.get(_cue_key(mem.spec), [])]
+
+
+def _unblocked_at(r: int, x: float):
+    """The member with no blocks drawn at ``x`` on row ``r``: a cued one (on one of its
+    cues, or its name), or one that plays the whole song."""
+    row = A.rows[r]
+    for mem in A.members.get(row["lane"], []):
+        if mem.row != row["sub"] or mem.blocks:
+            continue
+        if mem.always:
+            return mem
+        name_x = _name_x(mem)
+        if name_x <= x <= name_x + 7 * (len(mem.label) + 16):
+            return mem
+        bar = (x - LABEL_W) / _bw() + A.view0
+        if any(a - 0.25 <= bar <= b + 0.25 for a, b in _cue_bars(mem)):
+            return mem
+    return None
 
 
 def _dragged(x: float):
     """(row, first bar, last bar) the drag would leave."""
     r, bar, mode, hit = A.drag
     now = _bar_of_x(x)
-    if mode == "new":
+    if mode in ("new", "range", "span"):
         return r, min(bar, now), max(bar, now)
     b = _member(A.rows[r]["lane"], hit[0]).blocks[hit[1]]
     if mode == "move":
@@ -717,22 +1302,55 @@ def _dragged(x: float):
     return r, b.first, max(now, b.first)
 
 
-def release(x: float) -> None:
-    """The mouse comes up: a new member, a block moved or resized, or (no move) a block chosen."""
+def release(x: float, y: float = None) -> None:
+    """The mouse comes up: a new member, a block moved or resized (moved onto another row:
+    there now, ``_move_to_row``), or (no move) a block chosen; on the montage, the bars
+    dragged over (a click: the clip there) chosen."""
+    if A.drag is None:                                   # the press chose something: no drag
+        return
     r, bar, mode, hit = A.drag
     got = _dragged(x)
     A.drag = None
-    if r >= len(A.rows) or A.rows[r]["kind"] != "lane":
+    if r >= len(A.rows):
         return
-    lane = A.rows[r]["lane"]
     _, first, last = got
-    if mode == "new":
-        _new_member(lane, first, last)
+    if mode == "span":                                   # bars chosen on the ruler
+        A.sel = None
+        _set_span(first, last)
         return
-    mem = _member(lane, hit[0])
+    if mode == "range":
+        path = ""
+        if first == last:                                # a click: the clip playing there
+            sel, path = _run_sel(first)
+            first, last = sel[1], sel[2]
+        A.sel = ("montage", first, last)
+        if path and Path(path).is_file():
+            _choose_clip(path, 0.0)                      # picked: to put elsewhere
+        _draw()
+        _draw_inspector()
+        return
+    if A.rows[r]["kind"] != "lane":
+        return
+    key = A.rows[r]["lane"]
+    if mode == "new":
+        if _can_put(key):
+            _new_member(key, first, last, sub=A.rows[r].get("sub"))
+        else:                                            # nothing picked to put: bars chosen
+            A.sel = None
+            _set_span(first, last)
+            _status(f"bars {first}-{last} chosen: Preview (Space) plays them · to put something here, "
+                    "pick it on the left first")
+        return
+    mem = _member(key, hit[0])
     b = mem.blocks[hit[1]]
+    t = _target_row(key, y) if mode == "move" and y is not None else None
+    if t is not None and (A.rows[t]["lane"], A.rows[t]["sub"]) != (key, A.rows[r]["sub"]):
+        _move_to_row(key, mem, hit[1], first, last, t)
+        _draw()
+        _draw_inspector()
+        return
     if (first, last) == (b.first, b.last):              # no move: a click picks the block
-        A.sel = ("block", lane, mem.at, hit[1])
+        A.sel = ("block", key, mem.at, hit[1])
         if mem.kind == arr.CLIP and (b.file or mem.spec.get("file")):
             _choose_clip(b.file or mem.spec.get("file"), b.start)
         _draw()
@@ -744,30 +1362,29 @@ def release(x: float) -> None:
     moved = arr.Block(first, last, round(start, 3), b.rate, b.file)
     rest = [x for i, x in enumerate(mem.blocks) if i != hit[1]]
     blocks = arr.place(rest, moved, _bar_seconds())
-    _set_blocks(lane, mem.at, blocks)
-    A.sel = ("block", lane, mem.at, arr.block_at(blocks, first))
+    _set_blocks(key, mem.at, blocks)
+    A.sel = ("block", key, mem.at, arr.block_at(blocks, first))
     _draw()
     _draw_inspector()
 
 
 # ----------------------------------------------------------------------- drawing
 
-LANE_COLOURS = {arr.FG: (150, 210, 240, 255), arr.BG: (230, 210, 140, 255), "master": (220, 160, 240, 255),
-                "montage": (200, 200, 200, 255)}
+LANE_COLOURS = {arr.FG: (150, 210, 240, 255), arr.BG: (230, 210, 140, 255), MASTER: (220, 160, 240, 255),
+                FG_FX: (200, 160, 230, 255), BG_FX: (200, 160, 230, 255), "montage": (200, 200, 200, 255)}
 
 
-def _strips(specs: list, y0: float, y1: float) -> None:
-    """Thin lines for FX with their own bars (the whole song when none), one under another."""
-    for j, spec in enumerate(specs):
-        y = y0 + 3 + 4 * j
-        if y > y1:
-            break
-        r, g, b = arr.colour(arr.label_of(spec))
-        alpha = 230 if spec.get("enabled", True) is not False else 70
-        wins = arr.windows_of(spec) or [arr.Block(1, _bars())]
-        for w in wins:
-            dpg.draw_rectangle([_x_of(w.first), y], [_x_of(w.last + 1), y + 2], fill=(r, g, b, alpha),
-                               color=(0, 0, 0, 0), parent="arr_canvas")
+def _row_chosen(row: dict) -> bool:
+    """The row is lit: it holds what is chosen (a lane chosen: its FX track too)."""
+    sel = A.sel or (None,)
+    if row["kind"] == "montage":
+        return sel[0] == "montage"
+    key = row["lane"]
+    if sel[0] == "master":
+        return key == MASTER
+    if sel[0] == "lane":
+        return key != MASTER and _owner(key) == sel[1]
+    return sel[0] == "block" and sel[1] == key
 
 
 def _short(names: list, room: int) -> str:
@@ -779,132 +1396,400 @@ def _draw() -> None:
     if not dpg.does_item_exist("arr_canvas"):
         return
     dpg.delete_item("arr_canvas", children_only=True)
+    A.runs = _montage_runs() if A.doc is not None else []
     n, bw = _bars(), _bw()
     h = _row_y(len(A.rows)) + 8
     dpg.configure_item("arr_canvas", height=max(120, int(h)))
-    dpg.draw_rectangle([0, 0], [CANVAS_W, h], fill=(18, 20, 26, 255), color=(18, 20, 26, 255),
+    dpg.draw_rectangle([0, 0], [A.canvas_w, h], fill=(18, 20, 26, 255), color=(18, 20, 26, 255),
                        parent="arr_canvas")
     last = min(n, A.view0 + _shown() - 1)
-    for b in range(A.view0, last + 1):                   # the bar ruler
+    for b in range(A.view0, last + 1):                   # the bars' lines down the lanes
         x = _x_of(b)
         major = (b - 1) % 4 == 0
-        dpg.draw_line([x, RULER_H - (10 if major else 4)], [x, h], parent="arr_canvas",
+        dpg.draw_line([x, _row_y(0)], [x, h], parent="arr_canvas",
+                      color=(70, 76, 95, 160) if major else (45, 50, 62, 120))
+    for r, row in enumerate(A.rows):
+        y = _row_y(r)
+        dpg.draw_rectangle([0, y], [A.canvas_w, y + A.lane_h - 2],
+                           fill=(34, 38, 50, 255) if _row_chosen(row) else (26, 29, 38, 255), color=(0, 0, 0, 0),
+                           parent="arr_canvas")
+        if row["kind"] == "montage":
+            for w in arr.windows_of(_montage_item()[2]) or [arr.Block(1, n)]:
+                dpg.draw_rectangle([_x_of(w.first), y + A.lane_h - 8], [_x_of(w.last + 1), y + A.lane_h - 5],
+                                   fill=(120, 120, 130, 160), color=(0, 0, 0, 0), parent="arr_canvas")
+            _draw_montage(y)
+            continue
+        key = row["lane"]
+        if row["sub"] == 0:
+            dpg.draw_line([0, y - 1], [A.canvas_w, y - 1], parent="arr_canvas",
+                          color=(70, 74, 92, 255) if key in (FG_FX, BG_FX) else (90, 96, 120, 255))
+        here = [m for m in A.members.get(key, []) if m.row == row["sub"]]
+        if not here and _is_fx(key) and row["sub"] == 0 and _roomy():
+            dpg.draw_text([LABEL_W + 6, y + 9], "right-click: an FX here · or pick one in FX and drag across",
+                          size=11, color=(110, 110, 125, 255), parent="arr_canvas")
+        starts = sorted([_name_x(m) for m in here] +       # where the names and the blocks
+                        [_x_of(b.first) for m in here for b in m.blocks])   # start on the row
+        for mem in here:
+            x = _name_x(mem)
+            _draw_member(key, mem, y, next((s for s in starts if s > x), A.canvas_w))
+    if A.span is not None:                               # the chosen bars
+        xa, xb = max(_x_of(A.span[0]), LABEL_W), min(_x_of(A.span[1] + 1), A.canvas_w)
+        if xb > xa:
+            dpg.draw_rectangle([xa, RULER_H + DENSITY_H], [xb, h], fill=(255, 255, 255, 14),
+                               color=(255, 255, 255, 60), parent="arr_canvas")
+    _draw_names()
+    with dpg.draw_node(tag="arr_head", parent="arr_canvas"):
+        _draw_ruler(n, bw, last)
+    A.head_y = None
+    _pin_ruler()
+    if dpg.does_item_exist("arr_prev_btn"):
+        dpg.configure_item("arr_prev_btn", label=f"Preview bars {A.span[0]}-{A.span[1]} (Space)"
+                           if A.span else "Preview (choose bars)")
+    dpg.draw_rectangle([0, 0], [0, 0], fill=(255, 255, 255, 60), color=(255, 255, 255, 200),
+                       tag="arr_ghost", show=False, parent="arr_canvas")
+    dpg.draw_line([0, 0], [0, 0], color=(255, 210, 90, 255), thickness=3, tag="arr_edge", show=False,
+                  parent="arr_canvas")
+
+
+def _draw_ruler(n: int, bw: float, last: int) -> None:
+    """The bar numbers, how busy the MIDI is and the chosen bars, over the lanes that scroll
+    under them (``_pin_ruler`` keeps them on top)."""
+    head = _row_y(0)
+    dpg.draw_rectangle([0, 0], [A.canvas_w, head], fill=(18, 20, 26, 255), color=(18, 20, 26, 255),
+                       parent="arr_head")
+    for b in range(A.view0, last + 1):
+        x = _x_of(b)
+        major = (b - 1) % 4 == 0
+        dpg.draw_line([x, RULER_H - (10 if major else 4)], [x, head], parent="arr_head",
                       color=(70, 76, 95, 160) if major else (45, 50, 62, 120))
         if major or bw > 22:
-            dpg.draw_text([x + 2, 4], str(b), size=12, color=(170, 175, 190, 255), parent="arr_canvas")
+            dpg.draw_text([x + 2, 4], str(b), size=12, color=(170, 175, 190, 255), parent="arr_head")
     for b, v in enumerate(_density(n), 1):               # how busy the MIDI is, bar by bar
         if not A.view0 <= b <= last:
             continue
         c = int(40 + 180 * v)
         dpg.draw_rectangle([_x_of(b), RULER_H], [_x_of(b + 1), RULER_H + DENSITY_H],
-                           fill=(c, int(c * 0.8), 60, 255), color=(0, 0, 0, 0), parent="arr_canvas")
-    for r, row in enumerate(A.rows):
-        y = _row_y(r)
-        sel = A.sel or (None,)
-        chosen = (sel[0] == row["kind"] if row["kind"] != "lane"
-                  else sel[0] in ("lane", "block") and sel[1] == row["lane"])
-        dpg.draw_rectangle([0, y], [CANVAS_W, y + LANE_H - 2],
-                           fill=(34, 38, 50, 255) if chosen else (26, 29, 38, 255), color=(0, 0, 0, 0),
-                           parent="arr_canvas")
-        if row["kind"] == "lane" and row["sub"] == 0:
-            dpg.draw_line([0, y - 1], [CANVAS_W, y - 1], color=(90, 96, 120, 255), parent="arr_canvas")
-        if row["kind"] == "master":
-            _strips([it[2] for it in _master_items()], y, y + LANE_H - 6)
-            continue
-        if row["kind"] == "montage":
-            for w in arr.windows_of(_montage_item()[2]) or [arr.Block(1, n)]:
-                dpg.draw_rectangle([_x_of(w.first), y + LANE_H - 8], [_x_of(w.last + 1), y + LANE_H - 5],
-                                   fill=(120, 120, 130, 160), color=(0, 0, 0, 0), parent="arr_canvas")
-            continue
-        lane = row["lane"]
-        mems = A.members.get(lane, [])
-        rows_here = max([m.row for m in mems], default=-1) + 1
-        if row["sub"] == rows_here:                      # the lane's empty row: its FX, and room
-            _strips([f for f in _lane_item(lane)[2].get("fx") or [] if isinstance(f, dict)], y + 14, y + LANE_H - 4)
-            continue
-        for mem in mems:
-            if mem.row != row["sub"]:
-                continue
-            _draw_member(lane, mem, y)
-    _draw_names()
-    dpg.draw_rectangle([0, 0], [0, 0], fill=(255, 255, 255, 60), color=(255, 255, 255, 200),
-                       tag="arr_ghost", show=False, parent="arr_canvas")
+                           fill=(c, int(c * 0.8), 60, 255), color=(0, 0, 0, 0), parent="arr_head")
+    if A.span is not None:                               # the chosen bars
+        xa, xb = max(_x_of(A.span[0]), LABEL_W), min(_x_of(A.span[1] + 1), A.canvas_w)
+        if xb > xa:
+            dpg.draw_rectangle([xa, 0], [xb, RULER_H + DENSITY_H], fill=(255, 255, 255, 70),
+                               color=(255, 255, 255, 220), parent="arr_head")
+    dpg.draw_rectangle([0, 0], [LABEL_W - 1, head], fill=(18, 20, 26, 255), color=(18, 20, 26, 255),
+                       parent="arr_head")
+    dpg.draw_line([0, head - 1], [A.canvas_w, head - 1], color=(60, 64, 80, 255), parent="arr_head")
+
+
+def _pin_ruler() -> None:
+    """The ruler moved down as far as the lanes are scrolled: it stays at the top of the view."""
+    if not dpg.does_item_exist("arr_head"):
+        return
+    y = _scroll()
+    if y != getattr(A, "head_y", None):
+        A.head_y = y
+        dpg.apply_transform("arr_head", dpg.create_translation_matrix([0, y]))
+
+
+def _roomy() -> bool:
+    """A row is tall enough for a second line (a lane's subtitle, a cued member's name)."""
+    return A.lane_h >= LANE_H
 
 
 def _draw_names() -> None:
-    """The names' column, over whatever a zoomed view runs under it."""
-    dpg.draw_rectangle([0, 0], [LABEL_W - 1, RULER_H + DENSITY_H], fill=(18, 20, 26, 255),
-                       color=(18, 20, 26, 255), parent="arr_canvas")
+    """The names' column, over whatever a zoomed view runs under it (its top: the ruler's)."""
+    grey = (150, 150, 160, 255)
     for r, row in enumerate(A.rows):
         y = _row_y(r)
-        sel = A.sel or (None,)
-        chosen = (sel[0] == row["kind"] if row["kind"] != "lane"
-                  else sel[0] in ("lane", "block") and sel[1] == row["lane"])
-        dpg.draw_rectangle([0, y], [LABEL_W - 1, y + LANE_H - 2], fill=(34, 38, 50, 255) if chosen else
+        dpg.draw_rectangle([0, y], [LABEL_W - 1, y + A.lane_h - 2], fill=(34, 38, 50, 255) if _row_chosen(row) else
                            (26, 29, 38, 255), color=(0, 0, 0, 0), parent="arr_canvas")
-        colour = LANE_COLOURS[row.get("lane") or row["kind"]]
-        grey = (150, 150, 160, 255)
-        if row["kind"] == "master":
-            items = [it[2] for it in _master_items()]
-            dpg.draw_text([6, y + 4], f"MASTER ({len(items)})", size=13, color=colour, parent="arr_canvas")
-            dpg.draw_text([6, y + 18], _short([arr.label_of(s) for s in items], 22) or "over everything",
-                          size=10, color=grey, parent="arr_canvas")
-        elif row["kind"] == "montage":
-            dpg.draw_text([6, y + 4], "CLIPS", size=13, color=colour, parent="arr_canvas")
-            dpg.draw_text([6, y + 18], "the montage, under the BG", size=10, color=grey, parent="arr_canvas")
-        else:
-            lane = row["lane"]
-            if row["sub"] == 0:
-                dpg.draw_line([0, y - 1], [LABEL_W, y - 1], color=(90, 96, 120, 255), parent="arr_canvas")
-                dpg.draw_text([6, y + 4], lane, size=15, color=colour, parent="arr_canvas")
-                dpg.draw_text([30, y + 6], "foreground" if lane == arr.FG else "background", size=10,
+        if row["kind"] == "montage":
+            dpg.draw_text([6, y + 4], "CLIPS", size=13, color=LANE_COLOURS["montage"], parent="arr_canvas")
+            if _roomy():
+                dpg.draw_text([6, y + 18], "the montage, under the BG", size=10, color=grey, parent="arr_canvas")
+            continue
+        key = row["lane"]
+        colour = LANE_COLOURS[key]
+        if row["sub"] == 0:
+            dpg.draw_line([0, y - 1], [LABEL_W, y - 1], color=(90, 96, 120, 255), parent="arr_canvas")
+            if key in (FG_FX, BG_FX):
+                dpg.draw_text([16, y + 4], "FX", size=13, color=colour, parent="arr_canvas")
+                if _roomy():
+                    dpg.draw_text([16, y + 18], f"on the whole {_owner(key)}", size=10, color=grey,
+                                  parent="arr_canvas")
+            elif key == MASTER:
+                dpg.draw_text([6, y + 4], "MASTER", size=13, color=colour, parent="arr_canvas")
+                if _roomy():
+                    dpg.draw_text([6, y + 18], "FX over everything", size=10, color=grey, parent="arr_canvas")
+            else:
+                dpg.draw_text([6, y + 4], key, size=15, color=colour, parent="arr_canvas")
+                dpg.draw_text([30, y + 6], "foreground" if key == arr.FG else "background", size=10,
                               color=grey, parent="arr_canvas")
-            rows_here = max([m.row for m in A.members.get(lane, [])], default=-1) + 1
-            if row["sub"] == rows_here:
-                fx = [f for f in _lane_item(lane)[2].get("fx") or [] if isinstance(f, dict)]
-                dpg.draw_text([6, y + 4], ("FX: " + _short([arr.label_of(f) for f in fx], 17)) if fx else
-                              "drag here: new", size=10, color=(200, 160, 230, 255) if fx else (110, 110, 125, 255),
-                              parent="arr_canvas")
+        if not _is_fx(key) and row["sub"] == max([m.row for m in A.members.get(key, [])], default=-1) + 1 \
+                and (_roomy() or row["sub"] > 0):
+            dpg.draw_text([6, y + (18 if row["sub"] == 0 else 4)], "drag here: new", size=10,
+                          color=(110, 110, 125, 255), parent="arr_canvas")
 
 
-def _draw_member(lane: str, mem, y: float) -> None:
+def _montage_runs() -> list:
+    """The montage as the composer plays it with the pins as they are now (saved or not),
+    a run per clip (its reverses inside one run): [(first, last) bar positions (floats),
+    clip name ("none": pinned to nothing), clip path]."""
+    from core.scene_doc import plain
+    it = _montage_item()
+    if it is None or not hasattr(A.host, "montage"):
+        return []
+    try:
+        segs = A.host.montage([plain(it[2])])
+    except TypeError:                                    # a host that only knows the saved montage
+        segs = A.host.montage()
+    out = []
+    for t0, t1, name, path in segs:
+        a, b = _time_to_bar(t0), _time_to_bar(t1)
+        if out and out[-1][2] == name and abs(out[-1][1] - a) < 1e-6:
+            out[-1] = (out[-1][0], b, name, path)
+        else:
+            out.append((a, b, name, path))
+    return out
+
+
+def _draw_montage(y: float) -> None:
+    """The montage's row: which clip plays where, each in its colour, named where it fits;
+    a pinned bar has a white mark, a bar pinned to nothing is dark."""
+    runs = A.runs
+    if not runs:
+        if _roomy():
+            dpg.draw_text([LABEL_W + 6, y + 6], "load the project (with its clips folder) to see which clip "
+                          "plays in each bar", size=11, color=(130, 130, 145, 255), parent="arr_canvas")
+        return
+    for a, b, name, path in runs:
+        xa, xb = max(_x_of(a), LABEL_W), min(_x_of(b), A.canvas_w)
+        if xb <= xa:
+            continue
+        fill = (40, 40, 48, 255) if name == "none" else (*arr.colour(path), 150)
+        dpg.draw_rectangle([xa, y + 2], [max(xa + 1, xb - 1), y + A.lane_h - 11], fill=fill,
+                           color=(0, 0, 0, 0), parent="arr_canvas")
+        room = int((xb - xa - 6) / 6.5)
+        if room >= 3 and _roomy():
+            dpg.draw_text([xa + 3, y + 6], name if len(name) <= room else name[:room - 1] + "~", size=11,
+                          color=(150, 150, 160, 255) if name == "none" else (10, 10, 14, 255), parent="arr_canvas")
+    for b in _pins():                                    # pinned bars: a white corner
+        x = _x_of(b)
+        if LABEL_W <= x < A.canvas_w:
+            dpg.draw_triangle([x + 1, y + 2], [x + 8, y + 2], [x + 1, y + 9], fill=(255, 255, 255, 255),
+                              color=(255, 255, 255, 255), parent="arr_canvas")
+    sel = A.sel or (None,)
+    if sel[0] == "montage" and len(sel) > 2:
+        dpg.draw_rectangle([max(_x_of(sel[1]), LABEL_W), y + 1], [_x_of(sel[2] + 1), y + A.lane_h - 10],
+                           color=(255, 255, 255, 230), thickness=2, parent="arr_canvas")
+
+
+def _draw_montage_sel(p, first: int, last: int) -> None:
+    """The montage's chosen bars: their clips, and what can be done to them."""
+    bars = f"bars {first}-{last}" if last > first else f"bar {first}"
+    dpg.add_text(f"CLIPS · {bars}", parent=p, color=LANE_COLOURS["montage"][:3])
+    pins = _pins()
+    runs = _runs_in(first, last)
+    if not runs:
+        dpg.add_text("the montage is not known yet (load the project with its clips folder)", parent=p,
+                     color=(150, 150, 160))
+    for a, b, name, path in runs[:12]:
+        pinned = any(pins.get(k) for k in range(int(a), int(np.ceil(b))))
+        dpg.add_text(f"{name}  (bars {a:.2f} to {b:.2f})" + ("  - pinned" if pinned else ""), parent=p,
+                     color=(150, 150, 160) if name == "none" else arr.colour(path))
+        if path:
+            dpg.add_text(path, parent=p, color=(130, 130, 145), wrap=700)
+    if len(runs) > 12:
+        dpg.add_text(f"... and {len(runs) - 12} more", parent=p, color=(130, 130, 145))
+    with dpg.group(horizontal=True, parent=p):
+        for _, label, fn in _montage_choices(first, last):
+            dpg.add_button(label=label, callback=lambda s, a, *, fn=fn: fn())
+    dpg.add_text("The montage draws a clip for each bar (clip_order, the seed, the triggers' cuts and "
+                 "reverses). A pin keeps a clip there (a clip picked on the left: Put); the bars around "
+                 "stay as they were drawn. A clip from another folder, or from another point, goes in the "
+                 "BG over these bars.", parent=p, color=(150, 150, 160), wrap=700)
+
+
+def _pins() -> dict:
+    """The montage's pins: bar number -> a clip's name, or "none"."""
+    it = _montage_item()
+    return {int(k): v for k, v in ((it[2].get("pins") or {}) if it else {}).items()}
+
+
+def _set_pins(first: int, last: int, value) -> None:
+    """Bars first..last pinned to ``value`` (a clip's name, "none": nothing), or (None)
+    given back to the montage's choice."""
+    it = _montage_item()
+    if it is None:
+        return
+
+    def put(spec):
+        pins = {int(k): v for k, v in (spec.get("pins") or {}).items()}
+        for b in range(first, last + 1):
+            if value is None:
+                pins.pop(b, None)
+            else:
+                pins[b] = value
+        out = {k: v for k, v in spec.items() if k != "pins"}
+        if pins:
+            out["pins"] = dict(sorted(pins.items()))
+        return out
+    _edit(it[3], (), put)
+    A.sel = ("montage", first, last)
+    _draw()
+    _draw_inspector()
+    bars = f"bars {first}-{last}" if last > first else f"bar {first}"
+    _status(f"{bars}: " + ("back to the montage's choice" if value is None else
+                           "nothing (the BG, or black)" if value == "none" else f"{value}, pinned"))
+
+
+def _montage_clips() -> list:
+    return [str(Path(x)) for x in (A.host.montage_clips() if hasattr(A.host, "montage_clips") else [])]
+
+
+def _put_in_montage(first: int, last: int) -> None:
+    """The clip picked on the left in these bars: pinned, when the montage has it (its
+    folder); else a BG block over them."""
+    if A.content is None or A.content[0] != "clip":
+        _status("pick a clip on the left (Clips) first")
+        return
+    path, start = A.content[1], A.content[2]
+    if str(Path(path)) in _montage_clips() and not start:
+        _set_pins(first, last, Path(path).stem)
+    else:
+        _to_bg(path, start, first, last)
+
+
+def _to_bg(path: str, start: float, first: int, last: int) -> None:
+    """A clip as a BG block over these bars (moved, resized and given FX like any)."""
+    item = _lane_item(arr.BG)
+    if item is None:
+        return
+    spec = arr.with_blocks({"source": "footage", "role": "background", "fit": "cover", "loop": True,
+                            "file": path}, [arr.Block(first, last, start)])
+    _edit(item[3], ("layers",), lambda ls: list(ls or []) + [spec])
+    A.sel = ("block", arr.BG, len(item[2].get("layers") or []) - 1, 0)
+    _draw()
+    _draw_inspector()
+    _status(f"{Path(path).stem} in the BG, bars {first}-{last}: over the montage there")
+
+
+def _runs_in(first: int, last: int) -> list:
+    return [u for u in A.runs if u[0] < last + 1 - 1e-6 and u[1] > first + 1e-6]
+
+
+def _run_sel(bar: int):
+    """(the selection, the clip's path) of the montage's clip playing at ``bar``'s middle:
+    the bars it plays."""
+    run = next((u for u in A.runs if u[0] <= bar + 0.5 < u[1]), None)
+    if run is None:
+        return ("montage", bar, bar), ""
+    first = max(1, int(np.floor(run[0] + 0.05)))
+    return ("montage", first, max(first, int(np.ceil(run[1] - 0.05)) - 1)), run[3]
+
+
+def _montage_actions(first: int, last: int) -> list:
+    """[(label, fn)]: what can be done to the montage's bars first..last."""
+    return [(label, fn) for label, _, fn in _montage_choices(first, last)]
+
+
+def _montage_choices(first: int, last: int) -> list:
+    """[(menu label, button label, fn)]: what can be done to the montage's bars first..last."""
+    out = []
+    bars = f"bars {first}-{last}" if last > first else f"bar {first}"
+    if A.content is not None and A.content[0] == "clip":
+        stem = Path(A.content[1]).stem
+        out.append((f"Put {stem} here ({bars})", f"Put {stem[:18]}", lambda: _put_in_montage(first, last)))
+    runs = [u for u in _runs_in(first, last) if u[2] != "none"]
+    if runs:
+        out.append((f"Nothing here ({bars}: the BG, or black) - Delete", "Nothing here",
+                    lambda: _set_pins(first, last, "none")))
+    if len({u[3] for u in runs}) == 1 and runs[0][3]:
+        path = runs[0][3]
+        out.append((f"Make {runs[0][2]} a BG block (move it, resize it, FX)", "Make it a BG block",
+                    lambda: _to_bg(path, 0.0, first, last)))
+    if any(first <= b <= last for b in _pins()):
+        out.append(("Back to the montage's choice", "Back to the montage", lambda: _set_pins(first, last, None)))
+    out.append((f"Preview {bars}", "Preview", lambda: preview_bars(first, last)))
+    return out
+
+
+def _draw_mutes(mem, y: float) -> set:
+    """The bars a member is hidden in, drawn on its row (dark, outlined in red, under its
+    name and cuts); -> those bars."""
+    hidden = set()
+    for a, b in _mutes(mem.spec):
+        hidden.update(range(a, b + 1))
+        xa, xb = max(_x_of(a), LABEL_W), _x_of(b + 1)
+        if xb <= LABEL_W:
+            continue
+        dpg.draw_rectangle([xa, y + 2], [xb, y + A.lane_h - 3], fill=(40, 16, 20, 255),
+                           color=(200, 90, 90, 220), parent="arr_canvas")
+        name_at = _name_x(mem)
+        if xb - xa > 60 and _roomy() and not xa - 1 <= name_at < xb:   # (never over its name)
+            dpg.draw_text([xb - 50, y + 2], "hidden", size=11, color=(230, 140, 140, 255), parent="arr_canvas")
+    return hidden
+
+
+def _name_x(mem) -> float:
+    """Where a member's name is written: at its first cue or block (members that never
+    meet share a row, each named where it plays), else where the row starts."""
+    cues = A.cues.get(_cue_key(mem.spec)) if mem.cued else None
+    first = _time_to_bar(cues[0][0]) if cues else mem.blocks[0].first if mem.blocks else 1
+    return max(_x_of(first), LABEL_W)
+
+
+def _draw_member(key: str, mem, y: float, until: float = None) -> None:
+    """A member on its row; ``until``: where the next one's name starts (its own stops before)."""
+    until = A.canvas_w if until is None else until
     n = _bars()
     fx = [f for f in mem.spec.get("fx") or [] if isinstance(f, dict)]
-    tag = ("GEN " if mem.kind == arr.GENERATOR else "") + mem.label
+    tag = ("GEN " if mem.kind == arr.GENERATOR and not _is_fx(key) else "") + mem.label
+    chosen = A.sel == ("block", key, mem.at, None)
     if mem.always:                                       # no blocks: the whole song
-        dpg.draw_rectangle([_x_of(1), y + LANE_H - 8], [_x_of(n + 1), y + LANE_H - 5],
-                           fill=(120, 120, 130, 160), color=(0, 0, 0, 0), parent="arr_canvas")
-        dpg.draw_text([max(_x_of(1), LABEL_W) + 4, y + 4], f"{tag} (the whole song)"[:60], size=11,
-                      color=(200, 200, 210, 255), parent="arr_canvas")
+        r, g, bb = arr.colour(mem.label)
+        dpg.draw_rectangle([max(_x_of(1), LABEL_W), y + 3], [_x_of(n + 1), y + A.lane_h - 4],
+                           fill=(r, g, bb, 70 if mem.enabled else 25),
+                           color=(255, 255, 255, 255) if chosen else (r, g, bb, 160),
+                           thickness=2 if chosen else 1, parent="arr_canvas")
+        dpg.draw_text([max(_x_of(1), LABEL_W) + 4, y + min(8, (A.lane_h - 14) / 2)], f"{tag} (the whole song)"[:60], size=11,
+                      color=(220, 220, 230, 255) if mem.enabled else (130, 130, 140, 255), parent="arr_canvas")
+    hidden = _draw_mutes(mem, y) if not mem.blocks else set()
     if mem.cued:
-        dpg.draw_text([max(_x_of(1), LABEL_W) + 4, y + 2], f"{tag} - cues (REAPER / s)"[:60], size=10,
-                      color=(170, 170, 180, 255), parent="arr_canvas")
-        for t0, t1 in A.cues.get(_cue_key(mem.spec), []):  # read-only cues, in grey
+        x = _name_x(mem)
+        room = int((min(until, A.canvas_w) - x - 8) / 7)
+        name = f"{tag} - cues (REAPER)"
+        if room >= 3 and _roomy():                       # low rows: the cues alone
+            dpg.draw_text([x + 2, y + 2], name if len(name) <= room else name[:room - 1] + "~", size=12,
+                          color=(215, 215, 225, 255), parent="arr_canvas")
+        for t0, t1 in A.cues.get(_cue_key(mem.spec), []):  # read-only cues, in grey (white: chosen; dim: hidden)
             xa, xb = _x_of(_time_to_bar(t0)), _x_of(_time_to_bar(t1))
-            dpg.draw_rectangle([xa, y + LANE_H - 14], [max(xa + 1, xb), y + LANE_H - 5],
-                               fill=(140, 140, 150, 200), color=(0, 0, 0, 0), parent="arr_canvas")
+            dim = int(_time_to_bar((t0 + t1) / 2)) in hidden
+            dpg.draw_rectangle([xa, y + A.lane_h - 14], [max(xa + 1, xb), y + A.lane_h - 5],
+                               fill=(70, 60, 64, 255) if dim else (235, 235, 245, 255) if chosen else (140, 140, 150, 200),
+                               color=(0, 0, 0, 0), parent="arr_canvas")
     for i, blk in enumerate(mem.blocks):
         xa, xb = _x_of(blk.first), _x_of(blk.last + 1)
         r, g, bb = arr.colour(blk.file or mem.spec.get("file") or mem.label)
         if not mem.enabled:
             r, g, bb = (r + 240) // 3, (g + 240) // 3, (bb + 240) // 3
-        sel = A.sel == ("block", lane, mem.at, i)
-        dpg.draw_rectangle([xa + 1, y + 3], [xb - 1, y + LANE_H - 4], fill=(r, g, bb, 230),
+        sel = A.sel == ("block", key, mem.at, i)
+        dpg.draw_rectangle([xa + 1, y + 3], [xb - 1, y + A.lane_h - 4], fill=(r, g, bb, 230),
                            color=(255, 255, 255, 255) if sel else (10, 10, 14, 255),
                            thickness=2 if sel else 1, parent="arr_canvas")
         stem = Path(blk.file).stem if blk.file else mem.label
         folder = Path(blk.file).parent.name if blk.file else ""
-        label = folder if folder and stem in ("final", "clip", "video") else stem[-14:]
+        label = (mem.label if mem.spec.get("name") else
+                 folder if folder and stem in ("final", "clip", "video") else stem[-14:])
         if blk.start:
             label += f" @{blk.start:g}s"
         if fx:
             label += f" +{len(fx)}fx"
         xt = max(xa, LABEL_W)                          # its name where it shows
-        room = int((min(xb, CANVAS_W) - xt - 6) / 6.5)
+        room = int((min(xb, A.canvas_w) - xt - 6) / 6.5)
         if room >= 3:
-            dpg.draw_text([xt + 4, y + 6], label[:room], size=11, color=(10, 10, 14, 255), parent="arr_canvas")
+            dpg.draw_text([xt + 4, y + min(6, (A.lane_h - 14) / 2)], label[:room], size=11, color=(10, 10, 14, 255), parent="arr_canvas")
         if fx:
-            dpg.draw_rectangle([xa + 2, y + LANE_H - 8], [xb - 2, y + LANE_H - 6], fill=(200, 120, 230, 255),
+            dpg.draw_rectangle([xa + 2, y + A.lane_h - 8], [xb - 2, y + A.lane_h - 6], fill=(200, 120, 230, 255),
                                color=(0, 0, 0, 0), parent="arr_canvas")
 
 
@@ -921,31 +1806,168 @@ def _density(n: int) -> list:
 
 # ----------------------------------------------------------------------- the preview
 
+def _can_put(key: str) -> bool:
+    """Something picked on the left goes on this track: a clip or a Generator on a lane, an
+    FX on an FX track."""
+    if _is_fx(key):
+        from core import catalog
+        e = catalog.by_key(A.entry) if A.entry else None
+        return e is not None and e.kind == catalog.FX
+    return A.content is not None
+
+
+def _set_span(first: int, last: int) -> None:
+    """The bars chosen: drawn over the tracks; Preview plays them."""
+    A.span = (min(first, last), max(first, last))
+    _draw()
+    _draw_inspector()
+
+
+def _sel_span():
+    """The bars of what is chosen: a block's, a cued member's cuts, the montage's bars."""
+    sel = A.sel or (None,)
+    if sel[0] == "montage" and len(sel) > 2:
+        return sel[1], sel[2]
+    if sel[0] == "block":
+        mem = _member(sel[1], sel[2])
+        if mem is not None and sel[3] is not None and sel[3] < len(mem.blocks):
+            b = mem.blocks[sel[3]]
+            return b.first, b.last
+        if mem is not None and mem.cued and _cue_bars(mem):
+            spans = _cue_bars(mem)
+            return int(spans[0][0]), int(spans[-1][1])
+    return None
+
+
+def preview_span() -> None:
+    """Preview: the chosen bars; none chosen, the first bars in view."""
+    if A.span is None:
+        first = max(1, int(A.view0))
+        preview_bars(first, min(_bars(), first + PREVIEW_BARS - 1))
+        return
+    preview_bars(*A.span)
+
+
+def on_key_space(sender, app_data) -> None:
+    if dpg.does_item_exist("arr_win") and dpg.is_item_shown("arr_win") and not _typing() and _in_window():
+        preview_span()
+
+
+
 PREVIEW_BARS = 8       # the most a block's preview renders (it is held in memory)
 
 
 def preview_bars(first: int, last: int) -> None:
-    """The studio's preview of these bars, with the arrangement as it is now (saved or
-    not), in a window of its own."""
+    """The studio's preview of these bars (the first PREVIEW_BARS of them), with the
+    arrangement as it is now (saved or not), in a window of its own that says how the
+    rendering goes, and why it failed."""
     from core.scene_doc import plain
+    if A.clip_sound:
+        set_clip_sound(False)                            # the song plays: the clip's sound stops
+    first, last = min(first, last), max(first, last)
+    A.span = (first, last)
+    bars = max(1, min(last - first + 1, PREVIEW_BARS))
+    more = f" (the first {PREVIEW_BARS} of {first}-{last})" if last - first + 1 > PREVIEW_BARS else ""
+    label = f"bars {first}-{first + bars - 1}{more}"
+    if not hasattr(A.host, "preview"):
+        _status("the preview needs the studio (arc_studio.py)")
+        return
+    state = A.host.preview_state() if hasattr(A.host, "preview_state") else "ready"
+    if state != "ready":                                 # it plays as soon as the studio can
+        why = ""
+        if state == "unloaded":
+            why = A.host.load() if hasattr(A.host, "load") else "load the project in the studio"
+        A.queued = None if why else (first, last, time.time())
+        A.previewing = None
+        # the preview before is let go (the last one asked for is the one wanted); the video's
+        # render is not
+        stopping = state == "busy" and hasattr(A.host, "cancel_preview") and A.host.cancel_preview()
+        text = (f"the preview can't start: {why}" if why else
+                f"loading the project (the song, its MIDI) first: {label} plays when it is loaded..."
+                if state in ("unloaded", "loading") else
+                f"stopping the preview before: {label} starts right after..." if stopping else
+                f"the studio is rendering the video: {label} comes when it is done...")
+        _preview_window(label, text, error=bool(why))
+        _draw()
+        return
     g = A.host.grid()
     db = getattr(g, "downbeats", None) if g is not None else None
-    if not hasattr(A.host, "preview") or db is None or not len(db):
-        _status("the preview needs the studio with the project loaded")
+    if db is None or not len(db):
+        _preview_window(label, "the preview can't start: the song has no bars (load the project)", error=True)
         return
-    bars = max(1, min(last - first + 1, PREVIEW_BARS))
     at = float(db[min(first, len(db)) - 1])
     if not A.host.preview(at, bars, [plain(s) for s in _specs()]):
-        _status("the studio is busy rendering, or the project is not loaded")
+        A.queued = (first, last, time.time())
+        _preview_window(label, f"the studio is busy: {label} comes next...")
         return
-    tex, w, h = A.host.preview_texture()
-    if not dpg.does_item_exist("arr_prev"):
-        with dpg.window(tag="arr_prev", label="Arrange preview", width=w + 16, height=h + 40, pos=(400, 120)):
-            dpg.add_image(tex, width=w, height=h)
-    dpg.configure_item("arr_prev", label=f"Arrange preview - bars {first}-{first + bars - 1}")
-    dpg.show_item("arr_prev")
+    A.queued = None
+    _preview_window(label, f"rendering {label}...")
+    A.previewing = (time.time(), False)
+    _status(f"previewing {label}: rendering...")
+    _draw()
+
+
+def _preview_window(label: str, text: str, error: bool = False) -> None:
+    """The preview's window (made again each time): what goes on, the frames, Stop."""
+    got = A.host.preview_texture() if hasattr(A.host, "preview_texture") else None
+    if got is None:
+        _status(text)
+        return
+    tex, w, h = got[:3]
+    fw, fh = got[3] if len(got) > 3 else (w, h)          # the part of it the frame fills
+    k = 480.0 / max(1, fh) if fh > fw else 1.0           # a portrait frame shown 480 high
+    show_w, show_h = int(fw * k), int(fh * k)
+    uv0 = [(w - fw) / 2 / w, (h - fh) / 2 / h]
+    uv1 = [1 - uv0[0], 1 - uv0[1]]
+    if dpg.does_item_exist("arr_prev"):
+        dpg.delete_item("arr_prev")
+    with dpg.window(tag="arr_prev", label="Arrange preview", width=max(300, show_w + 20), height=show_h + 110,
+                    pos=(12, 250), on_close=lambda: A.host.stop_preview() if hasattr(A.host, "stop_preview") else None):
+        dpg.add_text("", tag="arr_prev_text", wrap=max(280, show_w))
+        dpg.add_image(tex, width=show_w, height=show_h, uv_min=uv0, uv_max=uv1)
+        if hasattr(A.host, "stop_preview"):
+            dpg.add_button(label="Stop", callback=lambda: A.host.stop_preview())
+    dpg.configure_item("arr_prev", label=f"Arrange preview - {label}")
+    dpg.set_value("arr_prev_text", text)
+    dpg.configure_item("arr_prev_text", color=(240, 120, 110) if error else (200, 200, 210))
     dpg.focus_item("arr_prev")
-    _status(f"previewing bars {first}-{first + bars - 1} (rendering...)")
+    _status(text)
+
+
+def _watch_preview() -> None:
+    """Once a frame while a preview is made: its progress, then that it plays or why it failed;
+    bars waiting for the studio (loading, or making another preview) start when it can."""
+    if A.queued is not None and hasattr(A.host, "preview_state"):
+        first, last, asked = A.queued
+        state = A.host.preview_state()
+        if state == "ready":
+            preview_bars(first, last)
+        elif state == "unloaded" and time.time() - asked > 3.0:   # the load gave up
+            A.queued = None
+            status = A.host.preview_progress()[1] if hasattr(A.host, "preview_progress") else ""
+            text = "the project could not be loaded: " + (status or "see the studio's log")
+            text = text.replace("—", "-").replace("…", "...")
+            if dpg.does_item_exist("arr_prev_text"):
+                dpg.set_value("arr_prev_text", text)
+                dpg.configure_item("arr_prev_text", color=(240, 120, 110))
+            _status(text)
+        return
+    if A.previewing is None or not hasattr(A.host, "preview_progress"):
+        return
+    asked, seen = A.previewing
+    busy, status, error = A.host.preview_progress()
+    status = status.replace("—", "-").replace("…", "...")   # glyphs the window's font lacks
+    text = status
+    if busy:
+        A.previewing = (asked, True)
+    elif seen or time.time() - asked > 3.0:              # it started (a thread) and is over
+        A.previewing = None
+        text = f"the preview failed: {error}" if error else status
+        _status(text)
+    if dpg.does_item_exist("arr_prev_text"):
+        dpg.set_value("arr_prev_text", text)
+        dpg.configure_item("arr_prev_text", color=(240, 120, 110) if error and A.previewing is None else
+                           (200, 200, 210))
 
 
 # ----------------------------------------------------------------------- the inspector
@@ -990,15 +2012,18 @@ def _draw_fx_list(p, uid, path: tuple, title: str) -> None:
         here = path + (j,)
         with dpg.group(horizontal=True, parent=p):
             dpg.add_checkbox(default_value=f.get("enabled", True) is not False,
-                             callback=lambda s, v, here=here: _toggle(uid, here))
+                             callback=lambda s, v, *, here=here: _toggle(uid, here))
             dpg.add_text(f"{j + 1}. {arr.label_of(f)}", color=(230, 230, 240))
             dpg.add_text("bars")
             dpg.add_input_text(default_value=_bars_text(f), width=110, hint="all", on_enter=True,
-                               callback=lambda s, v, here=here: _set_fx_bars(uid, here, v))
-            dpg.add_button(label="plugin", callback=lambda s, a, here=here: open_plugin(uid, here))
-            dpg.add_button(label="^", callback=lambda s, a, j=j: _swap(uid, path, j, j - 1))
-            dpg.add_button(label="v", callback=lambda s, a, j=j: _swap(uid, path, j, j + 1))
-            dpg.add_button(label="x", callback=lambda s, a, j=j: _edit(
+                               callback=lambda s, v, *, here=here: _set_fx_bars(uid, here, v))
+            if f.get("source") == SAM:
+                dpg.add_button(label="seeds", callback=lambda s, a, *, here=here: open_sam(uid, here))
+            else:
+                dpg.add_button(label="plugin", callback=lambda s, a, *, here=here: open_plugin(uid, here))
+            dpg.add_button(label="^", callback=lambda s, a, *, j=j: _swap(uid, path, j, j - 1))
+            dpg.add_button(label="v", callback=lambda s, a, *, j=j: _swap(uid, path, j, j + 1))
+            dpg.add_button(label="x", callback=lambda s, a, *, j=j: _edit(
                 uid, path, lambda ls, j=j: [x for i, x in enumerate(ls) if i != j]))
 
 
@@ -1032,25 +2057,45 @@ def _draw_inspector() -> None:
     dpg.delete_item("arr_inspector", children_only=True)
     p = "arr_inspector"
     sel = A.sel
+    got = _sel_span()
+    if got is not None and got != A.span:                # choosing a thing chooses its bars
+        A.span = got
+        if dpg.does_item_exist("arr_prev_btn"):
+            dpg.configure_item("arr_prev_btn", label=f"Preview bars {got[0]}-{got[1]} (Space)")
+    if sel is None and A.span is not None and A.doc is not None:
+        first, last = A.span
+        dpg.add_text(f"bars {first}-{last} chosen", parent=p, color=(235, 235, 245))
+        with dpg.group(horizontal=True, parent=p):
+            dpg.add_button(label=f"Preview bars {first}-{min(last, first + PREVIEW_BARS - 1)} (Space)",
+                           callback=preview_span)
+            dpg.add_button(label="Choose none", callback=lambda: (setattr(A, "span", None), _draw(),
+                                                                  _draw_inspector()))
+        dpg.add_text("Pick a clip, a Generator or an FX on the left and drag across a track to put it there; "
+                     "click a block to choose it.", parent=p, color=(130, 130, 150), wrap=700)
+        return
     if sel is None or A.doc is None:
         dpg.add_text("pick a clip (Clips) or a Generator (Generators), then drag across the BG or the FG to "
-                     "put it there · drag a block to move it, its ends to resize it · right-click for FX "
-                     "(on a block, a lane, the master) · click a lane's name for its FX · Ctrl+Z undo",
+                     "put it there; an FX (FX), across an FX track · click anything to choose it, drag it to "
+                     "move it, Shift+drag its ends to resize it, Delete deletes it · right-click: its menu · double "
+                     "click: its plugin · Ctrl+Z undo",
                      parent=p, color=(130, 130, 150), wrap=700)
         return
     if sel[0] == "master":
         _draw_master(p)
+    elif sel[0] == "montage" and len(sel) > 2:
+        _draw_montage_sel(p, sel[1], sel[2])
     elif sel[0] == "montage":
         dpg.add_text("CLIPS: the clip montage (the project's clips folder, cut by the triggers). It shows "
-                     "wherever the BG has nothing; the BG's FX work on it too.", parent=p, wrap=700,
-                     color=(150, 150, 160))
+                     "wherever the BG has nothing; the BG's FX work on it too. Click a clip (or drag across "
+                     "bars) to choose it: put another there, nothing, or make it a BG block.", parent=p,
+                     wrap=700, color=(150, 150, 160))
     elif sel[0] == "lane":
         _draw_lane(p, sel[1])
     elif sel[0] == "block":
         mem = _member(sel[1], sel[2])
         if mem is None:
-            A.sel = ("lane", sel[1])
-            _draw_lane(p, sel[1])
+            A.sel = ("master",) if sel[1] == MASTER else ("lane", _owner(sel[1]))
+            _draw_inspector()
         else:
             _draw_block(p, sel[1], mem, sel[3])
 
@@ -1070,7 +2115,7 @@ def _draw_lane(p, lane: str) -> None:
 
 
 def _draw_master(p) -> None:
-    dpg.add_text("MASTER: over everything, in order (the last on top)", parent=p, color=LANE_COLOURS["master"][:3])
+    dpg.add_text("MASTER: over everything, in order (the last on top)", parent=p, color=LANE_COLOURS[MASTER][:3])
     with dpg.group(horizontal=True, parent=p):
         dpg.add_button(label="Add FX...", callback=lambda: _menu_at(lambda: _catalog_menu("Add FX", "fx", add_master)))
     for it in _master_items():
@@ -1078,25 +2123,54 @@ def _draw_master(p) -> None:
         kind = arr.kind_of(spec)
         with dpg.group(horizontal=True, parent=p):
             dpg.add_checkbox(default_value=spec.get("enabled", True) is not False,
-                             callback=lambda s, v, uid=uid: _toggle(uid, ()))
+                             callback=lambda s, v, *, uid=uid: _toggle(uid, ()))
             dpg.add_text(("" if kind == arr.FX else "GEN " if kind == arr.GENERATOR else "CLIP ")
                          + arr.label_of(spec), color=(230, 230, 240))
             dpg.add_text("bars")
             dpg.add_input_text(default_value=_bars_text(spec), width=110, hint="all", on_enter=True,
-                               callback=lambda s, v, uid=uid: _set_fx_bars(uid, (), v))
+                               callback=lambda s, v, *, uid=uid: _set_fx_bars(uid, (), v))
             if kind != arr.CLIP:
-                dpg.add_button(label="plugin", callback=lambda s, a, uid=uid: open_plugin(uid, ()))
-            dpg.add_button(label="^", callback=lambda s, a, uid=uid: _move_master(uid, -1))
-            dpg.add_button(label="v", callback=lambda s, a, uid=uid: _move_master(uid, 1))
-            dpg.add_button(label="x", callback=lambda s, a, uid=uid: _delete_master(uid))
+                dpg.add_button(label="plugin", callback=lambda s, a, *, uid=uid: open_plugin(uid, ()))
+            dpg.add_button(label="^", callback=lambda s, a, *, uid=uid: _move_master(uid, -1))
+            dpg.add_button(label="v", callback=lambda s, a, *, uid=uid: _move_master(uid, 1))
+            dpg.add_button(label="x", callback=lambda s, a, *, uid=uid: _delete_master(uid))
 
 
 def _draw_block(p, lane: str, mem, bk) -> None:
-    uid = _lane_item(lane)[3]
+    """A member of a track (``lane``: its key): its blocks' bars, on/off, its plugin, its
+    place in its chain (an FX), its FX (a lane's member), a character's place in the frame."""
+    uid, here = _where(lane, mem.at)
     spec = mem.spec
-    what = "Generator" if mem.kind == arr.GENERATOR else "clip" if lane == arr.BG else "character"
-    dpg.add_text(f"{lane} · {what} {mem.label}" + ("" if mem.enabled else " (off)"), parent=p,
+    what = ("FX" if mem.kind == arr.FX else "Generator" if mem.kind == arr.GENERATOR else
+            "character" if lane == arr.FG else "clip")
+    dpg.add_text(f"{TRACK_TITLES[lane]} · {what} {mem.label}" + ("" if mem.enabled else " (off)"), parent=p,
                  color=LANE_COLOURS[lane][:3])
+    with dpg.group(horizontal=True, parent=p):
+        dpg.add_text("name")
+        dpg.add_input_text(default_value=str(spec.get("name") or ""), width=260, hint=arr.label_of(
+            {k: v for k, v in spec.items() if k != "name"}), on_enter=True,
+            callback=lambda s, v: _rename(lane, mem.at, v))
+        dpg.add_text("(Enter; empty: its file's or its kind's)", color=(120, 120, 135))
+    if spec.get("file"):
+        dpg.add_text(str(spec["file"]), parent=p, color=(130, 130, 145), wrap=700)
+    if mem.cued:
+        _draw_cues_info(p, mem)
+    elif mem.always:
+        dpg.add_text("it plays the whole song: give it bars here", parent=p, color=(150, 150, 160))
+    if (mem.cued or mem.always) and mem.kind == arr.CLIP:  # shown where it plays, but for these bars
+        with dpg.group(horizontal=True, parent=p):
+            dpg.add_text("hidden in bars")
+            dpg.add_input_text(default_value=", ".join(f"{a}-{b}" if b > a else str(a) for a, b in _mutes(spec)),
+                               width=160, hint="none", on_enter=True,
+                               callback=lambda s, v: _set_mutes(lane, mem.at, v))
+            dpg.add_text("(like 9-12, 30-33; Enter; or right-click a cut: Hide) - it stays in sync",
+                         color=(120, 120, 135))
+    if mem.kind != arr.CLIP:                             # its windows, as text (also: none, the whole song)
+        with dpg.group(horizontal=True, parent=p):
+            dpg.add_text("plays in bars")
+            dpg.add_input_text(default_value=_bars_text(spec), width=160, hint="all the song", on_enter=True,
+                               callback=lambda s, v: _set_fx_bars(uid, here, v))
+            dpg.add_text("(like 9-12, 30-33; Enter)", color=(120, 120, 135))
     if bk is not None and bk < len(mem.blocks):
         b = mem.blocks[bk]
 
@@ -1143,12 +2217,20 @@ def _draw_block(p, lane: str, mem, bk) -> None:
             blk = mem.blocks[bk]
             dpg.add_button(label=f"Preview bars {blk.first}-{min(blk.last, blk.first + PREVIEW_BARS - 1)}",
                            callback=lambda: preview_bars(blk.first, blk.last))
-        dpg.add_checkbox(label="on", default_value=mem.enabled, callback=lambda: _toggle(uid, ("layers", mem.at)))
+        dpg.add_checkbox(label="on", default_value=mem.enabled, callback=lambda: _toggle(uid, here))
         if mem.kind != arr.CLIP:
-            dpg.add_button(label="Open plugin...", callback=lambda: open_plugin(uid, ("layers", mem.at)))
-        if bk is not None:
+            dpg.add_button(label="Open plugin...", callback=lambda: open_plugin(uid, here))
+        if _is_fx(lane):
+            dpg.add_button(label="earlier", callback=lambda: _reorder(lane, mem.at, -1))
+            dpg.add_button(label="later", callback=lambda: _reorder(lane, mem.at, 1))
+        if bk is not None and len(mem.blocks) > 1:
             dpg.add_button(label="delete this block", callback=lambda: _delete_block(lane, mem.at, bk))
-        dpg.add_button(label=f"delete {mem.label[:20]} (all its blocks)", callback=lambda: _remove_member(lane, mem.at))
+        dpg.add_button(label=f"delete {mem.label[:20]}" + (" (all its blocks)" if len(mem.blocks) > 1 else ""),
+                       callback=lambda: _remove_member(lane, mem.at))
+    if _is_fx(lane):
+        dpg.add_text("Its chain works in order, top to bottom of the list: earlier/later move it. Delete "
+                     "deletes it; drag it, or its ends, on its track.", parent=p, color=(120, 120, 135), wrap=700)
+        return
     if mem.kind == arr.CLIP and lane == arr.FG:
         _draw_placement(p, lane, mem)
     if mem.kind == arr.GENERATOR and lane == arr.BG:
@@ -1166,7 +2248,36 @@ def _draw_block(p, lane: str, mem, bk) -> None:
             else:
                 dpg.add_text("(follows the music: plugin)", color=(200, 160, 100))
     dpg.add_separator(parent=p)
-    _draw_fx_list(p, uid, ("layers", mem.at, "fx"), f"FX on {mem.label[:24]} only, in order:")
+    _draw_fx_list(p, uid, here + ("fx",), f"FX on {mem.label[:24]} only, in order:")
+
+
+def _rename(key: str, at: int, name: str) -> None:
+    mem = _member(key, at)
+    if mem is not None:
+        spec = {k: v for k, v in mem.spec.items() if k != "name"}
+        _set_member(key, at, {**spec, "name": name.strip()} if name.strip() else spec)
+
+
+def _draw_cues_info(p, mem) -> None:
+    """Where a cued member's cuts come from, and when they play: they are edited there."""
+    cues = mem.spec.get("cues")
+    if isinstance(cues, dict) and cues.get("reaper"):
+        tracks = cues.get("tracks")
+        where = (f"cut by the REAPER project {Path(str(cues['reaper'])).name}"
+                 + (f", track(s) {', '.join(map(str, tracks))}" if tracks else ""))
+    elif isinstance(cues, (str, Path)):
+        where = f"cut by the cue file {cues}"
+    else:
+        where = f"cut by {len(cues or [])} cue(s) written in the scene"
+    spans = _cue_bars(mem)
+    when = (f"{len(spans)} cuts, from bar {int(spans[0][0])} to bar {int(spans[-1][1])}"
+            if spans else "its cuts are still being read (a REAPER glue takes a moment)")
+    dpg.add_text(f"{where}: {when}. Edit the cuts there (in REAPER); here, its place in the frame, "
+                 "its cutout and its FX.", parent=p, color=(200, 200, 215), wrap=700)
+    if spans:
+        first, last = int(spans[0][0]), int(spans[-1][1])
+        dpg.add_button(label=f"Preview bars {first}-{min(last, first + PREVIEW_BARS - 1)}", parent=p,
+                       callback=lambda: preview_bars(first, last))
 
 
 def _draw_placement(p, lane: str, mem) -> None:
@@ -1189,6 +2300,22 @@ def _draw_placement(p, lane: str, mem) -> None:
                       callback=put("fit", str))
         dpg.add_checkbox(label="flip", default_value=bool(spec.get("flip", False)), callback=put("flip", bool))
         dpg.add_checkbox(label="loop", default_value=bool(spec.get("loop", False)), callback=put("loop", bool))
+    j = _sam_fx_of(mem)
+    if j is not None:                                    # cut out by its SAM2 FX (at the render)
+        from core.video import sam_cutout
+        from core.scene_doc import plain
+        cfg = sam_cutout.config(plain(spec["fx"][j]))
+        seeds = cfg["seeds"]
+        how = "SAM2 finds the objects" if seeds == "auto" else f"{len(seeds.get('objects') or [])} object(s) seeded"
+        done = sam_cutout.cached(str(spec.get("file")), cfg) if spec.get("file") else None
+        with dpg.group(horizontal=True, parent=p):
+            dpg.add_text(f"cut out by SAM2 ({how}): " + ("cached, the renders read it" if done else
+                                                         "made at the next preview or render, once"),
+                         color=(150, 190, 150))
+            uid, here = _where(lane, mem.at)
+            dpg.add_button(label="seeds...", callback=lambda: open_sam(uid, here + ("fx", j)))
+        _draw_spill(p, lane, mem)
+        return
     with dpg.group(horizontal=True, parent=p):
         cut = spec.get("cutout") or {}
         track = cut.get("track") if isinstance(cut, dict) else cut
@@ -1208,6 +2335,12 @@ def _draw_placement(p, lane: str, mem) -> None:
                              callback=lambda s, v: _set_member(lane, mem.at, {**_member(lane, mem.at).spec, "cutout": {
                                  **{a: b for a, b in cut.items() if a not in ("drop", "objects")},
                                  **({"drop": [1]} if v else {})}}))
+    _draw_spill(p, lane, mem)
+
+
+def _draw_spill(p, lane: str, mem) -> None:
+    """A character with FX: may they spill outside its figure."""
+    spec = mem.spec
     if spec.get("fx"):
         dpg.add_checkbox(label="its FX may spill outside the figure (trails, glow, split edges)", parent=p,
                          default_value=bool(spec.get("spill", False)),
@@ -1338,6 +2471,12 @@ class PluginTarget:
 def open_plugin(uid, at: tuple = ()) -> None:
     """A Generator's or FX's window: each parameter with its value and a Link to the music.
     ``at``: where the layer is in the top-level one ``uid`` (a lane's member, an FX of a list)."""
+    from core.scene_doc import get_path
+    it = _item(uid)
+    spec = get_path(it[2], tuple(at)) if it is not None and at else it[2] if it is not None else None
+    if isinstance(spec, dict) and spec.get("source") == SAM:
+        open_sam(uid, tuple(at))
+        return
     A.plugin, A.plugin_at = uid, tuple(at)
     if not dpg.does_item_exist("arr_plugin"):
         with dpg.window(tag="arr_plugin", width=560, height=640, pos=(560, 60), on_close=_plugin_closed):
@@ -1425,7 +2564,7 @@ def _draw_plugin() -> None:
                 if numeric or (value is None and prm.knob):
                     shown = float(value) if numeric else float(prm.default)
                     dpg.add_input_float(default_value=shown, width=-1, step=0, format="%.4g", on_enter=True,
-                                        callback=lambda s, v, path=path: set_param(uid, path, v))
+                                        callback=lambda s, v, *, path=path: set_param(uid, path, v))
                 elif value is None:
                     dpg.add_text("-" if prm.default is None else str(prm.default), color=(120, 120, 130))
                 else:
@@ -1434,13 +2573,13 @@ def _draw_plugin() -> None:
                                  color=(230, 210, 140) if sig else (170, 210, 170))
                 with dpg.group(horizontal=True):
                     if _is_trigger(prm.name, value):         # who plays: a track, notes, a stem
-                        dpg.add_button(label="Who plays", callback=lambda s, a, path=path: _link(
+                        dpg.add_button(label="Who plays", callback=lambda s, a, *, path=path: _link(
                             uid, path, 0.0, "trigger"))
                     elif prm.knob or (isinstance(value, dict) and form_of(plain(value)) is not None):
                         dpg.add_button(label="Link" if not isinstance(value, dict) else "Edit",
-                                       callback=lambda s, a, path=path, d=prm.default: _link(uid, path, d))
+                                       callback=lambda s, a, *, path=path, d=prm.default: _link(uid, path, d))
                     if value is not None:
-                        dpg.add_button(label="x", callback=lambda s, a, path=path: set_param(uid, path, None))
+                        dpg.add_button(label="x", callback=lambda s, a, *, path=path: set_param(uid, path, None))
                         with dpg.tooltip(dpg.last_item()):
                             dpg.add_text("back to its default")
 
@@ -1484,12 +2623,134 @@ def _status(msg: str) -> None:
 
 
 def btn_list() -> None:
+    """The folder's clips, each with its picture (made in the background, kept) and name."""
     folder = dpg.get_value("arr_folder")
     pattern = dpg.get_value("arr_filter")
     A.clips = arr.list_clips(folder, pattern)
-    names = [p.relative_to(folder).as_posix() for p in A.clips]
-    dpg.configure_item("arr_list", items=names)
-    _status(f"{len(names)} clip(s) in {folder}" + (f" matching '{pattern}'" if pattern else ""))
+    dpg.delete_item("arr_list", children_only=True)
+    A.list_items, A.list_names, A.list_pics = {}, {}, {}
+    for p in A.clips:
+        path = str(p)
+        with dpg.group(horizontal=True, parent="arr_list"):
+            pic = dpg.add_image(A.covers.get(path, "arr_cover_blank"), width=COVER, height=COVER)
+            name = dpg.add_selectable(label=_list_label(p.relative_to(folder).as_posix()), height=COVER,
+                                      callback=lambda *_: _mark_chosen())
+        for row in (pic, name):
+            dpg.bind_item_handler_registry(row, "arr_list_handler")
+            A.list_items[row] = path
+        A.list_names[name] = path
+        A.list_pics.setdefault(path, []).append(pic)
+    _mark_chosen()
+    if A.clips:
+        _remember(clips_folder=str(Path(folder).resolve()))
+    _make_covers([str(p) for p in A.clips[:COVERS_MAX] if str(p) not in A.covers])
+    _status(f"{len(A.clips)} clip(s) in {folder}" + (f" matching '{pattern}'" if pattern else "")
+            + " · drag one onto the BG, the FG or CLIPS (or drop one from the Explorer there)")
+
+
+def _remember(**values) -> None:
+    """Kept for the next time the window opens (STATE_FILE)."""
+    import json
+    got = _remembered()
+    got.update(values)
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.write_text(json.dumps(got, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _remembered() -> dict:
+    import json
+    try:
+        got = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return got if isinstance(got, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _list_label(name: str, seconds=None) -> str:
+    """A clip's name in the list, in lines beside its picture, and how long it plays."""
+    lines = []
+    while name and len(lines) < 3:
+        cut = len(name) if len(name) <= NAME_CHARS else \
+            max((name.rfind(c, 0, NAME_CHARS) + 1 for c in "_-. /"), default=0) or NAME_CHARS
+        if cut < NAME_CHARS // 2:                        # nowhere good to break: a full line
+            cut = min(len(name), NAME_CHARS)
+        lines.append(name[:cut])
+        name = name[cut:]
+    if seconds:
+        lines.append(f"{seconds:.1f} s")
+    return "\n".join(lines)
+
+
+def _make_covers(paths: list) -> None:
+    """Each clip's picture (and length), made in the background (cached on disk)."""
+    A.covers_gen += 1
+    if not paths:
+        return
+
+    def run(gen=A.covers_gen):
+        import cv2
+        for path in paths:
+            if A.covers_gen != gen:                      # another list since
+                return
+            try:
+                png = arr.cover(path, COVER)
+                seconds = arr.duration(path) if Path(path).suffix.lower() in arr.VIDEOS else 0.0
+            except Exception:                            # a clip that can't be read: no picture
+                continue
+            img = cv2.imread(str(png), cv2.IMREAD_COLOR) if png else None
+            A.covers_ready.append((gen, path, _thumb_rgba(img, COVER), seconds))
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _show_covers() -> None:
+    """The pictures made since the last frame, put in the list (on the main thread)."""
+    while A.covers_ready:
+        gen, path, rgba, seconds = A.covers_ready.pop(0)
+        if path not in A.covers:
+            A.covers[path] = dpg.add_static_texture(COVER, COVER, rgba, parent="arr_covers")
+        for pic in A.list_pics.get(path, []):
+            if dpg.does_item_exist(pic):
+                dpg.configure_item(pic, texture_tag=A.covers[path])
+        if gen == A.covers_gen and seconds:
+            folder = dpg.get_value("arr_folder") if dpg.does_item_exist("arr_folder") else ""
+            for name, p in A.list_names.items():
+                if p == path and dpg.does_item_exist(name):
+                    try:
+                        shown = Path(p).relative_to(folder).as_posix()
+                    except ValueError:
+                        shown = Path(p).name
+                    dpg.configure_item(name, label=_list_label(shown, seconds))
+
+
+def _mark_chosen() -> None:
+    """The list shows the chosen clip (a selectable flips itself when clicked: put back)."""
+    for row, path in A.list_names.items():
+        if dpg.does_item_exist(row):
+            dpg.set_value(row, path == A.clip)
+
+
+def on_list_press(sender, app_data) -> None:
+    """The mouse goes down on a clip in the list: it is chosen (and plays), and dragging it
+    onto a lane puts it there."""
+    path = A.list_items.get(app_data[1]) if isinstance(app_data, (list, tuple)) else None
+    if path is None:
+        return
+    if path != A.clip:
+        _choose_clip(path, 0.0)
+    _start_clip_drag()
+
+
+def on_picture_press(sender, app_data) -> None:
+    """The mouse goes down on the playing clip: dragged onto a lane, it goes there."""
+    if A.clip:
+        _start_clip_drag()
+
+
+def _start_clip_drag() -> None:
+    A.clip_drag = (A.clip, A.start, max(0.0, (A.clip_len or 0.0) - A.start))
 
 
 def _pick_folder(sender, app_data) -> None:
@@ -1499,18 +2760,13 @@ def _pick_folder(sender, app_data) -> None:
         btn_list()
 
 
-def on_pick_clip(sender, name) -> None:
-    folder = dpg.get_value("arr_folder")
-    _choose_clip(str(Path(folder) / name), 0.0)
-
-
 def _show_content() -> None:
     from core import catalog
     if not dpg.does_item_exist("arr_content"):
         return
     c = A.content
-    text = ("drag on BG or FG puts: " + (f"clip {Path(c[1]).name} @{c[2]:g}s" if c[0] == "clip"
-                                         else f"Generator {catalog.by_key(c[1]).label}")) if c else \
+    text = ("drag on BG or FG puts: " + (f"clip {Path(c[1]).name} @{c[2]:g}s (on CLIPS: Put it there)"
+                                         if c[0] == "clip" else f"Generator {catalog.by_key(c[1]).label}")) if c else \
         "pick a clip or a Generator to put it in a lane"
     dpg.set_value("arr_content", text)
 
@@ -1524,56 +2780,312 @@ def _choose_clip(path: str, start: float) -> None:
     mask = arr.find_mask_track(A.clip)
     dpg.set_value("arr_clip_info", f"{Path(A.clip).name} · {A.clip_len:.1f} s"
                   + (f" · mask: {Path(mask).name}" if mask else " · no mask track"))
-    A.want_thumb = (A.clip, A.start, 0.0)
     A.content = ("clip", A.clip, A.start)
     _show_content()
+    _mark_chosen()
+    _play_clip(A.clip, A.start)
 
 
 def on_from(sender, value) -> None:
     A.start = float(value)
     if A.clip:
-        A.want_thumb = (A.clip, A.start, time.time())
+        A.clip_restart = time.time()                     # it plays from there once "from" rests
         A.content = ("clip", A.clip, A.start)
         _show_content()
 
 
 def btn_segment() -> None:
-    """SAM2 on the chosen clip (segment_video.py, on the GPU) into render_output/footage."""
-    if not A.clip or A.busy:
+    """The chosen clip's character cut out: the SAM2 cutout FX on its member in the FG (its
+    seeds window opens); SAM2 runs at the next preview or render, once (then cached)."""
+    if not A.clip:
+        _status("choose the clip first: its block in the FG (or the list)")
         return
-    weights = os.environ.get("ARC_SAM2_WEIGHTS") or next((w for w in SAM2_DEFAULTS if Path(w).is_dir()), None)
-    if not weights:
-        _status("SAM2 weights not found: set ARC_SAM2_WEIGHTS")
+    name = Path(A.clip).name
+    mem = next((m for m in A.members.get(arr.FG, []) if m.spec.get("file")
+                and Path(str(m.spec["file"])).name == name), None)
+    if mem is None:
+        _status(f"{name} is not in the FG: drag it there first, then cut it out")
         return
-    try:
-        used = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader"],
-                              capture_output=True, text=True, timeout=10).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        used = "?"
-    clip, out = A.clip, arr.mask_folder_for(A.clip)
-    A.busy = True
-    _status(f"SAM2 on {Path(clip).name} (GPU now: {used})…")
+    uid, here = _where(arr.FG, mem.at)
+    j = _sam_fx_of(mem)
+    if j is None:
+        add_fx(uid, here + ("fx",), SAM)
+    else:
+        open_sam(uid, here + ("fx", j))
 
-    def run():
-        cmd = [sys.executable, "segment_video.py", "--video", clip, "--output", out, "--start-time", "0",
-               "--sam2-weights", weights, "--max-objects", "4", "--cuts", "detect", "--preview"]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        A.busy = False
-        if proc.returncode == 0:
-            A.host.log(f"Arrange: mask track of {Path(clip).name} -> {out}")
-            _status(f"segmented: {out} (its preview: {out}_preview.mp4)")
-            item = _lane_item(arr.FG)                        # the characters of this clip get cut out
-            if item is not None:
-                def cut(layers):
-                    return [{**m, "cutout": {"track": out, "feather": 2}}
-                            if isinstance(m, dict) and m.get("source") == "footage" and not m.get("cutout")
-                            and Path(str(m.get("file", ""))).name == Path(clip).name else m
-                            for m in layers or []]
-                A.pending = (item[3], cut)                     # done on the main thread (tick)
-            A.relane = True
-        else:
-            _status(f"SAM2 failed: {proc.stderr.strip()[-200:]}")
-    threading.Thread(target=run, daemon=True).start()
+
+# ----------------------------------------------------------------------- the SAM2 seeds window
+
+SAM = "sam_cutout"
+SAM_VIEW = 480         # the seeds window's picture, a side
+SAM_MODES = ("auto: SAM2 finds the objects by itself (as always)", "my seeds: boxes and points on a frame")
+SAM_TOOLS = ("box", "+ point (keep this)", "- point (leave this out)")
+SAM_KEEPS = ("the figures (not a backdrop SAM2 took for an object)", "every object", "all but object 1")
+SAM_NEAR = 0.04        # 0..1 of the frame: a right click takes away a seed this near
+
+
+def _sam_fx_of(mem):
+    """Where a member's SAM2 cutout FX is in its ``fx:``, or None."""
+    for j, f in enumerate(mem.spec.get("fx") or []):
+        if isinstance(f, dict) and f.get("source") == SAM:
+            return j
+    return None
+
+
+def open_sam(uid, path: tuple, new: bool = False) -> None:
+    """The SAM2 cutout FX at ``path`` in the layer ``uid``: how SAM2 finds what to cut out of
+    its clip. By itself (as always: the default), or seeds of one's own: boxes and points
+    (+ keep, - leave out) per object, on a frame of the clip (the one its block starts on).
+    ``new``: just added (Cancel takes it away again)."""
+    from core.scene_doc import get_path, plain
+    from core.video import sam_cutout
+    it = _item(uid)
+    path = tuple(path)
+    fx = get_path(it[2], path) if it is not None else None
+    owner = get_path(it[2], path[:-2]) if it is not None and len(path) >= 2 and path[-2] == "fx" else None
+    clip = owner.get("file") if isinstance(owner, dict) and owner.get("source") == "footage" else None
+    if not isinstance(fx, dict) or not clip:
+        _status("the SAM2 cutout works on a clip: add it to a character's FX (its block in the FG)")
+        return
+    cfg = sam_cutout.config(plain(fx))
+    blocks = plain(owner).get("blocks") or []
+    start = float(blocks[0].get("from", 0.0)) if blocks and isinstance(blocks[0], dict) else 0.0
+    seeds = cfg["seeds"] if isinstance(cfg["seeds"], dict) else None
+    objects = [{"box": list(o["box"]) if o.get("box") else None, "points": [list(q) for q in o.get("points") or []]}
+               for o in (seeds or {}).get("objects") or []] or [{"box": None, "points": []}]
+    A.sam = {"uid": uid, "path": path, "clip": str(clip), "new": new, "objects": objects, "obj": 0,
+             "drag": None, "rect": (0.0, 0.0, float(SAM_VIEW), float(SAM_VIEW)), "start": start,
+             "kept": {k: v for k, v in plain(fx).items() if k in ("enabled", "grow", "objects")}}
+    dur = arr.duration(str(clip))
+    dpg.configure_item("arr_sam_at", max_value=max(0.01, dur))
+    dpg.set_value("arr_sam_at", float(seeds.get("at", start)) if seeds else min(start, dur))
+    dpg.set_value("arr_sam_mode", SAM_MODES[1 if seeds else 0])
+    dpg.set_value("arr_sam_max", int(cfg["max_objects"]))
+    dpg.set_value("arr_sam_gran", str(cfg["granularity"]))
+    dpg.set_value("arr_sam_reseed", float(cfg["reseed"]))
+    dpg.set_value("arr_sam_keep", SAM_KEEPS[2 if cfg.get("drop") == [1] else 1 if cfg.get("keep") == "all" else 0])
+    dpg.set_value("arr_sam_feather", int(cfg.get("feather", 2)))
+    dpg.set_value("arr_sam_tool", SAM_TOOLS[0])
+    dpg.set_value("arr_sam_clip", f"{Path(clip).name}: the frame its block starts on is {start:g} s into it")
+    dpg.configure_item("arr_sam_win", label=f"SAM2 cutout - {Path(clip).name}", show=True)
+    _sam_objects()
+    on_sam_mode()
+    _sam_frame(dpg.get_value("arr_sam_at"))
+    dpg.focus_item("arr_sam_win")
+
+
+def _sam_frame(t: float) -> None:
+    """The clip's frame at ``t`` s in the window's picture (its shape kept)."""
+    import cv2
+    img = None
+    cap = cv2.VideoCapture(A.sam["clip"])
+    if cap.isOpened():
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, float(t)) * 1000.0)
+        ok, img = cap.read()
+        img = img if ok else None
+    cap.release()
+    if img is not None:
+        h, w = img.shape[:2]
+        k = SAM_VIEW / max(h, w)
+        A.sam["rect"] = ((SAM_VIEW - w * k) / 2, (SAM_VIEW - h * k) / 2, w * k, h * k)
+    dpg.set_value("arr_sam_tex", _thumb_rgba(img, SAM_VIEW))
+    _sam_draw()
+
+
+def _sam_seeding() -> bool:
+    return dpg.get_value("arr_sam_mode") == SAM_MODES[1]
+
+
+def _sam_to_view(u: float, v: float) -> list:
+    x0, y0, w, h = A.sam["rect"]
+    return [x0 + u * w, y0 + v * h]
+
+
+def _sam_uv():
+    """The mouse on the picture, 0..1 of the frame (clamped)."""
+    mx, my = dpg.get_mouse_pos(local=False)
+    rx, ry = dpg.get_item_rect_min("arr_sam_canvas")
+    x0, y0, w, h = A.sam["rect"]
+    return (min(1.0, max(0.0, (mx - rx - x0) / max(1.0, w))), min(1.0, max(0.0, (my - ry - y0) / max(1.0, h))))
+
+
+def _sam_draw() -> None:
+    """The picture and, seeding, each object's box and points in its colour (the chosen
+    one's thicker); a box being drawn in white."""
+    from core.segment.mask_track import id_colour
+    if not dpg.does_item_exist("arr_sam_canvas"):
+        return
+    dpg.delete_item("arr_sam_canvas", children_only=True)
+    dpg.draw_image("arr_sam_tex", [0, 0], [SAM_VIEW, SAM_VIEW], parent="arr_sam_canvas")
+    if not _sam_seeding():
+        dpg.draw_text([8, 8], "SAM2 finds the objects by itself on each shot", size=13,
+                      color=(255, 255, 255, 220), parent="arr_sam_canvas")
+        return
+    for k, o in enumerate(A.sam["objects"]):
+        r, g, b = id_colour(k + 1)
+        mine = k == A.sam["obj"]
+        if o.get("box"):
+            a, z = _sam_to_view(*o["box"][:2]), _sam_to_view(*o["box"][2:])
+            dpg.draw_rectangle(a, z, color=(r, g, b, 255), thickness=3 if mine else 1, parent="arr_sam_canvas")
+            dpg.draw_text([min(a[0], z[0]) + 3, min(a[1], z[1]) + 2], str(k + 1), size=14,
+                          color=(r, g, b, 255), parent="arr_sam_canvas")
+        for x, y, keep in o.get("points") or []:
+            c = _sam_to_view(x, y)
+            dpg.draw_circle(c, 6 if mine else 4, fill=(60, 220, 90, 255) if keep else (230, 60, 60, 255),
+                            color=(r, g, b, 255), thickness=2, parent="arr_sam_canvas")
+    drag = A.sam.get("drag")
+    if drag is not None:
+        dpg.draw_rectangle(_sam_to_view(*drag[0]), _sam_to_view(*drag[1]), color=(255, 255, 255, 255),
+                           thickness=1, parent="arr_sam_canvas")
+
+
+def _sam_objects() -> None:
+    names = [f"object {k + 1}" for k in range(len(A.sam["objects"]))]
+    dpg.configure_item("arr_sam_obj", items=names)
+    dpg.set_value("arr_sam_obj", names[A.sam["obj"]])
+
+
+def on_sam_mode(*_) -> None:
+    seeding = _sam_seeding()
+    if seeding and dpg.get_value("arr_sam_keep") == SAM_KEEPS[0]:   # the objects asked for: all of them
+        dpg.set_value("arr_sam_keep", SAM_KEEPS[1])
+    dpg.configure_item("arr_sam_auto", show=not seeding)
+    dpg.configure_item("arr_sam_seeds", show=seeding)
+    _sam_cache_text()
+    _sam_draw()
+
+
+def on_sam_at(sender, value) -> None:
+    _sam_frame(value)
+    _sam_cache_text()
+
+
+def on_sam_obj(sender, value) -> None:
+    A.sam["obj"] = max(0, int(str(value).split()[-1]) - 1)
+    _sam_draw()
+
+
+def sam_new_object() -> None:
+    A.sam["objects"].append({"box": None, "points": []})
+    A.sam["obj"] = len(A.sam["objects"]) - 1
+    _sam_objects()
+    _sam_draw()
+
+
+def sam_clear(every: bool = False) -> None:
+    if every:
+        A.sam["objects"], A.sam["obj"] = [{"box": None, "points": []}], 0
+    else:
+        A.sam["objects"][A.sam["obj"]] = {"box": None, "points": []}
+    _sam_objects()
+    _sam_draw()
+    _sam_cache_text()
+
+
+def sam_press(u: float, v: float, button: int = 0) -> None:
+    """On the picture at (u, v) (0..1 of the frame): the left button starts a box, or puts a
+    point (+ keep, - leave out); the right one takes away the chosen object's nearest seed."""
+    if not _sam_seeding():
+        return
+    o = A.sam["objects"][A.sam["obj"]]
+    tool = dpg.get_value("arr_sam_tool")
+    if button == 1:
+        near = [(abs(x - u) + abs(y - v), i) for i, (x, y, _) in enumerate(o["points"])]
+        near = [n for n in near if n[0] <= 2 * SAM_NEAR]
+        if near:
+            del o["points"][min(near)[1]]
+        elif o.get("box") and o["box"][0] <= u <= o["box"][2] and o["box"][1] <= v <= o["box"][3]:
+            o["box"] = None
+    elif tool == SAM_TOOLS[0]:
+        A.sam["drag"] = ((u, v), (u, v))
+    else:
+        o["points"].append([round(u, 4), round(v, 4), 1 if tool == SAM_TOOLS[1] else 0])
+    _sam_draw()
+    _sam_cache_text()
+
+
+def sam_drag(u: float, v: float, done: bool = False) -> None:
+    """The box being drawn reaches (u, v); ``done``: the mouse let go (a box too small to be
+    one is none)."""
+    if A.sam is None or A.sam.get("drag") is None:
+        return
+    a = A.sam["drag"][0]
+    A.sam["drag"] = (a, (u, v))
+    if done:
+        A.sam["drag"] = None
+        if abs(u - a[0]) > 0.01 and abs(v - a[1]) > 0.01:
+            A.sam["objects"][A.sam["obj"]]["box"] = [round(min(a[0], u), 4), round(min(a[1], v), 4),
+                                                     round(max(a[0], u), 4), round(max(a[1], v), 4)]
+        _sam_cache_text()
+    _sam_draw()
+
+
+def on_sam_click(sender, app_data) -> None:
+    if A.sam is not None and isinstance(app_data, (list, tuple)):
+        sam_press(*_sam_uv(), button=int(app_data[0]))
+
+
+def _sam_tick() -> None:
+    """A box drawn with the mouse: it follows it until it lets go."""
+    if A.sam is not None and A.sam.get("drag") is not None:
+        sam_drag(*_sam_uv(), done=not dpg.is_mouse_button_down(dpg.mvMouseButton_Left))
+
+
+def _sam_spec():
+    """The FX as the window has it now, or None (seeding, nothing drawn yet)."""
+    spec = {"source": SAM, **A.sam["kept"]}
+    if _sam_seeding():
+        objects = [{k: v for k, v in (("box", o.get("box")), ("points", o.get("points"))) if v}
+                   for o in A.sam["objects"] if o.get("box") or o.get("points")]
+        if not objects:
+            return None
+        spec["seeds"] = {"at": round(float(dpg.get_value("arr_sam_at")), 3), "objects": objects}
+    else:
+        spec.update(seeds="auto", max_objects=int(dpg.get_value("arr_sam_max")),
+                    granularity=str(dpg.get_value("arr_sam_gran")),
+                    reseed=round(float(dpg.get_value("arr_sam_reseed")), 2))
+    keep = dpg.get_value("arr_sam_keep")
+    if keep == SAM_KEEPS[2]:
+        spec["drop"] = [1]
+    else:
+        spec["keep"] = "all" if keep == SAM_KEEPS[1] else "figures"
+    spec["feather"] = int(dpg.get_value("arr_sam_feather"))
+    return spec
+
+
+def _sam_cache_text() -> None:
+    from core.video import sam_cutout
+    spec = _sam_spec() if A.sam is not None else None
+    if spec is None:
+        text = "draw a box (or put a point) on what to cut out"
+    else:
+        done = sam_cutout.cached(A.sam["clip"], sam_cutout.config(spec))
+        text = (f"cut out already: {done} (the renders read it)" if done else
+                "not cut out yet: the next preview or render runs SAM2 on the clip once (GPU), then it is "
+                "kept in render_output/footage")
+    dpg.set_value("arr_sam_cache", text)
+
+
+def sam_close(ok: bool) -> None:
+    """OK: the FX as set here; Cancel: as it was (one just added goes again)."""
+    if A.sam is None:
+        return
+    uid, path = A.sam["uid"], A.sam["path"]
+    if ok:
+        spec = _sam_spec()
+        if spec is None:
+            _status("draw a box (or put a point) on what to cut out first - or choose auto")
+            return
+        _edit(uid, path, lambda _, *, spec=spec: spec)
+        _status("SAM2 cutout set: the next preview or render cuts the clip out (once; then it is kept)")
+    elif A.sam["new"]:
+        j = path[-1]
+        _edit(uid, path[:-1], lambda ls, *, j=j: [x for i, x in enumerate(ls or []) if i != j])
+        _status("SAM2 cutout not added")
+    A.sam = None
+    dpg.configure_item("arr_sam_win", show=False)
+    _draw()
+    _draw_inspector()
 
 
 def _draw_catalog(kind: str) -> None:
@@ -1612,15 +3124,18 @@ def _on_pick_entry(sender, value, key) -> None:
     if e.kind == catalog.GENERATOR:                         # a Generator is put in a lane by dragging
         A.content = ("gen", key)
         _show_content()
+    else:
+        _status(f"{e.label}: drag across an FX track (a lane's, the master's) to put it there")
     _show_entry(e)
 
 
 def _show_entry(e) -> None:
-    """The chosen entry: what it is, what it needs, its parameters (the numbers the music
-    can move are marked ~)."""
+    """The chosen entry: its demo playing, what it is, what it needs, its parameters (the
+    numbers the music can move are marked ~)."""
     from core import catalog
     tag = f"arr_cat_info_{e.kind}"
     dpg.delete_item(tag, children_only=True)
+    _show_demo(e, tag)
     kind = "Generator" if e.kind == catalog.GENERATOR else "FX"
     dpg.add_text(f"{e.label}  ·  {kind} · {e.category}", parent=tag, color=(230, 210, 140), wrap=300)
     dpg.add_text(e.about, parent=tag, wrap=300)
@@ -1639,7 +3154,8 @@ def _show_entry(e) -> None:
         dpg.add_text("drag across the BG or the FG to put it there", parent=tag, color=(150, 230, 160), wrap=300)
     else:
         dpg.add_button(label="Add to the master", parent=tag, callback=lambda: add_master(e.key))
-        dpg.add_text("or right-click a block or a lane: its FX", parent=tag, color=(120, 120, 140), wrap=300)
+        dpg.add_text("or drag across an FX track (a lane's, the master's); or right-click a block: its own",
+                     parent=tag, color=(120, 120, 140), wrap=300)
     dpg.add_text(f"parameters ({len(e.params)}; ~ the music can move it):", parent=tag, color=(150, 210, 240))
     for prm in e.params:
         value = "" if prm.default is None else f" = {prm.default}"
@@ -1649,24 +3165,428 @@ def _show_entry(e) -> None:
                 dpg.add_text(prm.about, wrap=360)
 
 
-def _thumb_rgba(png: Path) -> list:
+# ----------------------------------------------------------------------- demos
+
+def _show_demo(e, parent) -> None:
+    """The entry's demo (core/demos.py) playing in a loop; none yet, a button to make it."""
+    from core import demos
+    making = A.demo_making.get(e.key)
+    state = "rendering" if making is not None and making.poll() is None else demos.status(e)
+    video = demos.video_path(e.key)
+    if video.is_file() and state in ("ready", "stale", "rendering"):
+        img = dpg.add_image("arr_demo_tex", width=DEMO_SHOWN, height=DEMO_SHOWN, parent=parent)
+        if not dpg.does_item_exist("arr_demo_click"):
+            with dpg.item_handler_registry(tag="arr_demo_click"):
+                dpg.add_item_clicked_handler(callback=lambda: _demo_window())
+        dpg.bind_item_handler_registry(img, "arr_demo_click")
+        _play_demo(e.key, video)
+    else:
+        _play_demo(None, None)
+    if state == "rendering":
+        dpg.add_text("making its demo...", parent=parent, color=(200, 200, 140))
+    elif state == "stale":
+        with dpg.group(horizontal=True, parent=parent):
+            dpg.add_text("the layer changed since this demo", color=(200, 160, 100))
+            dpg.add_button(label="Make it again", callback=lambda: _make_demo(e))
+    elif state in ("missing", "failed"):
+        info = demos.read_info(e.key) or {}
+        dpg.add_text("no demo yet" if state == "missing" else f"its demo failed: {info.get('error', '')}",
+                     parent=parent, color=(200, 160, 100) if state == "missing" else (240, 120, 110), wrap=300)
+        dpg.add_button(label="Make demo", parent=parent, callback=lambda: _make_demo(e))
+    elif video.is_file():
+        dpg.add_text("click it: bigger", parent=parent, color=(120, 120, 140))
+
+
+def _make_demo(e) -> None:
+    """Its demo, made in the background (a GPU for shaders); the panel shows it when done."""
+    from core import demos
+    if A.demo_making.get(e.key) is not None and A.demo_making[e.key].poll() is None:
+        return
+    root = Path(demos.__file__).resolve().parent.parent
+    A.demo_making[e.key] = subprocess.Popen([sys.executable, "-m", "core.demos", "render", "--only", e.key,
+                                             "--force"], cwd=str(root), stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL)
+    _status(f"{e.label}: making its demo (a few seconds; minutes for the 3D fractals)")
+    _show_entry(e)
+
+
+def _watch_demos() -> None:
+    """A demo being made is done: the panel shows it (when its entry is still chosen)."""
+    for key, proc in list(A.demo_making.items()):
+        if proc is None or proc.poll() is None:
+            continue
+        del A.demo_making[key]
+        from core import catalog
+        e = catalog.by_key(key)
+        if e is not None and A.entry == key:
+            _show_entry(e)
+
+
+def _play_demo(key, video) -> None:
+    """Play ``video`` into the demo's texture, looping, until another is asked (None: stop)."""
+    if A.demo_key == key:
+        return
+    A.demo_key = key
+    if key is None:
+        return
+
+    def run(mine=key):
+        import cv2
+        cap = cv2.VideoCapture(str(video))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        rgba = np.ones((DEMO, DEMO, 4), np.float32)
+        nxt = time.time()
+        while A.demo_key == mine:
+            ok, img = cap.read()
+            if not ok:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ok, img = cap.read()
+                if not ok:
+                    break
+            if img.shape[0] != DEMO or img.shape[1] != DEMO:
+                img = cv2.resize(img, (DEMO, DEMO), interpolation=cv2.INTER_AREA)
+            rgba[..., :3] = img[..., ::-1] / 255.0
+            A.demo_frame = rgba.ravel().copy()
+            nxt += 1.0 / fps
+            time.sleep(max(0.0, nxt - time.time()))
+        cap.release()
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _demo_window() -> None:
+    """The demo playing at its own size."""
+    from core import catalog
+    e = catalog.by_key(A.demo_key) if A.demo_key else None
+    if e is None:
+        return
+    if dpg.does_item_exist("arr_demo_win"):
+        dpg.delete_item("arr_demo_win")
+    with dpg.window(tag="arr_demo_win", label=f"demo - {e.label}", width=DEMO + 20, height=DEMO + 40,
+                    pos=(360, 120)):
+        dpg.add_image("arr_demo_tex", width=DEMO, height=DEMO)
+
+
+def _thumb_rgba(img, size: int = THUMB) -> np.ndarray:
+    """A BGR frame (or an image file) in a square ``size`` a side (the browser's picture),
+    its shape kept: RGBA floats."""
     import cv2
-    img = cv2.imread(str(png), cv2.IMREAD_COLOR)
-    canvas = np.zeros((THUMB, THUMB, 4), np.float32)
+    if img is not None and not isinstance(img, np.ndarray):
+        img = cv2.imread(str(img), cv2.IMREAD_COLOR)
+    canvas = np.zeros((size, size, 4), np.float32)
     canvas[..., 3] = 1.0
     if img is not None:
         h, w = img.shape[:2]
-        s = THUMB / max(h, w)
-        img = cv2.resize(img, (max(1, int(w * s)), max(1, int(h * s))))
+        s = size / max(h, w)
+        img = cv2.resize(img, (max(1, int(w * s)), max(1, int(h * s))), interpolation=cv2.INTER_AREA)
         h, w = img.shape[:2]
-        y0, x0 = (THUMB - h) // 2, (THUMB - w) // 2
+        y0, x0 = (size - h) // 2, (size - w) // 2
         canvas[y0:y0 + h, x0:x0 + w, :3] = img[..., ::-1] / 255.0
-    return canvas.ravel().tolist()
+    return canvas.ravel()
+
+
+# ----------------------------------------------------------------------- the clip's player
+
+CLIP_SR = 44100        # the clip's sound, as the player mixes it
+
+
+def _play_clip(path, start: float = 0.0) -> None:
+    """``path`` plays in the browser's picture from ``start`` (s) to its end, again and again
+    (an image: shown); None stops it. Its sound follows when it is on."""
+    key = (str(path), round(float(start), 2)) if path else None
+    if A.clip_play == key:
+        return
+    A.clip_play = key
+    _sound_off()
+    if key is None:
+        return
+
+    def run(mine=key):
+        import cv2
+        if Path(path).suffix.lower() in arr.IMAGES:
+            A.clip_frame = _thumb_rgba(path)
+            return
+        cap = cv2.VideoCapture(str(path))
+        if not cap.isOpened():                           # a codec OpenCV lacks: a still, by ffmpeg
+            try:
+                png = arr.thumbnail(path, start, THUMB)
+            except Exception:                            # none to show
+                png = None
+            if png and A.clip_play == mine:
+                A.clip_frame = _thumb_rgba(png)
+            return
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        while A.clip_play == mine:                       # a loop: from "from" to the end
+            cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000.0)
+            t0, n = time.time(), 0
+            A.clip_pos = start
+            if A.clip_sound:
+                _sound_at(path, start)
+            while A.clip_play == mine:
+                ok, img = cap.read()
+                if not ok:
+                    break
+                A.clip_frame = _thumb_rgba(img)
+                n += 1
+                A.clip_pos = start + n / fps
+                time.sleep(max(0.0, t0 + n / fps - time.time()))
+            if n == 0:                                   # nothing after "from"
+                break
+        cap.release()
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _clip_audio(path: str):
+    """The clip's sound, mono at CLIP_SR (None: it has none), read once by ffmpeg."""
+    if path not in A.clip_audio:
+        try:
+            out = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vn", "-ac", "1",
+                                  "-ar", str(CLIP_SR), "-f", "f32le", "-"], capture_output=True, timeout=60)
+            audio = np.frombuffer(out.stdout, np.float32).copy()
+        except (OSError, subprocess.SubprocessError):
+            audio = np.zeros(0, np.float32)
+        if len(A.clip_audio) > 8:
+            A.clip_audio.pop(next(iter(A.clip_audio)))
+        A.clip_audio[path] = audio if len(audio) else None
+    return A.clip_audio[path]
+
+
+def _sound_at(path: str, t: float) -> None:
+    """The clip's sound from ``t`` (s): with its picture."""
+    audio = _clip_audio(path)
+    if audio is None:
+        A.sound_note = f"{Path(path).name} has no sound"
+        return
+    if A.clip_play is None or A.clip_play[0] != str(path) or not A.clip_sound:
+        return                                           # another clip, or muted, while it was read
+    if A.clip_mixer is None:
+        from core.audio_player import AudioPlayer
+        A.clip_mixer = AudioPlayer(CLIP_SR)
+    A.clip_mixer.remove_track("clip")
+    A.clip_mixer.add_track("clip", audio)
+    A.clip_mixer.play(start_t=t)
+
+
+def _sound_off() -> None:
+    if A.clip_mixer is not None:
+        A.clip_mixer.pause()
+
+
+def on_clip_sound(*_) -> None:
+    """The clip's sound on or off (it plays muted until turned on)."""
+    set_clip_sound(not A.clip_sound)
+
+
+def set_clip_sound(on: bool) -> None:
+    A.clip_sound = bool(on)
+    if dpg.does_item_exist("arr_clip_sound"):
+        dpg.configure_item("arr_clip_sound", label="sound: on" if on else "sound: off")
+    if not on:
+        _sound_off()
+    elif A.clip_play is not None:
+        path = A.clip_play[0]
+        threading.Thread(target=lambda: _sound_at(path, A.clip_pos), daemon=True).start()
+
+
+# ----------------------------------------------------------------------- a clip dragged in
+
+def _over_lanes(pos=None) -> bool:
+    """``pos`` (in the viewport; None: the mouse) is over the lanes' pane, by its rectangle:
+    while a drag from the browser goes on, the item it started on stays active, and the
+    lanes do not count as hovered. (A child window has no rect_min: the pane's top left is
+    the canvas', scrolled.)"""
+    if not dpg.does_item_exist("arr_tracks") or not dpg.is_item_shown("arr_win"):
+        return False
+    mx, my = pos if pos is not None else dpg.get_mouse_pos(local=False)
+    try:
+        x0, y0 = dpg.get_item_rect_min("arr_canvas")
+        w, h = dpg.get_item_rect_size("arr_tracks")
+    except (KeyError, SystemError):                      # not laid out yet
+        return False
+    y0 += _scroll()
+    return x0 <= mx < x0 + w and y0 <= my < y0 + h
+
+
+def _canvas_of(pos) -> tuple:
+    """A point in the viewport, on the canvas."""
+    rx, ry = dpg.get_item_rect_min("arr_canvas")
+    return pos[0] - rx, pos[1] - ry
+
+
+def drop_files(paths: list, pos) -> None:
+    """Files dropped from the Explorer at ``pos`` (in the viewport): on a lane, the clips go
+    there one after another from the bar under the mouse (as on a drag from the list); on
+    the browser, a folder is listed and a clip is chosen (it plays)."""
+    if not dpg.does_item_exist("arr_win") or not dpg.is_item_shown("arr_win"):
+        return
+    clips = [p for p in paths if Path(p).suffix.lower() in arr.VIDEOS + arr.IMAGES and Path(p).is_file()]
+    folders = [p for p in paths if Path(p).is_dir()]
+    if _over_lanes(pos):
+        if not clips:
+            _status("only video or image files go on the lanes")
+            return
+        got = _clip_target(*_canvas_of(pos), 0.0)
+        if got is None:
+            _status("a clip goes on the BG, the FG or CLIPS (the montage)")
+            return
+        _place_clips(got[1], got[2], [(path, 0.0, arr.duration(path)) for path in clips],
+                     sub=A.rows[got[0]].get("sub"))
+        return
+    if folders:
+        dpg.set_value("arr_folder", folders[0])
+        btn_list()
+    elif clips:
+        _choose_clip(clips[0], 0.0)
+        _status(f"{Path(clips[0]).name} chosen - drag it (the picture) onto the BG, the FG or CLIPS")
+    else:
+        _status("drop video or image files (or a folder of them)")
+
+
+def _clip_bars(seconds: float) -> int:
+    """How many bars a clip dropped in takes: as long as it plays (an image: 4)."""
+    if seconds <= 0:
+        return 4
+    return max(1, int(round(seconds / (_bar_seconds() or 2.0))))
+
+
+def _clip_target(x: float, y: float, seconds: float):
+    """(row, lane, first, last) a clip dropped at (x, y) goes to: the BG, the FG or the
+    montage (CLIPS), from the bar under the mouse; None elsewhere."""
+    r = _row_at(y)
+    if r is None or x < LABEL_W:
+        return None
+    row = A.rows[r]
+    key = "montage" if row["kind"] == "montage" else row["lane"]
+    if key not in ("montage", arr.BG, arr.FG):
+        return None
+    first = _bar_of_x(x)
+    return r, key, first, min(_bars(), first + _clip_bars(seconds) - 1)
+
+
+def _show_clip_ghost() -> None:
+    """Where the dragged clip would go, while it is dragged over the lanes."""
+    if not dpg.does_item_exist("arr_ghost"):
+        return
+    got = _clip_target(*_mouse_in_canvas(), A.clip_drag[2]) if _over_lanes() else None
+    if got is None:
+        dpg.configure_item("arr_ghost", show=False)
+        return
+    r, key, first, last = got
+    dpg.configure_item("arr_ghost", pmin=[_x_of(first), _row_y(r) + 2],
+                       pmax=[_x_of(last + 1), _row_y(r) + A.lane_h - 4], show=True)
+
+
+def drop_clip(x: float, y: float, drag) -> None:
+    """A clip dragged from the browser comes down at (x, y): a block in the BG or the FG from
+    the bar there, as long as it plays (a long one: as many bars as asked); on CLIPS, pinned
+    to the montage there."""
+    got = _clip_target(x, y, drag[2])
+    if got is None:
+        _status("a clip goes on the BG, the FG or CLIPS (the montage)")
+        return
+    _place_clips(got[1], got[2], [tuple(drag)], sub=A.rows[got[0]].get("sub"))
+
+
+LONG_CLIP = 30.0       # s: a clip longer asks how many bars it takes (or all of it)
+
+
+def _place_clips(key: str, first: int, todo: list, bars=None, sub=None) -> None:
+    """Clips [(path, start s, seconds)] put on ``key`` one after another from bar ``first``,
+    each as long as it plays; ``bars``: the first one's (asked). One longer than LONG_CLIP
+    asks first how many bars it takes; the ones after it wait for the answer."""
+    todo = list(todo)
+    while todo:
+        path, start, seconds = todo[0]
+        if bars is None and seconds > LONG_CLIP:
+            _ask_bars(key, first, todo, sub)
+            return
+        last = min(_bars(), first + (bars or _clip_bars(seconds)) - 1)
+        A.content = ("clip", path, start)
+        _show_content()
+        if key == "montage":
+            _put_in_montage(first, last)
+        else:
+            _new_member(key, first, last, sub=sub)
+        todo, bars = todo[1:], None
+        if last >= _bars():                              # the song's end
+            break
+        first = last + 1
+
+
+def _ask_bars(key: str, first: int, todo: list, sub=None) -> None:
+    """How many bars the long clip ``todo[0]`` takes (from ``first``), or all of it."""
+    path, start, seconds = todo[0]
+    whole = min(_clip_bars(seconds), _bars() - first + 1)
+    A.asking = (key, first, todo, sub)
+    where = {"montage": "over the montage (CLIPS)", arr.BG: "BG", arr.FG: "FG"}.get(key, key)
+    dpg.set_value("arr_ask_text", f"{Path(path).name} plays {seconds:.0f} s"
+                  + (f" from {start:g} s" if start else "") + f": {_clip_bars(seconds)} bars. "
+                  f"How many bars should it take in the {where}, from bar {first}?")
+    dpg.set_value("arr_ask_n", min(8, whole))
+    dpg.configure_item("arr_ask_whole", label=f"The whole video ({whole} bars"
+                       + (", to the song's end)" if whole < _clip_bars(seconds) else ")"))
+    try:
+        vw, vh = dpg.get_viewport_client_width(), dpg.get_viewport_client_height()
+        dpg.configure_item("arr_ask_win", pos=(max(0, vw // 2 - 230), max(0, vh // 2 - 90)))
+    except Exception:                                    # no viewport (the tests)
+        pass
+    dpg.configure_item("arr_ask_win", show=True)
+    dpg.focus_item("arr_ask_n")
+
+
+def on_ask_n(sender, value) -> None:
+    """The bars field: Enter puts the clip. (ImGui calls this for its - and + buttons too,
+    on_enter or not: those only change the number.)"""
+    if _down("mvKey_Return", "mvKey_NumPadEnter"):
+        answer_bars(value)
+
+
+def answer_bars(n) -> None:
+    """The answer: a number of bars, "whole" (all the clip) or None (it is not put)."""
+    asking, A.asking = A.asking, None
+    if dpg.does_item_exist("arr_ask_win"):
+        dpg.configure_item("arr_ask_win", show=False)
+    if asking is None:
+        return
+    key, first, todo, sub = asking
+    if n is None:
+        _status(f"{Path(todo[0][0]).name} not put" + (f" (nor the {len(todo) - 1} after it)" if len(todo) > 1 else ""))
+        return
+    _place_clips(key, first, todo, _clip_bars(todo[0][2]) if n == "whole" else max(1, int(n)), sub)
 
 
 def tick() -> None:
     """Once a frame, on the main thread: a thumbnail asked for (after the slider rests a
-    moment) is made in the background and shown when ready; redraws asked by workers."""
+    moment) is made in the background and shown when ready; redraws asked by workers; how
+    a preview goes."""
+    _watch_preview()
+    _watch_demos()
+    _show_covers()
+    _show_edge()
+    _show_saved()
+    _sam_tick()
+    for paths, pos in arc_window.take():
+        drop_files(paths, pos)
+    if A.demo_frame is not None:
+        frame, A.demo_frame = A.demo_frame, None
+        dpg.set_value("arr_demo_tex", frame)
+        if A.demo_key is not None and not dpg.is_item_shown("arr_win"):
+            A.demo_key = None                                # the window closed: the player stops
+    _fit_canvas()
+    _pin_ruler()
+    if A.scroll_to is not None and dpg.does_item_exist("arr_tracks"):
+        y, waited = A.scroll_to if isinstance(A.scroll_to, tuple) else (A.scroll_to, 0)
+        top = dpg.get_y_scroll_max("arr_tracks")
+        if y > top and waited < 3:                       # the canvas grows a frame or two later
+            A.scroll_to = (y, waited + 1)
+        else:
+            A.scroll_to = None
+            dpg.set_y_scroll("arr_tracks", float(min(y, top)))
+    g = A.host.grid() if A.host is not None else None
+    if g is not getattr(A, "grid_seen", None):          # the song loaded (again): its real bars
+        A.grid_seen = g
+        if A.doc is not None and dpg.does_item_exist("arr_win") and dpg.is_item_shown("arr_win"):
+            _relane()
+            set_view()
     if getattr(A, "redraw", False):
         A.redraw = False
         _draw()
@@ -1676,34 +3596,73 @@ def tick() -> None:
     if getattr(A, "relane", False):
         A.relane = False
         _relane()
-    if A.thumb_ready is not None:
-        dpg.set_value("arr_tex", A.thumb_ready)
-        A.thumb_ready = None
-    if A.want_thumb and time.time() - A.want_thumb[2] > 0.25 and not getattr(A, "thumbing", False):
-        path, t, _ = A.want_thumb
-        A.want_thumb, A.thumbing = None, True
-
-        def run():
-            try:
-                png = arr.thumbnail(path, t, THUMB)
-                if png:
-                    A.thumb_ready = _thumb_rgba(png)
-            finally:
-                A.thumbing = False
-        threading.Thread(target=run, daemon=True).start()
+    if A.clip_frame is not None:
+        frame, A.clip_frame = A.clip_frame, None
+        dpg.set_value("arr_tex", frame)
+    if A.clip_restart and time.time() - A.clip_restart > 0.25 and A.clip:
+        A.clip_restart = 0.0
+        _play_clip(A.clip, A.start)
+    if A.clip_play is not None and dpg.does_item_exist("arr_win") and not dpg.is_item_shown("arr_win"):
+        _play_clip(None)                                 # the window closed: the clip stops
+    note = getattr(A, "sound_note", "")
+    if note:
+        A.sound_note = ""
+        _status(note)
 
 
 # ----------------------------------------------------------------------- the window
 
+SCROLLBAR_W = 18
+
+
+def _fit_canvas() -> None:
+    """The canvas as wide as the lanes' pane: widening the window widens the timeline (the
+    bars shown spread over it), narrowing it never goes under CANVAS_W."""
+    if not dpg.does_item_exist("arr_tracks") or not dpg.is_item_shown("arr_win"):
+        return
+    pane = dpg.get_item_rect_size("arr_tracks")[0]
+    if pane <= 0:                                        # not laid out yet
+        return
+    w = max(CANVAS_W, int(pane) - SCROLLBAR_W)
+    if abs(w - A.canvas_w) >= 2:
+        A.canvas_w = w
+        dpg.configure_item("arr_canvas", width=w)
+        set_view()
+
+
+def on_video_res(sender, value) -> None:
+    """The final video's size and shape, chosen here: the studio's, so a preview shows it."""
+    err = A.host.set_resolution(value)
+    _status(err or f"final video: {value.strip()} - the next preview shows it; Save Project "
+                   "(in the studio) keeps it")
+
+
+def _show_video_res() -> None:
+    dpg.configure_item("arr_video_res", items=A.host.resolutions())
+    dpg.set_value("arr_video_res", A.host.resolution())
+
+
 def open_window() -> None:
+    if not getattr(A, "sized", False):          # first opened: as big as the studio's window
+        A.sized = True
+        try:
+            vw, vh = dpg.get_viewport_client_width(), dpg.get_viewport_client_height()
+        except Exception:                                # no viewport (the tests)
+            vw = vh = 0
+        if vw > 0 and vh > 0:
+            dpg.configure_item("arr_win", width=max(1090, vw - 10), height=max(700, vh - 45))
     _load()
     set_view()                                  # the song may be another: the view fits it
+    _show_video_res()                           # the project may be another: its size
     if not A.catalog_drawn:                     # the catalog is read once, when first shown
         A.catalog_drawn = True
         for kind in ("generator", "fx"):
             _draw_catalog(kind)
-    if not dpg.get_value("arr_folder"):
-        dpg.set_value("arr_folder", A.host.clips_dir() or "")
+    if not dpg.get_value("arr_folder"):                 # the last folder listed, else the project's
+        last = _remembered().get("clips_folder") or ""
+        dpg.set_value("arr_folder", last if last and Path(last).is_dir() else (A.host.clips_dir() or ""))
+    if dpg.get_value("arr_folder") and not A.clips:
+        btn_list()
     dpg.show_item("arr_win")
     dpg.focus_item("arr_win")
 
@@ -1711,9 +3670,78 @@ def open_window() -> None:
 def build(host) -> None:
     A.host = host
     A.catalog_drawn = False
-    A.zoom, A.view0 = 1.0, 1
+    A.zoom, A.view0, A.lane_h, A.scroll_to, A.canvas_w = 1.0, 1, LANE_H, None, CANVAS_W
+    with dpg.item_handler_registry(tag="arr_list_handler"):
+        dpg.add_item_clicked_handler(button=dpg.mvMouseButton_Left, callback=on_list_press)
+    with dpg.item_handler_registry(tag="arr_clip_img_handler"):
+        dpg.add_item_clicked_handler(button=dpg.mvMouseButton_Left, callback=on_picture_press)
+    A.clip_play, A.clip_drag, A.list_items, A.clip_frame = None, None, {}, None
+    A.list_names, A.list_pics, A.covers, A.covers_ready = {}, {}, {}, []
+    A.asking, A.saved_at, A.saved_flash = None, "", 0.0
+    with dpg.window(tag="arr_ask_win", label="A long clip: how many bars?", modal=True, show=False,
+                    width=460, height=125, no_resize=True, on_close=lambda: answer_bars(None)):
+        dpg.add_text("", tag="arr_ask_text", wrap=440)
+        with dpg.group(horizontal=True):
+            dpg.add_text("bars")
+            dpg.add_input_int(tag="arr_ask_n", width=110, default_value=8, min_value=1, min_clamped=True,
+                              on_enter=True, callback=on_ask_n)
+            dpg.add_button(label="Put it", tag="arr_ask_ok", width=80,
+                           callback=lambda: answer_bars(dpg.get_value("arr_ask_n")))
+        with dpg.group(horizontal=True):
+            dpg.add_button(label="The whole video", tag="arr_ask_whole", callback=lambda: answer_bars("whole"))
+            dpg.add_button(label="Cancel", tag="arr_ask_cancel", callback=lambda: answer_bars(None))
     with dpg.texture_registry():
         dpg.add_dynamic_texture(THUMB, THUMB, [0.0, 0.0, 0.0, 1.0] * THUMB * THUMB, tag="arr_tex")
+        dpg.add_dynamic_texture(DEMO, DEMO, np.zeros(DEMO * DEMO * 4, np.float32), tag="arr_demo_tex")
+        dpg.add_static_texture(COVER, COVER, [0.12, 0.12, 0.15, 1.0] * COVER * COVER, tag="arr_cover_blank")
+    dpg.add_texture_registry(tag="arr_covers")          # the list's pictures, made as they come
+    with dpg.texture_registry():
+        dpg.add_dynamic_texture(SAM_VIEW, SAM_VIEW, np.zeros(SAM_VIEW * SAM_VIEW * 4, np.float32), tag="arr_sam_tex")
+    A.sam = None
+    with dpg.item_handler_registry(tag="arr_sam_handler"):
+        dpg.add_item_clicked_handler(callback=on_sam_click)
+    with dpg.window(tag="arr_sam_win", label="SAM2 cutout", show=False, width=SAM_VIEW + 440,
+                    height=SAM_VIEW + 90, pos=(120, 70), on_close=lambda: sam_close(False)):
+        with dpg.group(horizontal=True):
+            with dpg.group():
+                dpg.add_drawlist(SAM_VIEW, SAM_VIEW, tag="arr_sam_canvas")
+                dpg.add_slider_float(tag="arr_sam_at", label="frame (s of the clip)", width=SAM_VIEW - 150,
+                                     min_value=0.0, max_value=1.0, callback=on_sam_at)
+            with dpg.group():
+                dpg.add_text("", tag="arr_sam_clip", wrap=410, color=(200, 200, 215))
+                dpg.add_radio_button(SAM_MODES, tag="arr_sam_mode", default_value=SAM_MODES[0], callback=on_sam_mode)
+                with dpg.group(tag="arr_sam_auto"):
+                    dpg.add_input_int(label="objects at most", tag="arr_sam_max", width=110, default_value=4,
+                                      min_value=1, max_value=16, min_clamped=True, max_clamped=True,
+                                      callback=lambda: _sam_cache_text())
+                    dpg.add_combo(["whole", "parts"], label="whole characters, or their parts", tag="arr_sam_gran",
+                                  width=110, default_value="whole", callback=lambda: _sam_cache_text())
+                    dpg.add_input_float(label="looks again every (s)", tag="arr_sam_reseed", width=110,
+                                        default_value=2.0, step=0.5, min_value=0.0, min_clamped=True, format="%.1f",
+                                        callback=lambda: _sam_cache_text())
+                    dpg.add_text("on each shot's first frame it finds the objects, then follows them; "
+                                 "every few seconds it looks for new ones (0: only at cuts)",
+                                 wrap=410, color=(120, 120, 140))
+                with dpg.group(tag="arr_sam_seeds", show=False):
+                    dpg.add_radio_button(SAM_TOOLS, tag="arr_sam_tool", default_value=SAM_TOOLS[0], horizontal=True)
+                    with dpg.group(horizontal=True):
+                        dpg.add_combo([], tag="arr_sam_obj", width=110, callback=on_sam_obj)
+                        dpg.add_button(label="new object", callback=lambda: sam_new_object())
+                        dpg.add_button(label="clear it", callback=lambda: sam_clear())
+                        dpg.add_button(label="clear all", callback=lambda: sam_clear(True))
+                    dpg.add_text("on the picture: drag a box around it, click points on it (+) or on what is "
+                                 "not it (-); right-click takes the nearest away. Each object is followed "
+                                 "from this frame to the clip's end.", wrap=410, color=(120, 120, 140))
+                dpg.add_separator()
+                dpg.add_radio_button(SAM_KEEPS, tag="arr_sam_keep", default_value=SAM_KEEPS[0],
+                                     callback=lambda: _sam_cache_text())
+                dpg.add_input_int(label="soft edge (px)", tag="arr_sam_feather", width=110, default_value=2,
+                                  min_value=0, max_value=40, min_clamped=True, max_clamped=True)
+                dpg.add_text("", tag="arr_sam_cache", wrap=410, color=(150, 190, 150))
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="OK", width=90, callback=lambda: sam_close(True))
+                    dpg.add_button(label="Cancel", width=90, callback=lambda: sam_close(False))
+    dpg.bind_item_handler_registry("arr_sam_canvas", "arr_sam_handler")
     dpg.add_file_dialog(show=False, directory_selector=True, callback=_pick_folder, tag="dlg_arr_folder",
                         width=620, height=420)
     with dpg.window(label="Arrange - the background, the foreground and the master, bar by bar",
@@ -1730,35 +3758,53 @@ def build(host) -> None:
                         dpg.add_input_text(tag="arr_filter", width=200, hint="filter, e.g. final.mp4",
                                            on_enter=True, callback=lambda: btn_list())
                         dpg.add_button(label="list", callback=btn_list)
-                    dpg.add_listbox([], tag="arr_list", width=-1, num_items=14, callback=on_pick_clip)
+                    dpg.add_child_window(tag="arr_list", height=330, border=True)
                     dpg.add_text("", tag="arr_clip_info", wrap=310, color=(150, 190, 150))
-                    dpg.add_image("arr_tex", width=THUMB, height=THUMB)
+                    with dpg.group(horizontal=True):
+                        dpg.add_image("arr_tex", width=THUMB, height=THUMB, tag="arr_clip_img")
+                        with dpg.group():
+                            dpg.add_button(label="sound: off", tag="arr_clip_sound", width=110, callback=on_clip_sound)
+                            with dpg.tooltip("arr_clip_sound"):
+                                dpg.add_text("the clip plays muted; this turns its sound on (a preview "
+                                             "of the song turns it off)")
+                            dpg.add_text("drag the clip\n(from the list\nor here) onto\nthe BG, the FG\n"
+                                         "or CLIPS", color=(120, 120, 140))
+                    dpg.bind_item_handler_registry("arr_clip_img", "arr_clip_img_handler")
                     dpg.add_slider_float(label="from (s)", tag="arr_from", width=230, min_value=0.0,
                                          max_value=1.0, callback=on_from)
                     dpg.add_text("a new block starts the clip here", color=(120, 120, 140))
                     dpg.add_separator()
-                    dpg.add_text("drag across the BG or the FG to put it there (in the FG it is cut out "
-                                 "by its mask track)", wrap=310, color=(150, 190, 150))
-                    dpg.add_button(label="Segment this clip (SAM2, GPU)", width=-1, callback=btn_segment)
-                    dpg.add_text("a character is cut out by its mask track "
-                                 "(render_output/footage/<clip>_segments)", wrap=310, color=(120, 120, 140))
+                    dpg.add_text("or drag across the BG or the FG to put it over those bars (in the FG it "
+                                 "is cut out by its mask track)", wrap=310, color=(150, 190, 150))
+                    dpg.add_button(label="Cut it out (SAM2, at the render)", width=-1, callback=btn_segment)
+                    dpg.add_text("its block in the FG gets the SAM2 cutout FX (its seeds: the window that "
+                                 "opens); SAM2 cuts it out at the next preview or render, once, then it is "
+                                 "kept (render_output/footage)", wrap=310, color=(120, 120, 140))
                 for kind, title, about in (
                         ("generator", "Generators", "they make a picture: a fractal, cells, a nebula"),
                         ("fx", "FX", "they work on the picture they get")):
                     with dpg.tab(label=title):
                         dpg.add_text(about, color=(120, 120, 140), wrap=310)
                         dpg.add_input_text(tag=f"arr_cat_q_{kind}", width=-1, hint="search",
-                                           callback=lambda s, a, k=kind: _draw_catalog(k))
+                                           callback=lambda s, a, *, k=kind: _draw_catalog(k))
                         dpg.add_child_window(tag=f"arr_cat_{kind}", height=420, border=False)
                         dpg.add_separator()
                         dpg.add_child_window(tag=f"arr_cat_info_{kind}", height=-1, border=False)
             with dpg.child_window(width=-1, height=-1):
                 with dpg.group(horizontal=True):
-                    dpg.add_button(label="Save to scene", width=120, callback=btn_save)
+                    dpg.add_button(label="Save to scene", tag="arr_save_btn", width=130, callback=btn_save)
                     dpg.add_button(label="Reload", width=80, callback=lambda: _load())
                     dpg.add_button(label="Undo", width=60, callback=btn_undo)
                     dpg.add_button(label="Redo", width=60, callback=btn_redo)
-                    dpg.add_text("", tag="arr_status", color=(160, 200, 160))
+                    dpg.add_button(label="Preview (choose bars)", tag="arr_prev_btn", callback=preview_span)
+                    dpg.add_text("", tag="arr_save_state")
+                with dpg.group(horizontal=True):
+                    dpg.add_text("final video:")
+                    dpg.add_combo([], tag="arr_video_res", width=200, callback=on_video_res)
+                    dpg.add_text("its size and shape (Save Project in the studio keeps it)", color=(120, 120, 140))
+                    with dpg.tooltip("arr_video_res"):
+                        dpg.add_text("an own size: the studio's field next to PREVIEW")
+                dpg.add_text("", tag="arr_status", color=(160, 200, 160), wrap=0)   # wraps: never off the edge
                 dpg.add_text("pick a clip or a Generator to put it in a lane", tag="arr_content",
                              color=(150, 230, 160))
                 with dpg.group(horizontal=True):
@@ -1769,20 +3815,33 @@ def build(host) -> None:
                     dpg.add_slider_int(tag="arr_view0", width=260, min_value=1, max_value=1, default_value=1,
                                        format="from bar %d", callback=lambda s, v: set_view(first=v))
                     dpg.add_text("", tag="arr_zoom_text", color=(120, 120, 140))
-                dpg.add_text("Ctrl+wheel zooms, Shift+wheel moves along · the strip under the bars: how busy "
-                             "the MIDI is", color=(120, 120, 140))
-                with dpg.child_window(height=-250, border=False):  # the tracks scroll; the inspector stays
-                    dpg.add_drawlist(width=CANVAS_W, height=200, tag="arr_canvas")
+                    dpg.add_text("   rows")
+                    dpg.add_button(label="-", width=24, callback=lambda: set_lane_height(A.lane_h / 1.2))
+                    dpg.add_button(label="+", width=24, callback=lambda: set_lane_height(A.lane_h * 1.2))
+                    dpg.add_text(f"{LANE_H} px", tag="arr_rows_text", color=(120, 120, 140))
+                dpg.add_text("drag across the bar numbers to choose bars (Space: preview them) · wheel "
+                             "scrolls up and down, Ctrl+wheel zooms along the song, Shift+wheel makes the rows "
+                             "taller or lower, Alt+wheel moves along · Shift+drag a block's end: resize it · under the bars: how "
+                             "busy the MIDI is",
+                             color=(120, 120, 140), wrap=0)
+                # they scroll (the wheel, the scrollbar: on_wheel's, not ImGui's) and the inspector stays
+                with dpg.child_window(height=-250, border=False, tag="arr_tracks", no_scroll_with_mouse=True):
+                    dpg.add_drawlist(width=A.canvas_w, height=200, tag="arr_canvas")
+                with dpg.tooltip("arr_tracks", tag="arr_tip", show=False):   # (a drawlist takes none)
+                    dpg.add_text("", tag="arr_tip_text")
                 with dpg.item_handler_registry(tag="arr_canvas_handler"):
                     dpg.add_item_clicked_handler(callback=on_canvas_click)
                     dpg.add_item_double_clicked_handler(callback=on_canvas_double_click)
                 dpg.bind_item_handler_registry("arr_canvas", "arr_canvas_handler")
                 dpg.add_separator()
-                with dpg.child_window(height=-1, border=False):
+                with dpg.child_window(height=-1, border=False, tag="arr_insp_win"):
                     dpg.add_group(tag="arr_inspector")
     with dpg.handler_registry():
         dpg.add_mouse_release_handler(button=dpg.mvMouseButton_Left, callback=on_mouse_release)
         dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Left, threshold=2, callback=on_mouse_drag)
         dpg.add_key_press_handler(dpg.mvKey_Z, callback=on_key_z)
         dpg.add_mouse_wheel_handler(callback=on_wheel)
+        dpg.add_mouse_move_handler(callback=on_mouse_move)
         dpg.add_key_press_handler(dpg.mvKey_Y, callback=on_key_y)
+        dpg.add_key_press_handler(dpg.mvKey_Delete, callback=on_key_delete)
+        dpg.add_key_press_handler(dpg.mvKey_Spacebar, callback=on_key_space)

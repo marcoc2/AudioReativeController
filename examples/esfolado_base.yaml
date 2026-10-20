@@ -1,0 +1,19 @@
+# Esfolado — the base to orchestrate on: the song, its stems (voice, Peppa) and its MIDI
+# (hi-hat, snare, kick, bass, acid, FM5 lead, clap, piano), with the
+# background clips (render_output/esfolado_fundo) cut a new one each bar. No effects yet:
+# add Generators, FX and the cast's footage in the Arrange window.
+#
+# The MIDI: esfolado_reaper.mid, every part taken from the REAPER project in its own time
+# (tools/reaper_midi.py). REAPER starts bar 2 at 2.0 s (a meter marker there makes bar 1
+# three beats long), so the file has a 3/4 bar 1; REAPER's own MIDI export (esfolado.mid)
+# padded that bar and came one beat late. The audio needs no offset: its attacks fall on the notes.
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_15_10_2026-full.mp3 \
+#       --midi input/esfolado/esfolado_reaper.mid --clips render_output/esfolado_fundo \
+#       --clip-fit cover --seed 5 --scene examples/esfolado_base.yaml \
+#       --bars 0 --resolution 480x854 --fps 30 --output render_output/esfolado_base.mp4
+video:
+  clip_per_bar: true
+  clip_order: random
+  layers:
+    - source: clips

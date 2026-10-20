@@ -78,6 +78,22 @@ def pick_objects(masks: List[np.ndarray], max_objects: int = 8, min_share: float
     return picked
 
 
+def seeds_in_pixels(seeds: dict, width: int, height: int, fps: float) -> dict:
+    """Seeds as the scene keeps them ({at: clip s, objects: [{box: [x0, y0, x1, y1], points:
+    [[x, y, 1|0], ...]}]}, 0..1 of the frame) -> {frame, objects} in pixels; an object with
+    neither a box nor points is left out."""
+    objects = []
+    for o in seeds.get("objects") or []:
+        box = o.get("box")
+        box = [box[0] * width, box[1] * height, box[2] * width, box[3] * height] if box else None
+        if box:                                        # drawn either way
+            box = [min(box[0], box[2]), min(box[1], box[3]), max(box[0], box[2]), max(box[1], box[3])]
+        points = [[p[0] * width, p[1] * height, 1 if p[2] else 0] for p in o.get("points") or []]
+        if box or points:
+            objects.append({"box": box, "points": points})
+    return {"frame": max(0, int(round(float(seeds.get("at", 0.0)) * fps))), "objects": objects}
+
+
 def id_colour(obj_id: int):
     """A stable, well-separated colour per id (golden-ratio hues), RGB 0..255."""
     if obj_id <= 0:
@@ -109,20 +125,25 @@ def write_mask_track(video: str, frames: Callable[[], Iterable[np.ndarray]], seg
                      reseed: float = 2.0, cut: float = 40.0, points_per_side: int = 32,
                      min_iou: float = 0.6, min_stability: float = 0.7, preview=None,
                      model: str = "", log: Callable[[str], None] = print,
-                     cuts: Optional[List[int]] = None) -> dict:
+                     cuts: Optional[List[int]] = None, seeds: Optional[dict] = None) -> dict:
     """Find and follow the objects of a video; write the folder described above.
 
     ``frames()`` gives a fresh pass over the frames (called twice: cuts, then masks);
     ``cuts``, the frames where shots start when they are known (the render wrote them),
     replaces finding them from the picture;
     ``segmenter`` is a RegionTracker (or anything with its set_frame/add/step/forget/
-    auto_masks); ``preview``, when given, gets ``.stdin.write`` of each tinted frame."""
+    auto_masks); ``preview``, when given, gets ``.stdin.write`` of each tinted frame.
+    ``seeds`` ({frame, objects: [{box, points}]} in pixels, ``seeds_in_pixels``): the objects
+    are the ones given, from that frame to the end (nothing before it); none found by SAM2."""
     out = Path(out_dir)
     (out / "labels").mkdir(parents=True, exist_ok=True)
     for old in (out / "labels").glob("*.png"):
         old.unlink()
 
-    if cuts is None:
+    if seeds is not None:                            # the objects asked for: followed to the end
+        n = sum(1 for _ in frames())
+        starts = [0]
+    elif cuts is None:
         starts, n = find_cuts(frames(), cut)
     else:
         n = sum(1 for _ in frames())
@@ -157,12 +178,22 @@ def write_mask_track(video: str, frames: Callable[[], Iterable[np.ndarray]], seg
             live.append(oid)
         return len(found)
 
+    seed_frame = min(int(seeds["frame"]), max(0, n - 1)) if seeds is not None else -1
     for i, frame in enumerate(frames()):
         if i >= n:
             break
         segmenter.set_frame(i, frame)
         s = int(shot_of[i])
-        if i == starts[s]:
+        if seeds is not None:
+            if i == seed_frame:
+                for prompt in seeds["objects"]:
+                    oid = next_id
+                    next_id += 1
+                    segmenter.add(oid, frames=n - i, prompt=prompt)
+                    objects[oid] = {"id": oid, "shot": 0, "first": i, "last": i, "found": "seed",
+                                    "colour": [0, 0, 0], "share": 0.0}
+                    live.append(oid)
+        elif i == starts[s]:
             for oid in live:
                 segmenter.forget(oid)
             live.clear()
@@ -173,6 +204,11 @@ def write_mask_track(video: str, frames: Callable[[], Iterable[np.ndarray]], seg
             last_seed = i
         masks = segmenter.step()
         live[:] = [oid for oid in live if oid in masks]
+        for oid, m in masks.items():                  # a seeded object: its colour once it is seen
+            if objects.get(oid, {}).get("found") == "seed" and not objects[oid]["share"] and m.any():
+                ys, xs = np.nonzero(m)
+                objects[oid]["colour"] = [int(v) for v in frame[ys, xs].mean(axis=0)]
+                objects[oid]["share"] = round(float(m.mean()), 5)
 
         H, W = frame.shape[:2]
         labels = np.zeros((H, W), np.uint16)
@@ -204,7 +240,7 @@ def write_mask_track(video: str, frames: Callable[[], Iterable[np.ndarray]], seg
             "params": {"max_objects": max_objects, "min_share": min_share, "max_share": max_share,
                        "granularity": granularity, "reseed": reseed, "cut": cut,
                        "points_per_side": points_per_side, "min_iou": min_iou,
-                       "min_stability": min_stability},
+                       "min_stability": min_stability, "seeds": seeds},
             "shots": [{"first": a, "last": b - 1} for a, b in zip(starts, ends)],
             "objects": [objects[k] for k in sorted(objects)]}
     (out / "track.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")

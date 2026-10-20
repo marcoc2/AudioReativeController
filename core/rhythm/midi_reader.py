@@ -98,16 +98,17 @@ def _lay_bars(total_beats: float, first: Tuple[int, int],
     by_bar = dict(at_bar)
     pending = sorted(at_beat)
     sig, pos, bar = first, 0.0, 1
-    downbeats, bar_beats = [], []
+    downbeats, bar_beats, sigs = [], [], []
     while pos < total_beats or not downbeats:
         while pending and pending[0][0] <= pos + 1e-6:
             sig = pending.pop(0)[1]
         sig = by_bar.get(bar, sig)
         downbeats.append(pos)
         bar_beats.append(sig[0])
+        sigs.append(sig)
         pos += sig[0] * 4.0 / sig[1]          # bar length in quarter notes
         bar += 1
-    return np.array(downbeats), np.array(bar_beats, dtype=int)
+    return np.array(downbeats), np.array(bar_beats, dtype=int), sigs
 
 
 def read_midi(
@@ -179,6 +180,7 @@ def read_midi(
                                   channel=ch, duration=0.0, track=names[ti], track_index=ti))
     notes.sort(key=lambda n: n.time)
 
+    given = time_signature is not None
     if time_signature is None:
         time_signature = ts_meta if ts_meta else (4, 4)
 
@@ -205,7 +207,9 @@ def read_midi(
         later   = [(sec / beat_dur, sig) for sec, sig in ts_events if sec > 1e-6]
         if later or meter_changes:
             # The meter moves along the song: lay the bars one by one.
-            downbeats, bar_beats = _lay_bars(last_t / beat_dur, time_signature, later, meter_changes or ())
+            downbeats, bar_beats, sigs = _lay_bars(last_t / beat_dur, time_signature, later, meter_changes or ())
+            if not given:                     # the song's meter: most bars' (a short first bar is not it)
+                time_signature = max(set(sigs), key=lambda g: (sigs.count(g), g != sigs[0]))
             return (
                 RhythmGrid(
                     bpm=bpm, time_signature=time_signature, fps=fps,

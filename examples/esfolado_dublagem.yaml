@@ -19,7 +19,7 @@
 #       --output render_output/footage/LTX23_multiframe_00775_segments --max-objects 4 --cuts detect \
 #       --sam2-weights <dir>          (2: Peppa, 3: George, 4: her open mouth)
 #   python clip_generator.py --file input/esfolado/esfolado_mix_15_10_2026-full.mp3 \
-#       --midi input/esfolado/esfolado.mid --clips C:/Users/marco/Videos/ltx2/curadoria \
+#       --midi input/esfolado/esfolado_reaper.mid --clips C:/Users/marco/Videos/ltx2/curadoria \
 #       --clip-fit cover --seed 7 --scene examples/esfolado_dublagem.yaml \
 #       --start-time 88 --bars 5 --resolution 480x854 --fps 30 \
 #       --output render_output/esfolado_dublagem_88.mp4

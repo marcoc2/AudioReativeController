@@ -1,0 +1,122 @@
+# The demos' own recipes (core/demos.py): what a demo shows when the catalog's defaults, or
+# the me_diz scene where the layer was tuned, would not show it well.
+#
+#   <key>:
+#     layer: {...}        the layer as in a scene (the loop's tracks: "drums (midi)" 36 kick,
+#                         38 snare, 42/46 hats, 51 ride; "organ" chords; "e-piano"; "bass acid";
+#                         the chords: score: render_output/demos/_loop/score)
+#     set: {...}          or: values changed on the tuned scene's layer (or the defaults)
+#     drop: [key, ...]    and keys taken off it
+#     backdrop: grid      black | grid | figure | clip | cuts | figures
+#     lanes: [...]        the meters' lanes (default: the knobs the music moves in layer)
+#     note: why
+
+meters:
+  note: the read-out itself, over the clip
+  layer:
+    source: meters
+    title: meters
+    subtitle: what drives a scene, scrolling past a playhead
+    lanes:
+      - {label: drums, roll: {track: drums (midi)}}
+      - {label: organ, roll: {track: organ}}
+      - {label: chord, chords: {score: render_output/demos/_loop/score, snap: beat}}
+      - {label: kick -> a knob, knob: {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}, range: [0, 1]}
+
+cast:
+  note: the tuned scene sings with the organ above its range here; the cover's acts show at once
+  layer:
+    source: cast
+    roles:
+      - {who: largest, plays: {track: drums (midi), notes: [36]}, act: punch, amount: 0.3}
+      - {who: second, plays: {track: drums (midi), notes: [38]}, act: shake, amount: 28}
+      - {who: third, plays: {track: drums (midi), notes: [42, 46, 51]}, act: glow, width: 10, color: [255, 235, 160]}
+      - {who: largest, plays: {track: e-piano}, act: echo, trail: 2, every: 0.08, amount: 0.6}
+  lanes:
+    - {label: kick -> the biggest punches, roll: {track: drums (midi), notes: [36]}}
+    - {label: snare -> the second shakes, roll: {track: drums (midi), notes: [38]}}
+    - {label: hats -> the third glows, roll: {track: drums (midi), notes: [42, 46, 51]}}
+
+cubes:
+  note: "its faces play clips of their own (required), from the library"
+  layer:
+    source: cubes
+    clips_dir: render_output/esfolado_fundo
+
+time_map:
+  note: its map is the figures (a mask track) by default
+  backdrop: figures
+
+solid:
+  note: a plain colour is only seen coming and going; here it flashes on the kick
+  layer:
+    source: solid
+    color: [255, 140, 40]
+    triggers:
+      kick: {track: drums (midi), notes: [36], envelope: 0.3}
+  lanes:
+    - {label: kick -> the colour flashes, roll: {track: drums (midi), notes: [36]}}
+
+flame:
+  note: the tuned scene paints the figure with the video under it; over black that is dark
+  drop: [paint, paint_mix, paint_gain]
+
+rgb_noise:
+  note: the default is too faint to see at this size; stronger, and a burst on the snare
+  set:
+    amount: 0.5
+    trigger: {track: drums (midi), notes: [38], envelope: 0.25}
+
+shockwave:
+  note: rings go out only on notes (none by default), and it reads a drawing's ink lines
+  backdrop: clip
+  set:
+    rings: {track: drums (midi), notes: [36, 38]}
+    punch: {track: drums (midi), notes: [36], envelope: 0.3}
+    center: random
+    split: 0.4
+  lanes:
+    - {label: kick and snare -> a ring each, roll: {track: drums (midi), notes: [36, 38]}}
+
+drops:
+  note: drops fall only on notes (none by default); bigger, so they show at this size
+  set:
+    hits: {track: drums (midi), notes: [38]}
+    radius: 16
+    boost: 2.2
+    life: 3.0
+  lanes:
+    - {label: snare -> a drop falls, roll: {track: drums (midi), notes: [38]}}
+
+pixel_sort:
+  note: swept from none of the picture to all of it, over two bars
+  set:
+    amount: {lfo: tri, period: 2/1}
+
+shadertoy:kifs_acorde_arc:
+  note: the slicing plane swept past the figure most of the bar; a narrower sweep keeps it in view
+  set:
+    uniforms:
+      u_slice: {lfo: tri, period: 2/1, gain: 1.6, bias: -0.8}
+
+shadertoy:sombras_2d_kicks:
+  note: a light comes on with each kick of the bar (u_count), the newest flashing (u_flash)
+  layer:
+    source: shadertoy
+    file: shaders/shadertoy/sombras_2d_kicks
+    uniforms:
+      u_count: {count: {track: drums (midi), notes: [36]}, per: bar}
+      u_flash: {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}
+
+mouths:
+  note: they open with the voice (stems.vocals), which the loop has none of; here the organ's
+    range opens them, the snare clenches the teeth, the kick drops the jaw
+  set:
+    jaw_from: mid
+    harmony: {score: render_output/demos/_loop/score, snap: beat}
+    hits:
+      - {track: drums (midi), notes: [38], gesture: clench, envelope: 0.2}
+      - {track: drums (midi), notes: [36], gesture: gasp, envelope: 0.25}
+  lanes:
+    - {label: mid -> the jaws open, knob: mid}
+    - {label: snare -> clench · kick -> gasp, roll: {track: drums (midi), notes: [36, 38]}}
