@@ -1,0 +1,11 @@
+audio: input/cerne/cerne_21_10_2026.mp3
+midi: input/cerne/cerne.mid
+scene: scenes/cerne.yaml
+stems:
+  guitar: input/cerne/cerne_21_10_2026-001.mp3
+  piano: input/cerne/cerne_21_10_2026-002.mp3
+  strings: input/cerne/cerne_21_10_2026-003.mp3
+skip_separation: true
+render:
+  fps: 24
+  resolution: 854x480

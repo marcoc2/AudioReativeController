@@ -157,7 +157,7 @@
     </div>
     <div class="startactions">
       <button class="btn" id="bOpenFile">Open…</button>
-      <button class="btn" id="bNewFromAudio">New from an audio file…</button>
+      <button class="btn" id="bNewFromAudio">New from a song's folder…</button>
       <form class="pathform" id="pathForm" hidden>
         <input id="pathInput" placeholder="a project's path, e.g. projects/song.yaml" aria-label="Project path" spellcheck="false">
         <button class="btn primary" type="submit">Open</button>
@@ -169,6 +169,11 @@
 <div class="modal" id="renderDlg" hidden><div class="modalcard wide" role="dialog" aria-labelledby="renderTitle">
   <h3 id="renderTitle">Render the video</h3>
   <div id="renderBody" class="renderbody"></div>
+</div></div>
+
+<div class="modal" id="songDlg" hidden><div class="modalcard wide" role="dialog" aria-labelledby="songTitle">
+  <h3 id="songTitle">New project from a song's folder</h3>
+  <div id="songBody" class="renderbody"></div>
 </div></div>
 
 <div class="modal" id="samDlg" hidden><div class="modalcard wide sam" role="dialog" aria-labelledby="samTitle">

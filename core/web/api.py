@@ -21,9 +21,16 @@ from core.web.render import EngineRender, FinalRender, gpu
 from core.web.server import Events, Media
 from core.web.session import Session, resolve, shown_path
 from core.web.stream import EngineStream
+from core.web.util import num
 
 PREFS = ROOT / "render_output" / ".arrange.json"     # shared with the Arrange window (its clips folder)
 RECENT_MAX = 10
+SONG_AUDIO = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aif", ".aiff")
+
+
+def safe_name(text: str) -> str:
+    """A name for files and stems: letters, digits, - and _ (the rest becomes _)."""
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(text).strip()).strip("_")
 
 
 def _guarded(fn):
@@ -194,6 +201,84 @@ class Api:
             return {"path": None}
         path = got if isinstance(got, str) else got[0]
         return {"path": shown_path(Path(path))}
+
+    @_guarded
+    def scan_song_folder(self, path: str):
+        """What a song's folder holds for a new project (``path``: the folder, or a file in
+        it): its mix (the audio file the others' names start with, else the one named like
+        the folder), its MIDI, the other audio files as its stems (named by the person), a
+        REAPER project."""
+        from core import arrangement as arr
+        p = resolve(path)
+        folder = p if p.is_dir() else p.parent
+        if not folder.is_dir():
+            return {"error": f"no folder at {path}"}
+        files = sorted(f for f in folder.iterdir() if f.is_file())
+        audios = [f for f in files if f.suffix.lower() in SONG_AUDIO]
+        if not audios:
+            return {"error": f"no audio files in {shown_path(folder)}"}
+        if p.is_file() and p in audios:
+            mix = p
+        else:
+            heads = [a for a in audios if all(b.stem.lower().startswith(a.stem.lower()) for b in audios)]
+            named = [a for a in audios if a.stem.lower() == folder.name.lower()]
+            mix = (heads or named or audios)[0]
+        midis = [f for f in files if f.suffix.lower() in (".mid", ".midi")]
+        midi = next((m for m in midis if m.stem.lower() in (mix.stem.lower(), folder.name.lower())),
+                    midis[0] if len(midis) == 1 else None)
+        name = safe_name(folder.name if folder != ROOT / "input" else mix.stem)
+
+        def one(f):
+            secs = arr.duration(str(f))
+            rest = f.stem[len(mix.stem):].strip(" -_.") if f.stem.lower().startswith(mix.stem.lower()) else f.stem
+            return {"path": shown_path(f), "file": f.name, "url": self._media.url(f), "seconds": num(secs),
+                    "name": "" if rest.isdigit() or not rest else safe_name(rest)}
+        return {"folder": shown_path(folder), "name": name, "exists": (ROOT / "projects" / f"{name}.yaml").exists(),
+                "mix": shown_path(mix), "audios": [one(f) for f in audios],
+                "midis": [shown_path(m) for m in midis], "midi": shown_path(midi) if midi else "",
+                "rpps": [shown_path(f) for f in files if f.suffix.lower() == ".rpp"]}
+
+    @_guarded
+    def new_song_project(self, spec: dict):
+        """A project from a song's folder (``spec``: name, audio, midi, stems [{name, path}],
+        separation): projects/<name>.yaml and a new scenes/<name>.yaml. With stems of its
+        own the AI separation is off unless asked for (the song's spectrum, onsets and
+        sub-bands are read either way)."""
+        from core.scene_doc import NEW_SCENE
+        name = safe_name(spec.get("name") or "")
+        if not name:
+            return {"error": "the project needs a name"}
+        proj = ROOT / "projects" / f"{name}.yaml"
+        if proj.exists():
+            return {"error": f"{shown_path(proj)} already exists: open it, or give another name"}
+        song = resolve(spec.get("audio") or "")
+        if not song.is_file():
+            return {"error": f"no audio at {spec.get('audio')}"}
+        midi = str(spec.get("midi") or "").strip()
+        if midi and not resolve(midi).is_file():
+            return {"error": f"no MIDI at {midi}"}
+        stems: dict = {}
+        for row in spec.get("stems") or []:
+            sname, spath = safe_name(row.get("name") or ""), str(row.get("path") or "")
+            if not sname:
+                return {"error": f"{Path(spath).name}: give the stem a name (listen to it: ▶)"}
+            if sname in stems:
+                return {"error": f"two stems named {sname}"}
+            if not resolve(spath).is_file():
+                return {"error": f"no stem at {spath}"}
+            stems[sname] = shown_path(resolve(spath))
+        scene = ROOT / "scenes" / f"{name}.yaml"
+        if not scene.exists():
+            scene.parent.mkdir(parents=True, exist_ok=True)
+            scene.write_text(NEW_SCENE.format(name=name), encoding="utf-8", newline="\n")
+        data = {"audio": shown_path(song), "midi": shown_path(resolve(midi)) if midi else "", "scene": shown_path(scene),
+                "stems": stems, "skip_separation": bool(stems) and not spec.get("separation"),
+                "render": {"fps": 24, "resolution": "854x480"}}
+        proj.parent.mkdir(parents=True, exist_ok=True)
+        proj.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8", newline="\n")
+        self._events.log("in", f"new project {shown_path(proj)}: {song.name}, {len(stems)} stems"
+                               + (", no AI separation" if data["skip_separation"] else "") + f", the scene {shown_path(scene)}")
+        return {"path": shown_path(proj)}
 
     @_guarded
     def new_project(self, audio: str):

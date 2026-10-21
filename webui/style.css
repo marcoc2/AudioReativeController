@@ -470,3 +470,9 @@ button.bcat small { color: var(--dim); font-family: var(--f-mono); font-weight: 
 details.params summary { cursor: pointer; font-size: 11px; color: var(--dim); }
 .work > .browser > * { flex: none; }
 .work > .browser > .blist { flex: 1 1 0; }
+
+/* a new project from a song's folder: its stems, each heard and named */
+#songBody .subrow { display: grid; grid-template-columns: auto 140px minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+#songBody .subrow.off { opacity: .5; }
+#songBody .ib.playing { color: var(--accent); }
+#songBody .err { color: var(--danger); font-size: 12px; }

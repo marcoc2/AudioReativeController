@@ -1,0 +1,7 @@
+# cerne: a new scene. The clips layer is the base (and the cut schedule the cut knobs
+# read); add the layers on top in the editor.
+video:
+  clip_per_bar: true
+  clip_order: shuffle
+  layers:
+    - source: clips

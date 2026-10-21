@@ -2780,7 +2780,7 @@ function renderSteps() {
 function showLoad(on) { $("loadPanel").hidden = !on; if (on) renderSteps(); }
 function projectMenu() {
   const cur = S && S.project.path;
-  const items = [{ label: "Open…", hint: inWebview ? "" : "a path", on: openFileDialog }, { label: "New from an audio file…", on: newFromAudio }, { label: "Projects…", on: showStart }];
+  const items = [{ label: "Open…", hint: inWebview ? "" : "a path", on: openFileDialog }, { label: "New from a song's folder…", hint: "its mix, MIDI and stems", on: newFromAudio }, { label: "Projects…", on: showStart }];
   const rec = (boot0.recent || []).filter(p => p.path !== cur).slice(0, 8);
   if (rec.length) items.push("hr", { sub: "Recent" }, ...rec.map(p => ({ label: p.name, hint: p.path, on: () => openProject(p.path) })));
   if (S) items.push("hr", { label: "Reload the scene from disk", on: reloadScene });
@@ -2791,13 +2791,60 @@ async function openFileDialog() {
   const r = await ask("pick_file", "project");
   if (r && r.path) openProject(r.path);
 }
+// a new project from a song's folder (as REAPER renders it): the mix, its MIDI and its stems,
+// each heard and named here; with stems of its own the AI separation is off
 async function newFromAudio() {
   let path = null;
-  if (inWebview) { const r = await ask("pick_file", "audio"); path = r && r.path; }
-  else { const v = await dialog("New from an audio file", "The song's path. A project and a new scene are made beside the others (projects/, scenes/); a MIDI file of the same name comes with it.", [{ label: "Make it", value: "ok", primary: true }, { label: "Cancel", value: null }], "input/"); path = v && v.value && v.text; }
+  if (inWebview) { const r = await ask("pick_file", "folder", false, "", "input/"); path = r && r.path; }
+  else { const v = await dialog("New from a song's folder", "The folder with the song (its mix), its MIDI and its stems, like input/cerne. A project and a new scene are made beside the others (projects/, scenes/).", [{ label: "Look in it", value: "ok", primary: true }, { label: "Cancel", value: null }], "input/"); path = v && v.value && v.text; }
   if (!path) return;
-  const r = await ask("new_project", path);
-  if (r) { toast(`made ${r.path}`); openProject(r.path); }
+  const got = await ask("scan_song_folder", path);
+  if (got) songDialog(got);
+}
+let songAudio = null;
+function songDialog(f) {
+  const dlg = $("songDlg"), box = $("songBody");
+  const rows = f.audios.map(a => ({ ...a, use: a.path !== f.mix }));
+  let mix = f.mix, midi = f.midi, separation = false;
+  const nameIn = h("input", { value: f.name, spellcheck: "false", "aria-label": "Project name" });
+  const stop = () => { if (songAudio) { songAudio.pause(); songAudio = null; } box.querySelectorAll(".playing").forEach(b => { b.classList.remove("playing"); b.textContent = "▶"; }); };
+  const play = (a, btn) => {
+    const was = btn.classList.contains("playing"); stop(); if (was) return;
+    songAudio = new Audio(a.url); songAudio.currentTime = Math.min(30, (a.seconds || 0) / 4); songAudio.play().catch(() => { });
+    btn.classList.add("playing"); btn.textContent = "■";
+  };
+  const close = () => { stop(); dlg.hidden = true; };
+  const draw = () => {
+    const stems = rows.filter(r => r.path !== mix);
+    const lens = new Set(f.audios.map(a => Math.round((a.seconds || 0) * 10)));
+    fill(box,
+      h("div", { class: "about mono", text: f.folder }),
+      field("Project", nameIn, f.exists ? "projects/<name>.yaml exists: give another name" : "projects/<name>.yaml and scenes/<name>.yaml"),
+      h("div", { class: "fields" },
+        field("The song (its mix)", h("select", { onchange: e => { mix = e.target.value; draw(); } }, f.audios.map(a => h("option", { value: a.path, selected: a.path === mix, text: a.file })))),
+        field("MIDI", h("select", { onchange: e => { midi = e.target.value; } }, h("option", { value: "", text: "none: the bars from the song's beat" }), f.midis.map(m => h("option", { value: m, selected: m === midi, text: m.split("/").pop() }))))),
+      sect(`Its stems (${stems.filter(r => r.use).length} of ${stems.length})`),
+      stems.length ? h("div", { class: "subrows" }, stems.map(r => {
+        const btn = h("button", { class: "ib", title: "listen", "aria-label": `Listen to ${r.file}`, onclick: () => play(r, btn) }, "▶");
+        return h("div", { class: "subrow" + (r.use ? "" : " off") },
+          h("input", { type: "checkbox", checked: r.use, "aria-label": `Use ${r.file}`, onchange: e => { r.use = e.target.checked; draw(); } }),
+          h("input", { value: r.name, placeholder: "its name (listen ▶)", class: "small", spellcheck: "false", "aria-label": `${r.file}: its name`, oninput: e => { r.name = e.target.value; } }),
+          h("span", { class: "mono small", text: `${r.file} · ${fmt(r.seconds || 0)} s` }), btn);
+      })) : h("div", { class: "about", text: "No other audio files: the AI separation makes the stems." }),
+      lens.size > 1 ? h("div", { class: "about", style: "color:var(--accent)", text: "Their lengths differ: stems should be rendered from the same start as the mix." }) : null,
+      check("AI stem separation too", separation || !stems.some(r => r.use), v => { separation = v; }),
+      h("div", { class: "hint", text: "The song's spectrum, onsets and sub-bands are read either way (some seconds); the AI separation is what the stems spare. " + (f.rpps.length ? `REAPER: ${f.rpps.join(", ")}` : "") }),
+      h("div", { class: "err", id: "songErr" }),
+      h("div", { class: "btnrow" }, h("span", { class: "spacer" }), h("button", { class: "btn", onclick: close }, "Cancel"),
+        h("button", { class: "btn primary", onclick: async () => {
+          const r = await call("new_song_project", { name: nameIn.value, audio: mix, midi, separation,
+            stems: stems.filter(x => x.use).map(x => ({ name: x.name, path: x.path })) }).catch(e => ({ error: e.message }));
+          if (!r || r.error) { $("songErr").textContent = r ? r.error : "no answer"; return; }
+          close(); toast(`made ${r.path}`); openProject(r.path);
+        } }, "Make the project")));
+  };
+  draw();
+  dlg.hidden = false; nameIn.focus();
 }
 
 // ---------------------------------------------------------------------------
