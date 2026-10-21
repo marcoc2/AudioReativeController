@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Optional
 
 from core.web import ROOT, WORK
-from core.web.session import Session, preview_res, resolve
+from core.web.session import Session
+from core.web.util import preview_res, resolve
 
 FRAME_LINE = re.compile(r"\s*(\d+)/(\d+)\s+t=")
 

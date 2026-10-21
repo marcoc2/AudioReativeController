@@ -21,7 +21,8 @@ from typing import Callable, Optional
 
 import yaml
 
-from core.web.session import Session, cue_key, resolve, shown_path
+from core.web.session import Session
+from core.web.util import cue_key, resolve, shown_path
 
 STEPS = [
     ("project", "The project file"),

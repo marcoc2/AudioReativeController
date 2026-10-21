@@ -447,3 +447,137 @@ def colour(file: Optional[str]) -> tuple:
     h = int(hashlib.md5(str(file).encode()).hexdigest()[:6], 16)
     r, g, b = (h >> 16) & 255, (h >> 8) & 255, h & 255
     return (90 + r % 150, 90 + g % 150, 90 + b % 150)
+
+
+# ----------------------------------------------------------------------- the Arrange's rules
+# (what both Arrange windows do to a layer: the Dear PyGui one and the web one)
+
+SAM = "sam_cutout"
+NOT_LINKS = {"source", "file", "name", "role", "blocks", "bars", "cues", "cutout", "fx", "mute", "lane_row",
+             "enabled", "fit", "loop", "flip", "spill", "fade_in", "fade_out", "layers", "canvas", "pins",
+             "blend", "hold", "mask"}
+PLACE_KEYS = {"x", "y", "scale", "opacity"}     # what any clip can be given
+
+
+def recast(spec: dict, lane: str) -> dict:
+    """A clip moved to the other lane: a character in the FG (in its place in the frame), the
+    whole frame in the BG."""
+    out = dict(spec)
+    if spec.get("source") != "footage":
+        return out
+    if lane == FG:
+        out["role"] = "foreground"
+        if out.get("fit", "contain") == "cover":
+            out["fit"] = "contain"
+        for k, v in (("scale", 0.6), ("x", 0.5), ("y", 0.62)):
+            out.setdefault(k, v)
+    else:
+        out.update(role="background", fit="cover")
+        for k in ("scale", "x", "y"):
+            out.pop(k, None)
+    return out
+
+
+def mutes(spec: dict) -> list:
+    """The bars a layer is hidden in (``mute:``), as sorted [first, last] spans."""
+    got = spec.get("mute") or []
+    got = [got] if got and not isinstance(got[0], (list, tuple)) else got
+    return sorted([int(a), int(b)] for a, b in got)
+
+
+def bar_spans(bars) -> list:
+    """A set of bar numbers as [first, last] runs."""
+    out: list = []
+    for b in sorted(bars):
+        if out and b == out[-1][1] + 1:
+            out[-1][1] = b
+        else:
+            out.append([b, b])
+    return out
+
+
+def with_mutes(spec: dict, first: int, last: int, hide: bool = True) -> dict:
+    """``spec`` hidden in bars first..last (``hide`` False: shown there again). It goes on
+    underneath: a character cut by its REAPER cues stays in sync with its sound."""
+    first, last = min(first, last), max(first, last)
+    bars = {b for a, z in mutes(spec) for b in range(a, z + 1)}
+    bars = bars | set(range(first, last + 1)) if hide else bars - set(range(first, last + 1))
+    out = {k: v for k, v in spec.items() if k != "mute"}
+    if bars:
+        out["mute"] = bar_spans(bars)
+    return out
+
+
+def parse_bars(text: str):
+    """"9-12, 30-33" -> [[9, 12], [30, 33]]; "" -> None (the whole time its owner plays)."""
+    out = []
+    for part in str(text or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        a, _, b = part.partition("-")
+        a, b = int(a), int(b or a)
+        out.append([min(a, b), max(a, b)])
+    return out or None
+
+
+def bars_text(pairs) -> str:
+    """[[9, 12], [30, 30]] (or Blocks) -> "9-12, 30"."""
+    out = []
+    for p in pairs:
+        a, b = (p.first, p.last) if isinstance(p, Block) else (int(p[0]), int(p[1]))
+        out.append(f"{a}-{b}" if b != a else str(a))
+    return ", ".join(out)
+
+
+def is_link(v) -> bool:
+    """A value the music moves (a knob: a pulse on the kick, an LFO, the notes' pitch...)."""
+    from core.knob_forms import form_of
+    return isinstance(v, dict) and form_of(v) not in (None, "constant")
+
+
+def links_of(spec: dict) -> dict:
+    """{path: value}: what in a layer the music moves: its knobs (a shader's uniforms too)
+    and who plays it (``trigger``, ``triggers``)."""
+    out = {}
+    for k, v in (spec or {}).items():
+        if k in NOT_LINKS:
+            continue
+        if k == "uniforms" and isinstance(v, dict):
+            out.update({("uniforms", u): uv for u, uv in v.items() if is_link(uv)})
+        elif is_link(v) or k in ("trigger", "triggers") and isinstance(v, dict):
+            out[(k,)] = v
+    return out
+
+
+def takes(spec: dict, path: tuple) -> bool:
+    """``spec`` (a layer) has room for the link at ``path``: a key it has or its kind takes
+    (a clip's place and size; a Generator's or FX's own parameters; a shader's uniform)."""
+    from core import catalog
+    key = path[0]
+    entry = catalog.of_layer(spec)
+    if key == "uniforms":
+        return isinstance(spec.get("uniforms"), dict) and path[1] in spec["uniforms"] or \
+            (spec.get("source") == "shadertoy" and any(p.name == path[1] for p in (entry.params if entry else [])))
+    if key in spec or spec.get("source") == "footage" and key in PLACE_KEYS or key == "opacity":
+        return True
+    return entry is not None and any(p.name == key for p in entry.params)
+
+
+def pasted_fx(fx: list, onto: dict, from_file=None) -> tuple:
+    """FX copied from another layer, as they go onto ``onto``: over all its bars (the copied
+    ones' bars were the other block's); a SAM2 cutout only on a clip, and its seeds, drawn on
+    another clip, back to auto. Returns (fx, a note to tell)."""
+    import copy
+    out, note = [], ""
+    for f in copy.deepcopy(fx):
+        f.pop("bars", None)
+        f.pop(ROW_KEY, None)
+        if f.get("source") == SAM:
+            if onto.get("source") != "footage":
+                continue
+            if isinstance(f.get("seeds"), dict) and onto.get("file") != from_file:
+                f["seeds"] = "auto"
+                note = " (the SAM2 seeds were the other clip's: here it finds the objects by itself)"
+        out.append(f)
+    return out, note

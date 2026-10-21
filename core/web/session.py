@@ -2,10 +2,11 @@
 
 The scene is kept as the Arrange window keeps it: one ``[node, base, spec]`` per top-level
 layer (the layer's tree in the scene file, what it said when loaded, what it says now), the
-layers grouped into the montage, the BG and FG lanes and the master (``arrangement.grouped``).
-Each edit from the page is one call here; it changes the specs, keeps the undo history and
-answers with the lanes as they now are. Save patches what changed into the scene file
-(``SceneDoc.set_layers``): comments, anchors and the layout of what did not change survive.
+layers grouped into the montage, the BG and FG lanes and the master (``arrangement.grouped``),
+and the montage's own settings (the rest of ``video:``). Each edit from the page is one call
+(core/web/edits.py); it changes the specs, keeps the undo history and answers with the lanes
+as they now are. Save patches what changed into the scene file (``SceneDoc.set_layers``):
+comments, anchors and the layout of what did not change survive.
 
 One lock guards all of it; what takes long (a knob over the song, the montage) is worked
 out from a copy taken under the lock and stored back only if nothing changed meanwhile.
@@ -14,7 +15,7 @@ from __future__ import annotations
 
 import copy
 import json
-import math
+import re
 import threading
 import time
 from pathlib import Path
@@ -22,55 +23,13 @@ from typing import Callable, Optional
 
 import yaml
 
-from core.web import ROOT
+from core.web.edits import Edits
+from core.web.util import (PREVIEW_RES, RESOLUTIONS, copy_keeping_signals, cue_key, num, preview_res, resolve,  # noqa: F401
+                           shader_live, shown_path, yaml_text)
 
 KNOB_HZ = 30                       # a knob's value is sampled this often over the song
 UNDO_MAX = 200
-PREVIEW_RES = "640x360"
-
-
-def num(v) -> float:
-    """A JSON-safe number (numpy, NaN and infinities made plain)."""
-    v = float(v)
-    return v if math.isfinite(v) else 0.0
-
-
-def resolve(path, base: Path = ROOT) -> Path:
-    p = Path(str(path))
-    return p if p.is_absolute() else base / p
-
-
-def shown_path(p: Path) -> str:
-    """A path as the project files write it: relative to the repository when inside it."""
-    p = Path(p)
-    try:
-        return p.resolve().relative_to(ROOT).as_posix()
-    except ValueError:
-        return p.as_posix()
-
-
-def yaml_text(value) -> str:
-    from core.scene_doc import plain
-    return yaml.safe_dump(plain(value), default_flow_style=True, sort_keys=False, width=4096).strip()
-
-
-def shader_live(entry) -> bool:
-    """A shader the page can run itself: one pass, reading nothing or the picture below."""
-    if not entry or entry.source != "shadertoy" or not entry.file or not entry.file.endswith(".glsl"):
-        return False
-    from core import shadertoy
-    try:
-        src = shadertoy.load(resolve(entry.file))
-    except Exception:
-        return False
-    return set(src["channels"].get("image", {}).values()) <= {"frame"}
-
-
-def copy_keeping_signals(obj):
-    """A deep copy whose signals (anchored parts of the scene) stay the scene's objects."""
-    from core.scene_doc import _anchor_name, _walk
-    memo = {id(o): o for _, o in _walk(obj) if _anchor_name(o)}
-    return copy.deepcopy(obj, memo)
+LANES = ("master", "fg", "fgfx", "bg", "bgfx")
 
 
 def comment_names(seq, first_lead=None) -> list:
@@ -78,7 +37,6 @@ def comment_names(seq, first_lead=None) -> list:
     layer's line (``file: lion.mp4  # the lion``), else the line just above it (its first
     clause; a ``# ---- section`` line is no name). As the Arrange window reads them; the lines
     above the first layer are kept by the key holding the list (``first_lead``)."""
-    import re
     out = []
     for k, node in enumerate(seq):
         eol = ""
@@ -123,11 +81,7 @@ def _name_from_comments(pairs: list, seq, first_lead=None) -> None:
                 base["name"] = name
 
 
-LANE_TARGETS = {"bg": ("BG", "layers"), "fg": ("FG", "layers"), "bgfx": ("BG", "fx"), "fgfx": ("FG", "fx"),
-                "master": ("master",)}
-
-
-class Session:
+class Session(Edits):
     """The open project: its song and bars, its scene, the arrangement being edited."""
 
     def __init__(self, media, events):
@@ -149,6 +103,8 @@ class Session:
             self.doc = None
             self.scene: Optional[Path] = None
             self.items: list = []           # [node, base, spec] per top-level layer
+            self.video: dict = {}           # the montage's settings (video: but its layers), as now
+            self.video_base: dict = {}      # and as loaded
             self.converted = False
             self.undo: list = []
             self.redo: list = []
@@ -161,6 +117,8 @@ class Session:
             self.montage: Optional[list] = None
             self.montage_gen = 0
             self.segments: list = []
+            self.board_links = None         # what Copy took: music links, FX
+            self.board_fx = None
 
     # -- what the loader fills in ------------------------------------------------------
     def set_project(self, proj: dict, path: Optional[Path]) -> None:
@@ -197,6 +155,8 @@ class Session:
             layers, self.converted = arr.grouped(specs)
             self.doc = doc
             self.items = [[*known.get(id(s), (None, None)), s] for s in layers]
+            self.video_base = {k: v for k, v in doc.plain_video().items() if k != "layers"}
+            self.video = copy.deepcopy(self.video_base)
             self.undo, self.redo, self.knobs = [], [], {}
             self.dirty = self.converted
 
@@ -240,21 +200,62 @@ class Session:
         """What the page draws of the arrangement (it asks for this after every edit)."""
         with self.lock:
             if self.grid is None or self.doc is None:
-                return {"lanes": [], "pins": {}, "undo": 0, "redo": 0, "montage": None, "dirty": False, "saved_at": ""}
-            return {"lanes": self.lanes(), "pins": self.pins(), "undo": len(self.undo), "redo": len(self.redo),
-                    "montage": self.montage, "dirty": self.dirty, "saved_at": self.saved_at}
+                return {"lanes": [], "rows": {}, "pins": {}, "undo": 0, "redo": 0, "montage": None, "dirty": False,
+                        "saved_at": "", "has": {}}
+            members, rows = [], {}
+            for lane in LANES:
+                packed, n = self.packed(lane)
+                rows[lane] = n
+                for k, (path, spec) in enumerate(self.track(lane)):
+                    members.append(self.member(lane, path, spec, packed.get(k, 0)))
+            gi = self.groups()
+            return {"lanes": members, "rows": rows, "pins": self.pins(), "undo": len(self.undo),
+                    "redo": len(self.redo), "montage": self.montage, "dirty": self.dirty, "saved_at": self.saved_at,
+                    "has": {"BG": "BG" in gi, "FG": "FG" in gi,
+                            "clips": any(s.get("source", "clips") == "clips" for s in self.specs())},
+                    "groups": {name: {"spill": bool(self.specs()[i].get("spill")),
+                                      "fx": len(self.specs()[i].get("fx") or [])} for name, i in gi.items()},
+                    "board": {"links": (self.board_links or {}).get("from"), "fx": (self.board_fx or {}).get("from")}}
 
     def song(self) -> dict:
         with self.lock:
             g = self.grid
-            n = len(self.bars()) - 1
+            db = self.bars()
+            n = len(db) - 1
             bb = [int(x) for x in g.bar_beats.tolist()] if getattr(g, "bar_beats", None) is not None else []
             bb += [int(g.time_signature[0])] * max(0, n - len(bb))
+            counts = [0] * n
+            for note in self.notes:
+                counts[self.bar_at(note.time) - 1] += 1
+            top = max(counts + [1])
             return {"audio_url": self.media.url(self.audio) if self.audio and self.audio.is_file() else None,
-                    "duration": self.dur, "bars": self.bars(), "bar_beats": bb,
+                    "duration": self.dur, "bars": db, "bar_beats": bb[:n],
                     "beats": [num(x) for x in (g.beats if g.beats is not None else [])],
                     "bpm": num(g.bpm), "meter": f"{g.time_signature[0]}/{g.time_signature[1]}",
-                    "from_midi": bool(self.proj.get("midi"))}
+                    "from_midi": bool(self.proj.get("midi")), "density": [round(c / top, 3) for c in counts],
+                    "markers": self.markers()}
+
+    def markers(self) -> list:
+        """The REAPER project's markers and regions, when the project has one (its ``reaper:``,
+        else the one the scene's cues come from)."""
+        from core.reaper_project import markers
+        rpp = self.proj.get("reaper")
+        if not rpp:
+            for s in self.specs():
+                for x in [s] + list(s.get("layers") or []):
+                    c = x.get("cues") if isinstance(x, dict) else None
+                    if isinstance(c, dict) and c.get("reaper"):
+                        rpp = c["reaper"]
+                        break
+                if rpp:
+                    break
+        if not rpp or not resolve(rpp).is_file():
+            return []
+        try:
+            return [{"t": num(t), "name": name, "end": num(end) if end is not None else None}
+                    for t, name, end in markers(str(resolve(rpp)))]
+        except OSError:
+            return []
 
     def project_info(self) -> dict:
         with self.lock:
@@ -266,6 +267,7 @@ class Session:
                     "midi": Path(str(self.proj["midi"])).name if self.proj.get("midi") else None,
                     "converted": self.converted,
                     "resolution": str(render.get("resolution") or "854x480"),
+                    "resolutions": [{"shape": shape, "sizes": list(sizes)} for shape, sizes in RESOLUTIONS],
                     "clip_fit": str(render.get("clip_fit") or "contain")}
 
     def tracks(self) -> list:
@@ -287,6 +289,7 @@ class Session:
                 for e in ents:
                     out.append({"key": e.key, "label": e.label, "kind": "gen" if kind == catalog.GENERATOR else "fx",
                                 "cat": cat, "about": e.about, "file": e.file or "", "live": shader_live(e),
+                                "takes_input": bool(e.takes_input), "needs": list(e.needs),
                                 "params": [{"name": p.name, "default": num(p.default), "about": p.about}
                                            for p in e.params if p.knob]})
         return out
@@ -303,25 +306,12 @@ class Session:
         return [{"path": str(p), "name": p.name, "url": self.media.url(p)} for p in arr.list_clips(str(d))[:300]]
 
     def lanes(self) -> list:
-        gi = self.groups()
-        specs = self.specs()
-        out = []
-        for lane, gname, key in (("fg", "FG", "layers"), ("fgfx", "FG", "fx"), ("bg", "BG", "layers"), ("bgfx", "BG", "fx")):
-            if gname not in gi:
-                continue
-            for i, spec in enumerate(specs[gi[gname]].get(key) or []):
-                if isinstance(spec, dict):
-                    out.append(self.member(lane, [gname, key, i], spec))
-        after = (max(gi.values()) + 1) if gi else 0
-        for i in range(after, len(specs)):
-            spec = specs[i]
-            if isinstance(spec, dict) and spec.get("source", "clips") not in ("clips", "group"):
-                out.append(self.member("master", ["master", i], spec))
-        return out
+        return self.state()["lanes"]
 
-    def member(self, lane: str, ref: list, spec: dict) -> dict:
+    def member(self, lane: str, ref: list, spec: dict, row: int = 0) -> dict:
         from core import arrangement as arr
         from core import catalog
+        from core.scene_doc import plain
         kind = arr.kind_of(spec)
         entry = catalog.of_layer(spec)
         cued = spec.get("cues") is not None
@@ -348,23 +338,58 @@ class Session:
                 if not p.knob:
                     continue
                 v = here.get(p.name) if isinstance(here, dict) else None
-                row = {"name": p.name, "about": p.about, "default": num(p.default)}
+                prow = {"name": p.name, "about": p.about, "default": num(p.default)}
                 if v is None or isinstance(v, bool):
-                    row["v"] = num(p.default)
+                    prow["v"] = num(p.default)
                 elif isinstance(v, (int, float)):
-                    row["v"] = num(v)
+                    prow["v"] = num(v)
                 else:
-                    row["knob"] = yaml_text(v)
-                params.append(row)
+                    prow["knob"] = yaml_text(v)
+                params.append(prow)
         opacity = spec.get("opacity", 1.0)
+        fx = [f for f in spec.get("fx") or [] if isinstance(f, dict)]
+        place = {}
+        if kind == arr.CLIP:
+            for key, default in (("x", 0.5), ("y", 0.5), ("scale", 1.0)):
+                v = spec.get(key, default)
+                place[key] = num(v) if isinstance(v, (int, float)) else {"knob": yaml_text(v)}
+            cut = spec.get("cutout")
+            track = cut.get("track") if isinstance(cut, dict) else cut
+            found = arr.find_mask_track(own) if own and not track else None
+            place.update(fit=spec.get("fit", "contain"), flip=bool(spec.get("flip")), loop=bool(spec.get("loop")),
+                         cutout=Path(str(track)).name if track else None,
+                         cutout_spec=plain(cut) if isinstance(cut, dict) else ({"track": cut} if cut else None),
+                         drop=bool(isinstance(cut, dict) and cut.get("drop")),
+                         sam=next((j for j, f in enumerate(fx) if f.get("source") == arr.SAM), None),
+                         mask_track=found)
         return {"ref": ref, "lane": lane, "kind": {"clip": "clip", "generator": "gen", "fx": "fx"}[kind],
-                "label": arr.label_of(spec), "key": entry.key if entry else spec.get("source"),
+                "label": arr.label_of(spec), "name": spec.get("name") or "",
+                "default_label": arr.label_of({k: v for k, v in spec.items() if k != "name"}),
+                "key": entry.key if entry else spec.get("source"), "about": entry.about if entry else "",
                 "file": own or "", "spans": spans, "always": not spans and not cued,
                 "cued": cued, "cues": cue_state, "cue_error": got.get("error") if cued and isinstance(got, dict) else None,
+                "cue_source": self._cue_source(spec) if cued else None,
+                "mutes": arr.mutes(spec), "bars_text": arr.bars_text(arr.windows_of(spec)),
                 "enabled": spec.get("enabled", True) is not False, "live": bool(live),
-                "blend": spec.get("blend", "normal"), "opacity": num(opacity) if isinstance(opacity, (int, float)) else 1.0,
-                "own_fx": len(spec.get("fx") or []), "row": spec.get(arr.ROW_KEY),
+                "blend": spec.get("blend", "normal"), "opacity": num(opacity) if isinstance(opacity, (int, float)) else None,
+                "opacity_knob": yaml_text(opacity) if not isinstance(opacity, (int, float)) else None,
+                "spill": bool(spec.get("spill")), "place": place,
+                "fx": [{"label": arr.label_of(f), "key": (catalog.of_layer(f).key if catalog.of_layer(f) else f.get("source")),
+                        "enabled": f.get("enabled", True) is not False, "bars_text": arr.bars_text(arr.windows_of(f)),
+                        "sam": f.get("source") == arr.SAM} for f in fx],
+                "own_fx": len(fx), "row": row,
                 "params": params, "yaml": yaml_text({k: v for k, v in spec.items() if k not in ("bars", "blocks")})}
+
+    @staticmethod
+    def _cue_source(spec: dict) -> str:
+        cues = spec.get("cues")
+        if isinstance(cues, dict) and cues.get("reaper"):
+            tracks = cues.get("tracks")
+            return (f"cut by the REAPER project {Path(str(cues['reaper'])).name}"
+                    + (f", track(s) {', '.join(map(str, tracks))}" if tracks else ""))
+        if isinstance(cues, (str, Path)):
+            return f"cut by the cue file {cues}"
+        return f"cut by {len(cues or [])} cue(s) written in the scene"
 
     def missing_clips(self) -> list:
         """(layer, file) of every clip block whose file is not on the disk."""
@@ -396,7 +421,7 @@ class Session:
         """What resolving the montage needs, copied under the lock: (generation, cfg)."""
         from core.scene_doc import plain
         with self.lock:
-            cfg = dict(self.doc.plain_video()) if self.doc is not None else {}
+            cfg = copy.deepcopy(self.video)
             cfg["layers"] = plain(self.specs())
             clips = self.proj.get("clips") or {}
             if clips.get("order") and clips["order"] != "(scene)":
@@ -416,7 +441,8 @@ class Session:
         start = float(self.grid.start_offset or 0.0)
         segs, _, _ = resolve_song(self.lib, self.grid, self.notes, cfg, self.fps, max(0.0, start), self.dur)
         paths = list(self.lib.paths)
-        out = [{"t0": num(s.t0), "t1": num(s.t1), "name": s.clip_name,
+        out = [{"t0": num(s.t0), "t1": num(s.t1), "name": s.clip_name, "from": num(s.src_t0), "dir": s.direction,
+                "path": str(paths[s.clip_idx]) if 0 <= s.clip_idx < len(paths) else None,
                 "url": self.media.url(paths[s.clip_idx]) if 0 <= s.clip_idx < len(paths) else None}
                for s in segs]
         with self.lock:
@@ -486,118 +512,13 @@ class Session:
                 self.knobs[key] = out
         return out
 
-    # -- edits (each one undoable; they answer with the lanes) -------------------------
-    def _snapshot(self) -> list:
-        return [[node, base, copy_keeping_signals(spec)] for node, base, spec in self.items]
-
-    def _push(self) -> None:
-        self.undo.append(self._snapshot())
-        del self.undo[:-UNDO_MAX]
-        self.redo.clear()
-        self.dirty = True
-
-    def _spec(self, ref: list) -> dict:
-        if ref[0] == "master":
-            return self.specs()[int(ref[1])]
-        return self.specs()[self.groups()[ref[0]]][ref[1]][int(ref[2])]
-
-    def _drop(self, ref: list, spec: dict) -> None:
-        if ref[0] == "master":
-            self.items = [it for it in self.items if it[2] is not spec]
-        else:
-            lst = self.specs()[self.groups()[ref[0]]][ref[1]]
-            lst[:] = [s for s in lst if s is not spec]
-
-    def _replace(self, ref: list, old: dict, new: dict) -> None:
-        if ref[0] == "master":
-            for it in self.items:
-                if it[2] is old:
-                    it[2] = new
-        else:
-            lst = self.specs()[self.groups()[ref[0]]][ref[1]]
-            lst[:] = [new if s is old else s for s in lst]
-
-    def _add_to(self, target: tuple, spec: dict) -> None:
-        from core import arrangement as arr
-        if target[0] == "master":
-            self.items.append([None, None, spec])
-            return
-        gi = self.groups()
-        if target[0] not in gi:
-            at = gi.get("FG", len(self.items)) if target[0] == "BG" else gi.get("BG", -1) + 1
-            self.items.insert(at, [None, None, arr.group(target[0])])
-        self.specs()[self.groups()[target[0]]].setdefault(target[1], []).append(spec)
-
-    def _edited(self, montage: bool = False) -> dict:
-        if montage:
-            self.montage = None
-            self.montage_later()
-        return self.state()
-
-    @staticmethod
-    def _set_spans(spec: dict, spans: list) -> dict:
-        """A member with these blocks; each block keeps its own clip, its ``from`` and speed."""
-        from core import arrangement as arr
-        if arr.kind_of(spec) == arr.CLIP:
-            return arr.with_blocks(spec, [arr.Block(int(s["first"]), int(s["last"]), float(s.get("from") or 0.0),
-                                                    float(s.get("rate") or 1.0), s.get("file") or None)
-                                          for s in spans])
-        return arr.with_windows(spec, [arr.Block(int(s["first"]), int(s["last"])) for s in spans])
-
-    def spans(self, ref: list, spans: list) -> dict:
-        """A member's blocks (``[{first, last, from?, rate?, file?}]``); none removes it."""
-        with self.lock:
-            self._push()
-            spec = self._spec(ref)
-            if not spans:
-                self._drop(ref, spec)
-            else:
-                self._replace(ref, spec, self._set_spans(spec, spans))
-            return self._edited()
-
-    def relane(self, ref: list, lane: str, spans: Optional[list] = None) -> dict:
-        """A member moved to another lane (BG <-> FG, or between FX tracks), with its blocks."""
-        from core import arrangement as arr
-        with self.lock:
-            self._push()
-            spec = self._spec(ref)
-            self._drop(ref, spec)
-            if spans:
-                spec = self._set_spans(spec, spans)
-            spec.pop(arr.ROW_KEY, None)
-            self._add_to(LANE_TARGETS[lane], spec)
-            return self._edited()
-
-    def add(self, lane: str, what: str, first: int, last: int) -> dict:
-        """A Generator / FX (``what`` its catalog key) or a clip (``what`` its path) put in a lane."""
-        from core import arrangement as arr
-        from core import catalog
-        with self.lock:
-            entry = catalog.by_key(what)
-            if entry:
-                spec = arr.with_windows(entry.spec(), [arr.Block(int(first), int(last))])
-            elif lane == "fg":
-                spec = arr.new_foreground(what, [arr.Block(int(first), int(last))])
-            else:
-                spec = arr.with_blocks({"source": "footage", "role": "background", "fit": "cover", "loop": True,
-                                        "file": shown_path(Path(what))}, [arr.Block(int(first), int(last))])
-            self._push()
-            self._add_to(LANE_TARGETS[lane], spec)
-            return self._edited()
-
-    def remove(self, ref: list) -> dict:
-        with self.lock:
-            self._push()
-            self._drop(ref, self._spec(ref))
-            return self._edited()
-
     def set_param(self, ref: list, name: str, value) -> dict:
         """A knob: a number, or YAML text of what in the music moves it (checked first)."""
+        from core import arrangement as arr
         from core import catalog
         from core.scene_doc import flow
-        from core import arrangement as arr
         with self.lock:
-            spec = self._spec(ref)
+            spec = self.get(ref)
             entry = catalog.of_layer(spec)
             where = f"{arr.label_of(spec)} · {name}"
             if isinstance(value, str):
@@ -611,57 +532,75 @@ class Session:
                     if "error" in got and "shown at the render" not in got["error"] and "still loading" not in got["error"]:
                         return {"error": f"{where}: {got['error']}", "where": where}
                     value = flow(value)
-            self._push()
-            holder = spec.setdefault("uniforms", {}) if entry and entry.source == "shadertoy" else spec
-            holder[name] = value
+
+            def put(s):
+                holder = s.setdefault("uniforms", {}) if entry and entry.source == "shadertoy" else s
+                holder[name] = value
+                return s
+            self._edit(ref, put)
             return self._edited()
 
-    def set_layer(self, ref: list, key: str, value) -> dict:
-        """blend, opacity, enabled, name."""
-        if key not in ("blend", "opacity", "enabled", "name"):
-            return {"error": f"{key}: not a layer setting"}
-        with self.lock:
-            self._push()
-            spec = self._spec(ref)
-            if (key == "enabled" and value) or (key == "name" and not value):
-                spec.pop(key, None)
-            else:
-                spec[key] = value
-            return self._edited()
+    # -- the undo history --------------------------------------------------------------
+    def _snapshot(self) -> tuple:
+        return ([[node, base, copy_keeping_signals(spec)] for node, base, spec in self.items],
+                copy.deepcopy(self.video))
 
-    def pin(self, bar: int, clip: Optional[str]) -> dict:
-        """Bar ``bar`` plays ``clip`` (a clip's name), "none" (nothing), or None (the montage's choice)."""
-        with self.lock:
-            self._push()
-            montage = next((s for s in self.specs() if s.get("source", "clips") == "clips"), None)
-            if montage is None:
-                montage = {"source": "clips"}
-                self.items.insert(0, [None, None, montage])
-            pins = {int(k): v for k, v in (montage.get("pins") or {}).items()}
-            if clip is None:
-                pins.pop(int(bar), None)
-            else:
-                pins[int(bar)] = clip
-            if pins:
-                montage["pins"] = dict(sorted(pins.items()))
-            else:
-                montage.pop("pins", None)
-            return self._edited(montage=True)
+    def _push(self) -> None:
+        self.undo.append(self._snapshot())
+        del self.undo[:-UNDO_MAX]
+        self.redo.clear()
+        self.dirty = True
+
+    def _edited(self, montage: bool = False) -> dict:
+        if montage:
+            self.montage = None
+            self.montage_later()
+        return self.state()
 
     def step(self, back: bool) -> dict:
         with self.lock:
             src, dst = (self.undo, self.redo) if back else (self.redo, self.undo)
             if src:
                 dst.append(self._snapshot())
-                self.items = src.pop()
+                self.items, self.video = src.pop()
                 self.dirty = True
             return self._edited(montage=True)
 
+    # -- the project file: the video's size ------------------------------------------------
+    def set_resolution(self, text: str) -> dict:
+        """The final video's size (``WxH``, even numbers), written into the project's
+        ``render.resolution`` (the rest of the file as it was)."""
+        m = re.fullmatch(r"\s*(\d+)\s*[xX×]\s*(\d+)\s*", str(text or ""))
+        if not m:
+            return {"error": f"{text!r}: write it as width x height, like 1080x1920"}
+        w, h = int(m.group(1)), int(m.group(2))
+        if w % 2 or h % 2 or not (16 <= w <= 8192 and 16 <= h <= 8192):
+            return {"error": f"{w}x{h}: both even, between 16 and 8192 (the encoder needs it)"}
+        res = f"{w}x{h}"
+        with self.lock:
+            self.proj.setdefault("render", {})
+            self.proj["render"] = {**(self.proj.get("render") or {}), "resolution": res}
+            if self.proj_path is not None:
+                from ruamel.yaml.comments import CommentedMap
+                from core.scene_doc import SceneDoc
+                doc = SceneDoc.load(str(self.proj_path))
+                render = doc.data.get("render")
+                if not isinstance(render, dict):
+                    render = CommentedMap()
+                    doc.data["render"] = render
+                render["resolution"] = res
+                doc.save(str(self.proj_path))
+            return self.project_info()
+
     # -- saving --------------------------------------------------------------------------
-    def _patched(self, doc, items: list) -> list:
-        """``doc`` made to say what ``items`` say; the layers that changed tidied (bars,
-        blocks, cutouts on one line). Returns the doc's layers."""
+    def _patched(self, doc, items: list, video: Optional[dict] = None, video_base: Optional[dict] = None) -> list:
+        """``doc`` made to say what ``items`` (and the montage's settings) say; the layers that
+        changed tidied (bars, blocks, cutouts on one line). Returns the doc's layers."""
         from core.scene_doc import plain, tidy
+        video = self.video if video is None else video
+        video_base = self.video_base if video_base is None else video_base
+        if video != video_base:
+            doc.apply_video(video_base, copy.deepcopy(video))
         changed = [node is None or plain(spec) != base for node, base, spec in items]
         doc.set_layers([(node, base, copy_keeping_signals(spec)) for node, base, spec in items])
         layers = doc.layers()
@@ -696,8 +635,8 @@ class Session:
                 self.proj["scene"] = shown_path(target)
             self.load_scene()
             now = {id(node): (self.items[i][0], self.items[i][1]) for i, node in enumerate(saved) if i < len(self.items)}
-            self.undo, self.redo = ([[[*now.get(id(node), (None, None)), spec] for node, _, spec in snap] for snap in h]
-                                    for h in history)
+            self.undo, self.redo = ([([[*now.get(id(node), (None, None)), spec] for node, _, spec in items], video)
+                                     for items, video in h] for h in history)
             self.dirty = False
             self.saved_at = time.strftime("%H:%M:%S")
             return {**self.state(), "path": shown_path(target)}
@@ -712,18 +651,3 @@ class Session:
     def scene_text(self) -> str:
         with self.lock:
             return self.scene.read_text(encoding="utf-8") if self.scene and self.scene.is_file() else ""
-
-
-def cue_key(spec: dict) -> str:
-    """Cues are kept by what they are, not by the member's place (members come and go)."""
-    return f"{spec.get('file')}|{spec.get('cues')!r}"
-
-
-def preview_res(render: dict) -> str:
-    """The preview's size: the project's shape, small (a portrait project stays portrait)."""
-    try:
-        w, h = (int(x) for x in str(render.get("resolution", "854x480")).lower().split("x"))
-    except ValueError:
-        return PREVIEW_RES
-    return "360x640" if h > w else PREVIEW_RES
-

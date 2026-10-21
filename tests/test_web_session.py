@@ -247,3 +247,140 @@ def test_every_example_saves_unchanged_through_the_session():
             assert s.doc.dumps() == before, path
             checked += 1
     assert checked >= 1 and checked + flat >= 90
+
+
+# -- the Arrange's edits (items 7-16) ---------------------------------------------------------
+
+def _path(st, label):
+    return _member(st, label)["ref"]
+
+
+def test_moving_a_block_takes_its_bars_from_the_others_and_a_resized_start_moves_its_from(project):
+    s = _session(project)
+    river = _path(s.state(), "the river")
+    st = s.move(river, 1, "first", 10, 12)              # its second block's start: one bar later
+    b = _member(st, "the river")["spans"]
+    assert [(x["first"], x["last"]) for x in b] == [(3, 6), (10, 12)]
+    assert b[1]["from"] == pytest.approx(2.0 + 2.0)     # a bar of 120 BPM 4/4 is 2 s
+    st = s.move(river, 0, "move", 9, 12)                 # the first block over the second
+    assert [(x["first"], x["last"]) for x in _member(st, "the river")["spans"]] == [(9, 12)]
+
+
+def test_a_block_dragged_to_another_row_becomes_a_member_of_its_own(project):
+    s = _session(project)
+    river = _path(s.state(), "the river")
+    st = s.move(river, 1, "move", 9, 12, "bg", 3)
+    rivers = [m for m in st["lanes"] if m["file"] == "river.mp4"]
+    assert len(rivers) == 2 and st["undo"] == 1
+    moved = next(m for m in rivers if m["spans"][0]["first"] == 9)
+    assert moved["spans"][0]["file"] == "b.mp4" and moved["spans"][0]["from"] == 2.0
+    assert st["select"]["ref"] == moved["ref"]
+    st = s.step(True)
+    assert len([m for m in st["lanes"] if m["file"] == "river.mp4"]) == 1
+
+
+def test_a_clip_dragged_to_the_fg_is_recast_as_a_character(project):
+    s = _session(project)
+    river = _path(s.state(), "the river")
+    st = s.move(river, 0, "move", 3, 6, "fg", 0)
+    fg = next(m for m in st["lanes"] if m["lane"] == "fg" and m["file"] == "river.mp4")
+    spec = s.get(fg["ref"])
+    assert spec["role"] == "foreground" and spec.get("fit", "contain") == "contain" and spec["scale"] == 0.6
+    assert "MASTER rows only" in s.move(_path(st, "the chords tint it"), 0, "move", 1, 2, "bg", 0)["error"]
+
+
+def test_new_members_go_where_they_are_put(project, tmp_path):
+    s = _session(project)
+    clip = tmp_path / "lion.mp4"
+    clip.write_bytes(b"x")
+    st = s.new_member("fg", str(clip), 2, 4, None, 1.5)
+    lion = _member(st, "lion")
+    assert lion["lane"] == "fg" and lion["spans"][0]["from"] == 1.5
+    assert s.get(lion["ref"])["role"] == "foreground"
+    st = s.new_member("bgfx", "grain", 5, 8)
+    assert any(m["lane"] == "bgfx" and m["spans"] and m["spans"][0]["first"] == 5 for m in st["lanes"])
+    assert "error" in s.new_member("bgfx", "shadertoy:fases_arc", 1, 2)          # a Generator on an FX track
+    st = s.new_member("bg", "shadertoy:fases_arc", 1, 2, 2)
+    new = st["select"]["ref"]
+    assert s.get(new)["lane_row"] == 2
+
+
+def test_hidden_bars_and_the_fields_that_set_them(project):
+    s = _session(project)
+    bub = _path(s.state(), "the bubbles")
+    st = s.mute(bub, 3, 4)
+    st = s.mute(bub, 6, 6)
+    assert _member(st, "the bubbles")["mutes"] == [[3, 4], [6, 6]]
+    st = s.mute(bub, 4, 4, False)
+    assert _member(st, "the bubbles")["mutes"] == [[3, 3], [6, 6]]
+    st = s.set_mutes(bub, "")
+    assert _member(st, "the bubbles")["mutes"] == []
+    assert "error" in s.set_mutes(bub, "x-3")
+    st = s.set_windows(bub, "1-2, 7")
+    assert _member(st, "the bubbles")["bars_text"] == "1-2, 7"
+
+
+def test_fx_in_three_places(project):
+    s = _session(project)
+    river = _path(s.state(), "the river")
+    st = s.add_fx(river, "grain")
+    assert [f["label"] for f in _member(st, "the river")["fx"]] == ["grain"]
+    st = s.add_fx(["BG"], "chord_color")
+    assert sum(1 for m in st["lanes"] if m["lane"] == "bgfx") == 2
+    st = s.add_fx(["master"], "grain")
+    master = [m for m in st["lanes"] if m["lane"] == "master"]
+    assert [m["label"] for m in master][-1] == "grain"
+    st = s.reorder(master[-1]["ref"], -1)
+    assert [m["label"] for m in st["lanes"] if m["lane"] == "master"] == ["grain", "the chords tint it"]
+    st = s.add_fx(river, "chord_color")
+    st = s.move_fx(_path(st, "the river") + ["fx", 1], 0)
+    assert [f["label"] for f in _member(st, "the river")["fx"]][0] != "grain"
+    st = s.set_layer(["FG"], "spill", True)
+    assert st["groups"]["FG"]["spill"]
+
+
+def test_copy_and_paste_links_and_fx(project):
+    s = _session(project)
+    bub = _path(s.state(), "the bubbles")
+    s.set_param(bub, "u_s", "{hits: {track: kick}, envelope: 0.25}")
+    assert "note" in s.copy_links(bub)
+    fg = next(m for m in s.state()["lanes"] if m["lane"] == "fg")
+    st = s.paste_links(fg["ref"])
+    assert "u_s" in st["note"]
+    assert s.get(fg["ref"])["uniforms"]["u_s"]["hits"]["track"] == "kick"
+    river = _path(st, "the river")
+    s.add_fx(river, "grain")
+    s.copy_fx(river)
+    st = s.paste_fx(bub)
+    assert [f["label"] for f in _member(st, "the bubbles")["fx"]] == ["grain"]
+    items = s.menu("bg", bub, 0, 3, None)
+    labels = [i.get("label") or i.get("head") for i in items]
+    assert any(l.startswith("Paste FX from") for l in labels if l)
+    assert any(i.get("catalog") == "gen" for i in items)
+
+
+def test_the_montage_bars_and_its_settings(project, tmp_path):
+    s = _session(project)
+    st = s.set_pins(5, 7, "none")
+    assert st["pins"] == {"3": "none", "5": "none", "6": "none", "7": "none"}
+    st = s.set_pins(3, 6, None)
+    assert st["pins"] == {"7": "none"}
+    clip = tmp_path / "sea.mp4"
+    clip.write_bytes(b"x")
+    st = s.put_in_montage(9, 10, str(clip), 0.0)          # not the montage's clip: a BG block
+    assert any(m["label"] == "sea" and m["lane"] == "bg" for m in st["lanes"])
+    st = s.set_video("bars_per_clip", 2)
+    assert s.video_settings()["bars_per_clip"] == 2
+    assert "error" in s.set_video("triggers", "- not a mapping")
+    s.save()
+    assert yaml.safe_load(s.scene.read_text(encoding="utf-8"))["video"]["bars_per_clip"] == 2
+    s.step(True)
+    assert s.video_settings()["bars_per_clip"] is None
+
+
+def test_the_video_size_is_written_in_the_project(project):
+    s = _session(project)
+    assert "error" in s.set_resolution("1081x1920")
+    got = s.set_resolution("1080x1920")
+    assert got["resolution"] == "1080x1920"
+    assert yaml.safe_load(project.read_text(encoding="utf-8"))["render"]["resolution"] == "1080x1920"

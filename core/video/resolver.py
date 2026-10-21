@@ -87,6 +87,7 @@ class Segment:
     clip_idx: int
     clip_name: str
     direction: int
+    src_t0: float = 0.0        # where in its clip the segment starts (s)
 
 
 def resolve_song(library, grid, notes: Sequence, video_cfg: dict, fps: int,
@@ -116,6 +117,7 @@ def resolve_song(library, grid, notes: Sequence, video_cfg: dict, fps: int,
                 cur.t1 = t
             name = ("none" if idx < 0 else Path(library.paths[idx]).stem
                     if hasattr(library, "paths") else str(idx))
-            cur = Segment(t, end, idx, name, tp.direction)
+            at = max(0.0, tp.pos - tp.direction * tp.speed) / fps      # frame_at moved it one step on
+            cur = Segment(t, end, idx, name, tp.direction, at)
             segments.append(cur)
     return segments, times, speeds

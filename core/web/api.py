@@ -186,34 +186,6 @@ class Api:
         return self._session.knob(text)
 
     @_guarded
-    def spans(self, ref, spans):
-        return self._session.spans(ref, spans)
-
-    @_guarded
-    def relane(self, ref, lane, spans=None):
-        return self._session.relane(ref, lane, spans)
-
-    @_guarded
-    def add(self, lane, what, first, last):
-        return self._session.add(lane, what, first, last)
-
-    @_guarded
-    def remove(self, ref):
-        return self._session.remove(ref)
-
-    @_guarded
-    def set_param(self, ref, name, value):
-        return self._session.set_param(ref, name, value)
-
-    @_guarded
-    def set_layer(self, ref, key, value):
-        return self._session.set_layer(ref, key, value)
-
-    @_guarded
-    def pin(self, bar, clip=None):
-        return self._session.pin(bar, clip)
-
-    @_guarded
     def undo(self):
         return self._session.step(True)
 
@@ -257,9 +229,36 @@ class Api:
     def stop_render(self):
         return self._engine.stop()
 
+    @_guarded
+    def set_resolution(self, text: str):
+        got = self._session.set_resolution(text)
+        if "error" not in got:
+            self._events.log("in", f"the video's size: {got['resolution']}"
+                             + (f" (written in {got['path']})" if got.get("path") else " (no project file to keep it)"))
+        return got
+
     # -- for a page in a browser -----------------------------------------------------------
     def _events_since(self, seq: int) -> list:
         return self._events.since(seq)
+
+
+# The arrangement's edits and questions, answered by the session as they are (core/web/edits.py).
+SESSION_CALLS = ("spans", "relane", "add", "remove", "set_param", "set_layer", "pin", "move", "new_member",
+                 "set_block", "delete_block", "toggle", "set_windows", "mute", "set_mutes", "add_fx", "reorder",
+                 "move_fx", "copy_links", "copy_fx", "paste_links", "paste_fx", "menu", "montage_menu", "set_pins",
+                 "to_bg", "put_in_montage", "video_settings", "set_video")
+
+
+def _session_call(name):
+    def call(self, *args):
+        return getattr(self._session, name)(*args)
+    call.__name__ = name
+    call.__doc__ = getattr(Session, name).__doc__
+    return _guarded(call)
+
+
+for _name in SESSION_CALLS:
+    setattr(Api, _name, _session_call(_name))
 
 
 def project_from_args(args) -> Optional[object]:

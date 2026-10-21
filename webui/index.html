@@ -20,7 +20,7 @@
   </div>
   <div class="lcd"><b id="lcdPos">1.1</b><span id="lcdTime">0:00.0</span></div>
   <span class="chip loop" id="loopChip" hidden><span id="loopText"></span><button id="loopClear" title="Play the whole song" aria-label="Clear the chosen bars">✕</button></span>
-  <div class="tgroup"><span class="tlabel">Zoom</span><input type="range" id="zoom" min="12" max="120" value="34" aria-label="Timeline zoom"></div>
+  <div class="tgroup"><span class="tlabel">Video</span><select class="btn" id="resSel" aria-label="The final video's size" title="The final video's size (render.resolution in the project)" disabled></select></div>
   <span class="spacer"></span>
   <button class="chip loadchip" id="loadChip" hidden title="Show the loading steps"><span class="dot busy" id="loadDot"></span><span id="loadText">loading</span></button>
   <div class="tgroup">
@@ -49,6 +49,7 @@
     </div>
     <input class="search" id="search" type="search" placeholder="Filter…" aria-label="Filter the browser">
     <div class="blist" id="blist"></div>
+    <div class="pickedbar" id="picked" hidden></div>
     <div class="legend">
       <div><span class="badge live">live</span>drawn here, in WebGL2</div>
       <div><span class="badge engine">engine</span>numpy / torch / multipass: at the render</div>
@@ -77,8 +78,27 @@
 </div>
 
 <section class="tl" aria-label="Arrange">
-  <div class="heads" id="heads"></div>
-  <div class="scroll" id="scroll"><div class="inner" id="inner"></div></div>
+  <div class="tlbar">
+    <span class="tlabel">Zoom</span>
+    <button class="ibtn sm" id="zoomOut" title="Fewer pixels a bar (Ctrl+wheel)" aria-label="Zoom out">−</button>
+    <input type="range" id="zoom" min="8" max="160" value="34" aria-label="Timeline zoom">
+    <button class="ibtn sm" id="zoomIn" title="More pixels a bar (Ctrl+wheel)" aria-label="Zoom in">+</button>
+    <button class="btn sm" id="zoomAll" title="The whole song in view">All</button>
+    <span class="tlabel">Rows</span>
+    <button class="ibtn sm" id="rowsLess" title="Lower rows (Shift+wheel)" aria-label="Lower rows">−</button>
+    <button class="ibtn sm" id="rowsMore" title="Taller rows (Shift+wheel)" aria-label="Taller rows">+</button>
+    <span class="hint" id="zoomText"></span>
+    <span class="spacer"></span>
+    <span class="hint">Alt+wheel: along the song · right click: the menu · a lane's name: its settings</span>
+  </div>
+  <div class="scroll" id="scroll">
+    <div class="tgrid" id="tgrid">
+      <div class="corner" id="corner"></div>
+      <div class="rulerwrap" id="ruler"></div>
+      <div class="heads" id="heads"></div>
+      <div class="inner" id="inner"></div>
+    </div>
+  </div>
 </section>
 
 <section class="dock">

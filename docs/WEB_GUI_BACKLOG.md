@@ -231,7 +231,7 @@ red and logged at the load; a failed render logs the engine's last lines.
 
 ## The Arrange, all of it
 
-## 7. [ ] Timeline: zoom, scroll, the playhead
+## 7. [x] Timeline: zoom, scroll, the playhead
 
 **Today.** Zoom −/+/all and Ctrl+wheel around the mouse's bar, "from bar" slider, Alt+wheel
 along, row height 20–120 px with −/+ and Shift+wheel keeping the row under the mouse,
@@ -242,7 +242,15 @@ No playhead (the sketch has one, and plays the song).
 and REAPER markers when the project has an `.rpp`, the playhead follows while playing.
 Zoom and scroll stay smooth with a scene of 50+ blocks (item 4a).
 
-## 8. [ ] Placing: pick in the browser, drag on a lane
+**Done (2026-10-21).** The lanes scroll in one area with the ruler and the heads pinned;
+zoom −/+/All and Ctrl+wheel around the mouse's bar (stretched while it moves, drawn again when it
+stops), Alt+wheel along, rows 20–120 px with −/+ and Shift+wheel keeping the row under the mouse,
+heads drop their second line under 30 px. The ruler shows meter changes, how busy the MIDI is
+(a strip per bar, from Python) and the REAPER project's markers and regions
+(`reaper_project.markers`, from the project's `reaper:` or the scene's cues). The playhead runs on
+the ruler and the lanes and the view follows it.
+
+## 8. [x] Placing: pick in the browser, drag on a lane
 
 **Today.** A Generator or clip picked in the browser is placed by dragging across a lane
 (`_new_member` L619; `_can_put` decides place or choose bars); a lane has an extra empty
@@ -254,7 +262,12 @@ bars. The empty row at the bottom of FG and BG. Placement rules from Python
 (`arrangement`): FG clip → `new_foreground` (mask track, backdrop), BG clip → background,
 cover, loop.
 
-## 9. [ ] Moving between rows, and what that means
+**Done.** A click in the browser picks (shown under the list); dragging across a lane puts
+it on that sub-row (`edits.new_member`: Generators with their clips folder, a BG clip as
+background, an FG clip through `new_foreground`, an FX only on an FX track); FG and BG have the
+empty row "drag here: new"; drops from the browser still put four bars.
+
+## 9. [x] Moving between rows, and what that means
 
 **Today.** `_move_to_row`: moving a block of a multi-block member splits it into a new
 member; crossing BG↔FG recasts a clip (`_recast` L1082: contain and placement, or cover);
@@ -265,7 +278,13 @@ moves whole members and forbids clips crossing.
 **Do.** The same, in Python (`session.move(ref, k, lane, row, first, last)`), with the
 end's resize on hover (no Shift needed in the page, the cursor says it) and the lit end.
 
-## 10. [ ] Hidden bars and cued members
+**Done.** `edits.move`: a block dragged within its row takes its bars from the others
+(`arrangement.place`); onto another sub-row or the other lane of its kind it becomes a member of
+its own when it had others, a clip is recast for its lane (`arrangement.recast`, moved to core
+with the Arrange window's other rules), one undo step. Resizing a start moves its `from`. The ends
+resize on hover, lit, with no Shift.
+
+## 10. [x] Hidden bars and cued members
 
 **Today.** `mute:` spans drawn dark with "hidden"; menu "Hide in bar N / in the chosen
 bars / this cut", "Show again"; inspector "hidden in bars"; cued members show where their
@@ -273,7 +292,11 @@ cuts come from (`_draw_cues_info` L2429).
 
 **Do.** All of it. Cued members stay read only, shown in grey with their source.
 
-## 11. [ ] The montage row
+**Done.** `mute:` spans drawn dark red with "hidden"; the menu's Hide in bar N / in the chosen
+bars / this cut and Show again (`edits.mute`); the inspector's "hidden in bars" field; cued
+members grey, read only, with where their cuts come from, and a note while they are read.
+
+## 11. [x] The montage row
 
 **Today.** Runs in each clip's colour with names, "none" dark, pins with a corner mark,
 the clips layer's `bars` as a strip; a click picks the run and chooses its clip in the
@@ -290,7 +313,15 @@ with widgets instead of YAML: `clip_per_bar`, `bars_per_clip`, `clip_order`, `cl
 reactivity (item 17). They drive the montage, the `{cut: …}` knobs and the FX that work
 at the cuts (`transition`, `datamosh`), so the montage row resolves again after each change.
 
-## 12. [ ] Menus and shortcuts
+**Done.** Runs from `resolve_song` with each cut's place in its clip (`Segment.src_t0`, and
+its direction): the live preview starts the clip where the render does. A click picks the run and
+its clip; Put / Nothing here / Make it a BG block / Back to the montage / Preview from
+`edits.montage_menu`; up to 12 runs in the inspector. The Clips head opens the montage's settings
+(`clip_per_bar`, `bars_per_clip`, `clip_order`, `clip_end`, `seed`), undoable and saved through
+`apply_video`. Gravity is a trigger's, so it lives in the triggers; they are YAML text here until
+item 17 brings their rows.
+
+## 12. [x] Menus and shortcuts
 
 **Today.** The right-click menu (inventory section 3: Add FX to it ▸ category ▸ entry, Open
 plugin, Turn on/off, copy/paste music links, copy/paste FX, hide/show bars, earlier/later
@@ -302,7 +333,13 @@ Ctrl+Shift+Z, Delete, Space (preview); double-click opens the plugin.
 `(masks)`, `(cuts)`). Space plays the song (as in the sketch); Shift+Space previews the
 chosen bars.
 
-## 13. [ ] Copy and paste: music links and FX
+**Done.** The right click asks Python what can be done there (`edits.menu`, `montage_menu`)
+and shows the catalog by category with its flags; double-click opens the plugin's knobs; Space
+plays, Shift+Space renders the chosen bars, Delete deletes the chosen block (its last: the
+member) or empties the montage's chosen bars, Ctrl+Z / Ctrl+Y. "Preview its bars" plays them
+live in a loop (the engine's exact preview is item 22).
+
+## 13. [x] Copy and paste: music links and FX
 
 **Today.** `links_of` / `_takes` / `paste_fx` (L1199–1343): copy a member's knobs (not
 constants) or FX, paste onto another member that can take them; SAM seeds reset to auto
@@ -310,7 +347,11 @@ on another clip.
 
 **Do.** The same calls in Python; the menu says what will be pasted and where it cannot go.
 
-## 14. [ ] FX in three places
+**Done.** `copy_links`, `copy_fx`, `paste_links`, `paste_fx` on the session, with
+`links_of` / `takes` / `pasted_fx` in core; the menu says what will be pasted and only offers it
+where it fits.
+
+## 14. [x] FX in three places
 
 **Today.** FX on a block (its own `fx:`), on a lane (FX track), on the master (inserted
 under trailing `meters`); each FX list has on, bars ("9-12, 30-33", empty = all), plugin or
@@ -319,14 +360,21 @@ seeds, earlier/later, remove; the FG's "spill". The sketch shows only "+N fx".
 **Do.** The FX of a block listed in its inspector and drawn as a strip on the block; lane
 and master FX as today; reorder by drag in the list; "spill" for a block and for the FG.
 
-## 15. [ ] Names
+**Done.** A block's FX listed in its inspector and drawn as a strip on it; the lane's (its head)
+and the master's lists; each row: on, bars, earlier/later, remove; drag to reorder a block's or a
+lane's list; spill for a block with FX and for the FG.
+
+## 15. [x] Names
 
 **Today.** Names come from `name:`, else from the YAML comment at the end of the line or
 the line above (`_comment_names` L261), also inside groups; the inspector renames.
 
 **Do.** The same names in the lanes and the inspector; renaming writes `name:`.
 
-## 16. [ ] The final video's size
+**Done.** The names from `name:` or the comments in the lanes and the inspector; renaming writes
+`name:` (empty: back to its file's or its kind's).
+
+## 16. [x] The final video's size
 
 **Today.** A resolution combo in both windows, kept in sync (`set_resolution` L3054,
 `RES_CHOICES` L3042); the preview's aspect follows it.
@@ -334,6 +382,11 @@ the line above (`_comment_names` L261), also inside groups; the inspector rename
 **Do.** One combo in the toolbar, with the choices and a typed `WxH` (even numbers, as the
 studio's `res_input` checks), saved in the project's `render.resolution`; the live preview
 and the engine preview follow it (the sketch reads it at open only).
+
+**Done.** One chooser in the toolbar with the studio's sizes by shape (`RESOLUTIONS`, now in
+`core/web/util.py`, which the studio imports) and "Type a size…" (even numbers); written into the
+project's `render.resolution`, the rest of the file as it was; the live preview and the engine's
+preview follow it.
 
 ---
 

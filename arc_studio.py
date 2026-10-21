@@ -3073,13 +3073,7 @@ def _mode_script(mode: str) -> str:
     return "clip_generator.py" if mode == "clips" else _MODE_SCRIPTS.get(mode, "?")
 
 
-RESOLUTIONS = (("9:16 portrait", ("480x854", "720x1280", "1080x1920")),
-               ("10:16 portrait", ("480x768", "720x1152", "1080x1728", "1200x1920")),
-               ("4:5 portrait", ("480x600", "720x900", "864x1080", "1080x1350")),
-               ("1:1 square", ("480x480", "720x720", "1080x1080", "2160x2160")),
-               ("5:4 landscape", ("600x480", "900x720", "1080x864", "1350x1080")),
-               ("16:10 landscape", ("768x480", "1152x720", "1728x1080", "1920x1200", "2560x1600")),
-               ("16:9 landscape", ("854x480", "1280x720", "1920x1080", "2560x1440", "3840x2160")))
+from core.web.util import RESOLUTIONS   # noqa: E402  (the sizes both windows offer)
 RES_CHOICES = [f"{r}  {shape}" for shape, sizes in RESOLUTIONS for r in sizes]
 RES_TAGS = ("video_res", "arr_video_res")          # the choosers: the preview's, the Arrange's
 

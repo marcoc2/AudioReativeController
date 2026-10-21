@@ -603,3 +603,26 @@ def write_midi(project: str, tracks: Sequence[str], out: str, merge: Optional[st
         written[str(name)] = len(notes)
     mid.save(out)
     return written
+
+
+def markers(path: str) -> List[Tuple[float, str, Optional[float]]]:
+    """A REAPER project's markers and regions: (seconds, name, the region's end or None)."""
+    import shlex
+    out: dict = {}
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line.startswith("MARKER "):
+            continue
+        try:
+            parts = shlex.split(line, posix=True)
+            idx, pos = int(parts[1]), float(parts[2])
+        except (ValueError, IndexError):
+            continue
+        name = parts[3] if len(parts) > 3 else ""
+        region = len(parts) > 4 and parts[4].isdigit() and int(parts[4]) & 1
+        if region and idx in out and out[idx][2] is None and out[idx][3]:
+            t, n, _, _ = out[idx]
+            out[idx] = (t, n, pos, True)                 # a region's second line: its end
+        else:
+            out[idx] = (pos, name, None, bool(region))
+    return sorted((t, n, end) for t, n, end, _ in out.values())

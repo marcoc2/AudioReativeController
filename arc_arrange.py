@@ -1055,23 +1055,7 @@ def _insert_member(key: str, spec: dict, sub, first: int, last: int) -> int:
     return at
 
 
-def _recast(spec: dict, lane: str) -> dict:
-    """A clip moved to the other lane: a character in the FG (in its place in the frame), the
-    whole frame in the BG."""
-    out = dict(spec)
-    if spec.get("source") != "footage":
-        return out
-    if lane == arr.FG:
-        out["role"] = "foreground"
-        if out.get("fit", "contain") == "cover":
-            out["fit"] = "contain"
-        for k, v in (("scale", 0.6), ("x", 0.5), ("y", 0.62)):
-            out.setdefault(k, v)
-    else:
-        out.update(role="background", fit="cover")
-        for k in ("scale", "x", "y"):
-            out.pop(k, None)
-    return out
+_recast = arr.recast
 
 
 def _target_row(key: str, y: float):
@@ -1172,45 +1156,8 @@ def _show_edge() -> None:
 
 # ----------------------------------------------------------------------- copy and paste: links, FX
 
-NOT_LINKS = {"source", "file", "name", "role", "blocks", "bars", "cues", "cutout", "fx", "mute", "lane_row",
-             "enabled", "fit", "loop", "flip", "spill", "fade_in", "fade_out", "layers", "canvas", "pins",
-             "blend", "hold", "mask"}
-PLACE_KEYS = {"x", "y", "scale", "opacity"}     # what any clip can be given
-
-
-def _is_link(v) -> bool:
-    """A value the music moves (a knob: a pulse on the kick, an LFO, the notes' pitch...)."""
-    from core.knob_forms import form_of
-    return isinstance(v, dict) and form_of(v) not in (None, "constant")
-
-
-def links_of(spec: dict) -> dict:
-    """{path: value}: what in a layer the music moves: its knobs (a shader's uniforms too)
-    and who plays it (``trigger``, ``triggers``)."""
-    out = {}
-    for k, v in (spec or {}).items():
-        if k in NOT_LINKS:
-            continue
-        if k == "uniforms" and isinstance(v, dict):
-            out.update({("uniforms", u): uv for u, uv in v.items() if _is_link(uv)})
-        elif _is_link(v) or k in ("trigger", "triggers") and isinstance(v, dict):
-            out[(k,)] = v
-    return out
-
-
-def _takes(spec: dict, path: tuple) -> bool:
-    """``spec`` (a layer) has room for the link at ``path``: a key it has or its kind takes
-    (a clip's place and size; a Generator's or FX's own parameters; a shader's uniform)."""
-    from core import catalog
-    key = path[0]
-    if key == "uniforms":
-        return isinstance(spec.get("uniforms"), dict) and path[1] in spec["uniforms"] or \
-            (spec.get("source") == "shadertoy" and any(p.name == path[1] for p in
-                                                       (catalog.of_layer(spec).params if catalog.of_layer(spec) else [])))
-    if key in spec or spec.get("source") == "footage" and key in PLACE_KEYS or key == "opacity":
-        return True
-    e = catalog.of_layer(spec)
-    return e is not None and any(p.name == key for p in e.params)
+NOT_LINKS, PLACE_KEYS = arr.NOT_LINKS, arr.PLACE_KEYS
+_is_link, links_of, _takes = arr.is_link, arr.links_of, arr.takes
 
 
 def _fx_list(key: str, mem) -> list:
@@ -1319,21 +1266,7 @@ def paste_fx(key: str, at: int) -> None:
     _draw_inspector()
 
 
-def _mutes(spec: dict) -> list:
-    """The bars a layer is hidden in (``mute:``), as sorted [first, last] spans."""
-    got = spec.get("mute") or []
-    got = [got] if got and not isinstance(got[0], (list, tuple)) else got
-    return sorted([int(a), int(b)] for a, b in got)
-
-
-def _spans(bars: set) -> list:
-    out = []
-    for b in sorted(bars):
-        if out and b == out[-1][1] + 1:
-            out[-1][1] = b
-        else:
-            out.append([b, b])
-    return out
+_mutes, _spans = arr.mutes, arr.bar_spans
 
 
 def mute_bars(key: str, at: int, first: int, last: int, hide: bool = True) -> None:
@@ -2242,17 +2175,7 @@ def _num(spec, key, default):
     return float(v) if isinstance(v, (int, float)) else None
 
 
-def _parse_bars(text: str):
-    """"9-12, 30-33" -> [[9, 12], [30, 33]]; "" -> None (the whole time its owner plays)."""
-    out = []
-    for part in text.replace(";", ",").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        a, _, b = part.partition("-")
-        a, b = int(a), int(b or a)
-        out.append([min(a, b), max(a, b)])
-    return out or None
+_parse_bars = arr.parse_bars
 
 
 def _bars_text(spec: dict) -> str:
