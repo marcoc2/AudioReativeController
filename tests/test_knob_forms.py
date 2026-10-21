@@ -57,6 +57,34 @@ def test_gain_and_a_plain_feature():
     assert spec_of(st) == {"feature": "subbands.bass", "gain": 2.0}
 
 
+def test_a_new_feature_glides_and_an_old_one_stays_as_it_was():
+    assert spec_of(new_state("feature")) == {"feature": "subbands.bass", "attack": 0.1, "release": 0.5}
+    st = state_of("subbands.bass")
+    assert st["params"] == {"attack": 0.0, "release": 0.0}
+    st["params"]["release"] = 0.4
+    assert spec_of(st) == {"feature": "subbands.bass", "release": 0.4}
+
+
+def test_a_gliding_feature_rises_and_falls_the_same_whatever_came_before():
+    from core.video.layers import _knob
+    loud = lambda t: {"subbands": {"bass": 1.0 if 1.0 <= t < 2.0 else 0.0}}   # noqa: E731
+    spec = {"feature": "subbands.bass", "attack": 0.1, "release": 0.5}
+    def in_order(t):                                                 # a render from the start to t
+        f = _knob("k", spec, [], features_at=loud)
+        for s in np.arange(0.0, t, 1 / 24):
+            f(s)
+        return f(t)
+    assert in_order(0.9) == 0.0
+    assert 0.3 < in_order(1.05) < 0.6                                # rising, not a jump
+    assert in_order(1.9) > 0.99
+    assert 0.5 < in_order(2.2) < 0.75                                # falling slower than it rose
+    f = _knob("k", spec, [], features_at=loud)                       # a seek: forward, back, ...
+    for t in (3.0, 0.5, 2.2, 1.05):
+        assert f(t) == pytest.approx(in_order(t), abs=1e-3)
+    raw = _knob("k", {"feature": "subbands.bass"}, [], features_at=loud)
+    assert raw(1.0) == 1.0 and raw(2.0) == 0.0                       # without them: as it is
+
+
 def test_the_curve_is_the_knob_a_render_gets():
     grid = RhythmGrid(bpm=120.0, fps=30, beats=np.arange(16) * 0.5, downbeats=np.arange(4) * 2.0)
     kicks = [MidiNote(time=t, pitch=36, velocity=100, channel=0, duration=0.1, track="kick")
@@ -74,3 +102,20 @@ def test_a_track_name_with_commas_stays_whole():
     from core.knob_forms import split_tracks
     assert split_tracks("kick, kick-2") == ["kick", "kick-2"]
     assert split_tracks("FM5 MIDI (patches 2, 5, 10), kick") == ["FM5 MIDI (patches 2, 5, 10)", "kick"]
+
+
+def test_clip_holds_any_link_inside_its_range():
+    from core.video.layers import _music_knob
+    loud = lambda t: {"subbands": {"bass": 3.0 if t > 1 else -2.0}}        # noqa: E731
+    for spec in ({"feature": "subbands.bass", "clip": [-0.5, 0.5]},
+                 {"feature": "subbands.bass", "gain": 2, "clip": [0.5, -0.5]},
+                 {"lfo": "sine", "period": 1.0, "gain": 9, "clip": [-0.5, 0.5]}):
+        f = _music_knob("k", spec, [], features_at=loud)
+        assert all(-0.5 <= f(t) <= 0.5 for t in np.linspace(0, 3, 40)), spec
+    st = state_of({"relative": "texture.loudness", "gain": 0.4, "bias": -0.4, "clip": [-0.5, 0.5]})
+    assert st["clip"] == [-0.5, 0.5] and spec_of(st)["clip"] == [-0.5, 0.5]
+    st["clip"] = None
+    assert "clip" not in spec_of(st)
+    plain = state_of("subbands.bass")
+    plain["clip"] = [0, 1]
+    assert spec_of(plain) == {"feature": "subbands.bass", "clip": [0.0, 1.0]}

@@ -79,7 +79,8 @@ FORMS: dict = {
         "params": [("morph", 0.0, "float", "for count: seconds to step up")]},
     "feature": {
         "group": "audio", "label": "an audio feature (loudness of a band, a texture)", "source": "feature",
-        "params": []},
+        "params": [("attack", 0.0, "float", "seconds to rise to it (0: as it is, jumpy)"),
+                   ("release", 0.0, "float", "seconds to fall back")]},
     "relative": {
         "group": "audio", "label": "an audio feature against its recent average (1 = as usual)",
         "source": "feature",
@@ -200,7 +201,7 @@ def state_of(spec: Any) -> dict:
     """An editor state for a knob spec: {form, main, source, params, gain, bias, from, extra}."""
     form = form_of(spec)
     st = {"form": form or "custom", "main": None, "source": None, "params": {},
-          "gain": 1.0, "bias": 0.0, "from": None, "extra": {}, "keep": [],
+          "gain": 1.0, "bias": 0.0, "clip": None, "from": None, "extra": {}, "keep": [],
           "custom": spec if form is None else None}
     if form is None:
         return st
@@ -213,8 +214,12 @@ def state_of(spec: Any) -> dict:
         st["source"] = spec
         return st
     spec = dict(spec)
-    used = {form, "gain", "bias"}
+    used = {form, "gain", "bias", "clip"}
     st["gain"], st["bias"] = float(spec.get("gain", 1.0)), float(spec.get("bias", 0.0))
+    clip = spec.get("clip")
+    st["clip"] = [float(c) for c in clip] if isinstance(clip, (list, tuple)) and len(clip) == 2 else None
+    if clip is not None and st["clip"] is None:
+        used.discard("clip")                        # not a pair: kept as it is
     st["keep"] = [k for k in ("gain", "bias") if k in spec]
     if f["source"] == "trigger":
         st["source"] = _trigger_state(spec[form])
@@ -250,8 +255,9 @@ def spec_of(st: dict) -> Any:
     f = FORMS[form]
     if form == "constant":
         return float(st["main"])
-    shaped = abs(float(st.get("gain", 1.0)) - 1.0) > 1e-9 or abs(float(st.get("bias", 0.0))) > 1e-9
-    if form == "feature" and not shaped and not st.get("extra") and not st.get("keep"):
+    shaped = abs(float(st.get("gain", 1.0)) - 1.0) > 1e-9 or abs(float(st.get("bias", 0.0))) > 1e-9 or bool(st.get("clip"))
+    glides = form == "feature" and any(float(st["params"].get(p[0], p[1]) or 0) != p[1] for p in f["params"])
+    if form == "feature" and not shaped and not glides and not st.get("extra") and not st.get("keep"):
         return str(st["source"])
     out: dict = {}
     if f["source"] == "trigger":
@@ -283,6 +289,8 @@ def spec_of(st: dict) -> Any:
         out["gain"] = float(st["gain"])
     if abs(float(st.get("bias", 0.0))) > 1e-9 or "bias" in keep:
         out["bias"] = float(st["bias"])
+    if st.get("clip"):
+        out["clip"] = [float(c) for c in st["clip"]]
     out.update(copy.deepcopy(st.get("extra") or {}))
     return out
 
@@ -291,7 +299,7 @@ def new_state(form: str, like: Optional[dict] = None) -> dict:
     """A fresh state for ``form``, keeping the source of ``like`` when it has the same kind."""
     f = FORMS[form]
     st = {"form": form, "main": f["main"][1] if "main" in f else None, "source": None,
-          "params": {p[0]: p[1] for p in f["params"]}, "gain": 1.0, "bias": 0.0, "from": None,
+          "params": {p[0]: p[1] for p in f["params"]}, "gain": 1.0, "bias": 0.0, "clip": None, "from": None,
           "extra": {}, "keep": list(KEEP.get(form, ())), "custom": None}
     same = like is not None and like.get("form") in FORMS and FORMS[like["form"]]["source"] == f["source"]
     if f["source"] == "trigger":
@@ -301,6 +309,8 @@ def new_state(form: str, like: Optional[dict] = None) -> dict:
                                                                     "keep_snap": True, "extra": {}}
     elif f["source"] == "feature":
         st["source"] = like["source"] if same else "subbands.bass"
+    if form == "feature":                            # a new one glides: raw, a feature jumps every frame
+        st["params"].update(attack=0.1, release=0.5)
     if form == "constant":
         st["main"] = 0.0
     if form == "rate":

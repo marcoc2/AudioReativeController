@@ -464,6 +464,32 @@ def _feature(feats: dict, path: str, default: float = 0.0) -> float:
         return default
 
 
+class _Glided:
+    """``raw(t)`` followed with ``attack`` seconds up and ``release`` seconds down (one pole),
+    stepped on a fixed grid of ``hz`` from a few time constants back, so a frame's value is
+    the same whatever was asked before it (a seek, a preview, the render)."""
+
+    def __init__(self, raw: Callable[[float], float], attack: float, release: float, hz: int = 60):
+        self.raw, self.hz = raw, hz
+        self.up, self.down = max(0.0, attack), max(0.0, release)
+        self.warm = max(1, math.ceil(6.0 * max(self.up, self.down) * hz))
+        self.k, self.v = None, 0.0
+
+    def _step(self, v: float, x: float, dt: float) -> float:
+        tau = self.up if x > v else self.down
+        return x if tau <= 0 else v + (x - v) * (1.0 - math.exp(-dt / tau))
+
+    def __call__(self, t: float) -> float:
+        kt = math.floor(t * self.hz)
+        if self.k is None or kt < self.k or kt - self.k > self.warm:
+            self.k = kt - self.warm
+            self.v = float(self.raw(max(0.0, self.k / self.hz)))
+        while self.k < kt:
+            self.k += 1
+            self.v = self._step(self.v, float(self.raw(self.k / self.hz)), 1.0 / self.hz)
+        return self._step(self.v, float(self.raw(t)), t - kt / self.hz)
+
+
 class _PitchFollower:
     """The pitch class of the latest note of a trigger spec (``None`` before the first)."""
 
@@ -1958,11 +1984,17 @@ CUT_PARTS = ("count", "since", "until", "phase")
 
 def _music_knob(name: str, how, notes: Sequence, features_at=None, onset_loader=None, grid=None,
                 cuts=None, track=None):
-    """See ``_knob``; any of the forms below also takes ``gain`` and ``bias``: bias + gain * value."""
+    """See ``_knob``; any of the forms below also takes ``gain`` and ``bias``: bias + gain * value,
+    and ``clip: [lo, hi]``: the value held inside lo..hi (after gain and bias), so a rare peak
+    cannot throw the parameter out of its range."""
     f = _knob(name, how, notes, features_at, onset_loader, grid, cuts, track)
     if isinstance(how, dict) and "feature" not in how and ("gain" in how or "bias" in how):
         gain, bias = float(how.get("gain", 1.0)), float(how.get("bias", 0.0))
-        return lambda t: bias + gain * f(t)
+        f = lambda t, g=f: bias + gain * g(t)  # noqa: E731
+    clip = how.get("clip") if isinstance(how, dict) else None
+    if isinstance(clip, (list, tuple)) and len(clip) == 2:
+        lo, hi = min(map(float, clip)), max(map(float, clip))
+        f = lambda t, g=f: min(hi, max(lo, g(t)))  # noqa: E731
     return f
 
 
@@ -1973,6 +2005,8 @@ def _knob(name: str, how, notes: Sequence, features_at=None, onset_loader=None, 
         0.5                                       a constant
         subbands.bass                             an audio feature
         {feature: texture.noisiness, gain: 1, bias: 0}   an audio feature, scaled: bias + gain * feature
+        {feature: subbands.bass, attack: 0.1, release: 0.5}   ... gliding: seconds to rise, to fall (0: as is)
+                                                  (and every form takes clip: [lo, hi], the value held inside)
                                                   (every form below takes gain and bias too)
         {hits: <trigger>, envelope: 0.25, amount: 1}   1 -> 0 after each hit
         {count: <trigger>, per: bar}              hits so far in the current bar (0 at the bar's start)
@@ -2032,7 +2066,10 @@ def _knob(name: str, how, notes: Sequence, features_at=None, onset_loader=None, 
         return lambda t: _feature((features_at(t) if features_at else None) or {}, how)
     if isinstance(how, dict) and "feature" in how:
         path, gain, bias = str(how["feature"]), float(how.get("gain", 1.0)), float(how.get("bias", 0.0))
-        return lambda t: bias + gain * _feature((features_at(t) if features_at else None) or {}, path)
+        raw = lambda t: _feature((features_at(t) if features_at else None) or {}, path)  # noqa: E731
+        attack, release = float(how.get("attack", 0.0)), float(how.get("release", 0.0))
+        f = _Glided(raw, attack, release) if attack > 0 or release > 0 else raw
+        return lambda t: bias + gain * f(t)
     if isinstance(how, dict) and "hits" in how:
         env = EnvelopeOpacity(_layer_hits(how["hits"], notes, onset_loader, grid), float(how.get("envelope", 0.25)))
         return lambda t, k=float(how.get("amount", 1.0)): k * env(t)

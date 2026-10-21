@@ -12,6 +12,9 @@
 //          u_hue    a cor (harmony:)
 //          u_orbit  a câmera em volta, em voltas
 //          u_dist   a distância da câmera ao centro (4.2; num quadro em pé, ~8 para caber inteiro)
+//          u_reach  quanto a música afasta a forma do repouso (1 inteira, 0.3 calma, 0 parada):
+//                   o Julia é caótico perto da borda, um passo pequeno de c já muda tudo
+//        Fora da faixa, u_mode fica em 0..1 e u_slice em -0.6..0.6 (além disso a forma some).
 
 uniform float u_root = 4.0;
 uniform float u_mode = 0.0;
@@ -20,6 +23,7 @@ uniform float u_kick = 0.0;
 uniform float u_hue = 0.6;
 uniform float u_orbit = 0.0;
 uniform float u_dist = 4.2;
+uniform float u_reach = 1.0;
 
 vec3 hsv(float h, float s, float v) {
     vec3 k = fract(h + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0;
@@ -32,7 +36,7 @@ vec4 gC;
 float gTrap;
 
 float de(vec3 p) {
-    vec4 z = vec4(p, u_slice);
+    vec4 z = vec4(p, u_reach * clamp(u_slice, -0.6, 0.6));
     float dz2 = 1.0;
     float m2 = dot(z, z);
     float trap = 1e9;
@@ -49,8 +53,10 @@ float de(vec3 p) {
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float a = 6.2831853 * u_root / 12.0;
-    gC = vec4(0.40 * cos(a) - 0.2, 0.45 * sin(a), 0.25 * sin(2.0 * a), 0.35 * (u_mode - 0.5));
+    gC = vec4(0.40 * cos(a) - 0.2, 0.45 * sin(a), 0.25 * sin(2.0 * a), 0.35 * (clamp(u_mode, 0.0, 1.0) - 0.5));
     gC.xy += 0.08 * u_kick * vec2(cos(7.0 * iTime), sin(5.0 * iTime));
+    const float ar = 6.2831853 * 4.0 / 12.0;          // at rest: the defaults' shape (root 4, mode 0.5)
+    gC = mix(vec4(0.40 * cos(ar) - 0.2, 0.45 * sin(ar), 0.25 * sin(2.0 * ar), 0.0), gC, u_reach);
     vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;
     float ca = 6.2831853 * u_orbit + 0.05 * iTime;
     vec3 ro = vec3(u_dist * sin(ca), 0.9 * u_dist / 4.2, u_dist * cos(ca));
