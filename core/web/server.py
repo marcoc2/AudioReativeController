@@ -139,6 +139,8 @@ def byte_range(header: str, size: int):
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "ARCStudio"
+    protocol_version = "HTTP/1.1"          # one connection kept for many requests (every answer has its length)
+    disable_nagle_algorithm = True         # an answer goes out at once (Windows held each one ~200 ms)
     owner: Server = None
 
     def log_message(self, *args):          # quiet
@@ -192,10 +194,42 @@ class _Handler(BaseHTTPRequestHandler):
                 f = None
         elif path.startswith("/media/"):
             f = self.owner.media.get(path[7:])
+        elif path.startswith("/stream/"):
+            self._stream_frame(path[8:])
+            return
         if f is None or not f.is_file():
             self.send_error(404)
             return
         self._send(f)
+
+    def _stream_frame(self, rest: str) -> None:
+        """A frame of the live preview: ``<gen>/<frame>.jpg``. 200 with the JPEG; 204 not made
+        yet; 410 a stream since replaced. ``X-Made``: the last frame made."""
+        m = re.match(r"(\d+)/(\d+)\.jpg$", rest)
+        stream = getattr(self.owner.api, "_stream", None)
+        if not m or stream is None:
+            self.send_error(404)
+            return
+        got, state = stream.frame(int(m.group(1)), int(m.group(2)))
+        status = 410 if state is None else 200 if got else 204
+        self.send_response(status)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Expose-Headers", "X-Made, X-State")
+        if state is not None:
+            self.send_header("X-Made", str(state["made"]))
+            self.send_header("X-State", urllib.parse.quote(json.dumps(
+                {k: state[k] for k in ("error", "what", "ended")})))
+        if status == 200:
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(got)))
+            self.end_headers()
+            try:
+                self.wfile.write(got)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+            return
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _send(self, f: Path):
         size = f.stat().st_size

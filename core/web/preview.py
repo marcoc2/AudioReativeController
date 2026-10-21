@@ -10,7 +10,6 @@ cancels the one being made.
 """
 from __future__ import annotations
 
-import copy
 import subprocess
 import threading
 import time
@@ -26,6 +25,46 @@ MAX_BARS = 8
 
 class Cancelled(Exception):
     pass
+
+
+def build_stack(s, start_t: float, end_t: float, check=lambda: None, tell=lambda what: None):
+    """The stack a render uses, ready to give frames from ``start_t`` (the studio's
+    ``_clip_preview_frames``): the clip composer brought to ``start_t`` by a dry run of the
+    montage from the song's start (no frame decoded), under the arrangement as it is now, at
+    the preview's size; ``end_t``: the last second it will be asked for (SAM2 cuts out only
+    what shows). -> (stack, fps, width, height)."""
+    from core.video.clip_library import ClipLibrary
+    from core.video.composer import ClipComposer
+    from core.video.layers import build_compositor
+    with s.lock:
+        fps, grid, notes, features_at = s.fps, s.grid, list(s.notes), s.features_at
+        rs = render_settings_of(s.proj)
+        clips_dir, meta = s.clips_dir(), s.lib
+        res = preview_res(s.proj.get("render") or {})
+    w, h = (int(x) for x in res.split("x"))
+    cfg = s.video_cfg()
+    layers = cfg.get("layers")
+    uses_clips = not layers or any((l or {}).get("source", "clips") == "clips" for l in layers)
+    comp = None
+    tell("loading the clips" if uses_clips else "building the layers")
+    if uses_clips:
+        lib = ClipLibrary(str(clips_dir), w, h, fps, cache_size=4, fit=rs["clip_fit"], turn_wide=rs["turn_wide"])
+        comp = ClipComposer(lib, grid, notes, cfg)
+        song_t0 = float(grid.start_offset or 0.0)
+        if meta is not None and start_t > song_t0 and [Path(x).name for x in meta.paths] == \
+                [Path(x).name for x in lib.paths]:
+            dry = ClipComposer(meta, grid, notes, cfg)    # the montage from the song's start
+            for fi in range(int(round((start_t - song_t0) * fps))):
+                if fi % 100 == 0:
+                    check()
+                dry.frame_at(song_t0 + fi / fps)
+            comp.take_state(dry)
+        else:
+            comp.seek(start_t)
+    stack = build_compositor(comp, cfg, notes, w, h, fps=fps, features_at=features_at, grid=grid,
+                             masks=str(resolve(rs["masks"])) if rs["masks"] else None,
+                             span=(start_t, end_t))
+    return stack, fps, w, h
 
 
 class ExactPreview:
@@ -102,37 +141,8 @@ class ExactPreview:
         self.thread = threading.Thread(target=self._make, args=(first, last, self.n), daemon=True, name="arc-preview")
         self.thread.start()
 
-    def _video_cfg(self) -> dict:
-        return self.s.video_cfg()
-
-    def _video_cfg_old(self) -> dict:
-        """The scene's video settings as the render resolves them (the studio's
-        ``_effective_video_cfg``), with the arrangement as it is now."""
-        from core.scene_doc import plain
-        s = self.s
-        with s.lock:
-            cfg = copy.deepcopy(s.video)
-            cfg["layers"] = plain(s.specs())
-            clips = s.proj.get("clips") or {}
-            if clips.get("order") and clips["order"] != "(scene)":
-                cfg["clip_order"] = clips["order"]
-            g = (clips.get("gravity") or {})
-            if g.get("enabled"):
-                for spec in (cfg.get("triggers") or {}).values():
-                    if isinstance(spec, dict) and "gravity" in spec:
-                        spec["gravity"] = {**dict(spec["gravity"]), **{k: float(g[k]) for k in
-                                                                       ("peak", "floor", "radius", "curve") if k in g}}
-            if "seed" not in cfg and clips.get("seed") is not None:
-                cfg["seed"] = clips["seed"]
-            if clips.get("overrides"):
-                cfg["overrides"] = {**(cfg.get("overrides") or {}), **{int(k): v for k, v in clips["overrides"].items()}}
-        return cfg
-
     def _make(self, first: int, last: int, n: int) -> None:
         from core import gpu as core_gpu
-        from core.video.clip_library import ClipLibrary
-        from core.video.composer import ClipComposer
-        from core.video.layers import build_compositor
         s = self.s
         out = WORK / f"exact_{n % 4}.mp4"
         proc = None
@@ -140,34 +150,11 @@ class ExactPreview:
         try:
             with s.lock:
                 db = s.bars()
-                fps, grid, notes, features_at = s.fps, s.grid, list(s.notes), s.features_at
+                fps = s.fps
                 start_t, end_t = db[first - 1], db[last]
-                rs = render_settings_of(s.proj)
-                clips_dir, meta = s.clips_dir(), s.lib
-            w, h = (int(x) for x in preview_res(s.proj.get("render") or {}).split("x"))
             n_frames = max(1, int((end_t - start_t) * fps))
-            cfg = self._video_cfg()
-            layers = cfg.get("layers")
-            uses_clips = not layers or any((l or {}).get("source", "clips") == "clips" for l in layers)
-            comp = None
-            self._tell("loading the clips" if uses_clips else "building the layers", 0, n_frames, first, last)
-            if uses_clips:
-                lib = ClipLibrary(str(clips_dir), w, h, fps, cache_size=4, fit=rs["clip_fit"], turn_wide=rs["turn_wide"])
-                comp = ClipComposer(lib, grid, notes, cfg)
-                song_t0 = float(grid.start_offset or 0.0)
-                if meta is not None and start_t > song_t0 and [Path(x).name for x in meta.paths] == \
-                        [Path(x).name for x in lib.paths]:
-                    dry = ClipComposer(meta, grid, notes, cfg)    # the montage from the song's start
-                    for fi in range(int(round((start_t - song_t0) * fps))):
-                        if fi % 100 == 0:
-                            self._check()
-                        dry.frame_at(song_t0 + fi / fps)
-                    comp.take_state(dry)
-                else:
-                    comp.seek(start_t)
-            stack = build_compositor(comp, cfg, notes, w, h, fps=fps, features_at=features_at, grid=grid,
-                                     masks=str(resolve(rs["masks"])) if rs["masks"] else None,
-                                     span=(start_t, start_t + n_frames / fps))
+            stack, fps, w, h = build_stack(s, start_t, start_t + n_frames / fps, self._check,
+                                           lambda what: self._tell(what, 0, n_frames, first, last))
             out.parent.mkdir(parents=True, exist_ok=True)
             proc = subprocess.Popen(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}",
                                      "-r", str(fps), "-i", "-", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",

@@ -392,3 +392,19 @@ def test_the_preview_keeps_the_projects_shape():
     assert preview_res({"resolution": "854x480"}) == "640x360"
     assert preview_res({"resolution": "1080x1920"}) == "360x640"
     assert preview_res({"resolution": "300x200"}) == "300x200"      # never bigger than the video
+
+
+def test_a_montage_clips_end_dragged_pins_the_bars(project):
+    s = _session(project)
+    db = s.bars()
+    seg = lambda a, b, name: {"t0": db[a - 1], "t1": db[b], "name": name, "path": f"clips/{name}.mp4"}
+    pins = lambda: {int(k): v for k, v in s.pins().items()}
+    had = pins()
+    s.montage = [seg(1, 2, "a"), seg(3, 4, "b"), seg(5, 8, "c")]
+    s.resize_run(3, 4, 3, 6)                       # b takes bars 5-6 from c
+    assert pins() == {**had, 3: "b", 4: "b", 5: "b", 6: "b"}
+    s.montage = [seg(1, 2, "a"), seg(3, 6, "b"), seg(7, 8, "c")]
+    s.resize_run(3, 6, 4, 6)                       # its first bar goes back to a
+    assert pins() == {**had, 3: "a", 4: "b", 5: "b", 6: "b"}
+    assert "error" in s.resize_run(3, 6, 7, 6)
+    assert "error" in s.resize_run(9, 9, 9, 10)

@@ -68,6 +68,20 @@ class Clips:
             self.proxies.check(paths)
         threading.Thread(target=run, daemon=True, name="arc-covers").start()
 
+    def covers_for(self, paths: list) -> dict:
+        """The covers of clips the lanes use, from any folder: {path as asked: cover URL}
+        (made once, cached by ``arr.cover``)."""
+        from core import arrangement as arr
+        out = {}
+        for p in list(paths or [])[:64]:
+            try:
+                got = arr.cover(str(resolve(p)))
+            except Exception:
+                got = None
+            if got is not None:
+                out[str(p)] = self.media.url(got)
+        return out
+
     def clip_info(self, path: str) -> dict:
         """A clip chosen in the browser: its length, its mask track, what the page plays."""
         from core import arrangement as arr

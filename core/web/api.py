@@ -20,6 +20,7 @@ from core.web.project import checked_render, render_settings_of, write_project
 from core.web.render import EngineRender, FinalRender, gpu
 from core.web.server import Events, Media
 from core.web.session import Session, resolve, shown_path
+from core.web.stream import EngineStream
 
 PREFS = ROOT / "render_output" / ".arrange.json"     # shared with the Arrange window (its clips folder)
 RECENT_MAX = 10
@@ -72,6 +73,7 @@ class Api:
         self._repaint = Repaint(self._session, self._events, self._media)
         self._preview = ExactPreview(self._session, self._loader, self._events, self._media, self._engine)
         self._preview.final = self._final
+        self._stream = EngineStream(self._session, self._events)
         self._loader.skip_separation = skip_separation
         self._loader.extra_stems = dict(stems or {})
         self._first = first                  # what to open at start: a project path or a project dict
@@ -101,6 +103,7 @@ class Api:
     def _close(self) -> None:
         if self._repaint.proc is not None and self._repaint.proc.poll() is None:
             self._repaint.proc.kill()
+        self._stream.stop()
         self._preview.stop()
         self._engine.stop()
         self._final.stop()
@@ -274,6 +277,16 @@ class Api:
         return self._preview.start(first, last)
 
     @_guarded
+    def stream_start(self, t: float, force: bool = False):
+        """The live preview (the engine, played as it is made) from second ``t``."""
+        return self._stream.start(t, force)
+
+    @_guarded
+    def stream_stop(self):
+        self._stream.stop()
+        return {"ok": True}
+
+    @_guarded
     def stop_render(self):
         return self._preview.stop()
 
@@ -415,12 +428,12 @@ class Api:
 # The arrangement's edits and questions, answered by the session as they are (core/web/edits.py).
 SESSION_CALLS = ("spans", "relane", "add", "remove", "set_param", "set_layer", "pin", "move", "new_member",
                  "set_block", "delete_block", "toggle", "set_windows", "mute", "set_mutes", "add_fx", "reorder",
-                 "move_fx", "copy_links", "copy_fx", "paste_links", "paste_fx", "menu", "montage_menu", "set_pins",
+                 "move_fx", "copy_links", "copy_fx", "paste_links", "paste_fx", "menu", "montage_menu", "set_pins", "resize_run",
                  "to_bg", "put_in_montage", "video_settings", "set_video",
                  "plugin", "set_value", "set_text", "add_trigger", "rename_trigger", "drop_trigger", "set_trigger",
                  "add_gesture", "drop_item", "add_role", "set_role", "set_mask", "keypath_of",
                  "knob_open", "knob_new", "knob_check", "knob_apply", "signals", "edit_signal", "project_fields",
-                 "list_clips", "clip_info", "place_clips", "clip_frame", "sam_open", "sam_check", "sam_apply", "sam_for_clip",
+                 "list_clips", "clip_info", "covers_for", "place_clips", "clip_frame", "sam_open", "sam_check", "sam_apply", "sam_for_clip",
                  "layer_text", "set_layer_text")
 
 

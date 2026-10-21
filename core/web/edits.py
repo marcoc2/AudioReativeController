@@ -715,6 +715,48 @@ class Edits:
                                 note=f"{bars}: " + ("back to the montage's choice" if value is None else
                                                     "nothing (the BG, or black)" if value == "none" else f"{value}, pinned"))
 
+    def montage_runs(self) -> list:
+        """The montage as runs: [(first bar, last bar, clip name)], a clip's bars together."""
+        out: list = []
+        for s in self.montage or []:
+            a, b = self.bar_at(s["t0"] + 1e-3), self.bar_at(max(s["t0"], s["t1"] - 1e-3))
+            if out and out[-1][2] == s["name"] and out[-1][1] >= a - 1:
+                out[-1] = (out[-1][0], max(out[-1][1], b), s["name"])
+            else:
+                out.append((a, b, s["name"]))
+        return out
+
+    def resize_run(self, first: int, last: int, new_first: int, new_last: int) -> dict:
+        """A clip's run in the montage (bars first..last) given other bars, as a block's ends
+        are dragged: all its bars are pinned to it (a random montage would draw them again),
+        the bars it gives up to the clip next to them (nothing at the song's ends). One undo step."""
+        with self.lock:
+            runs = self.montage_runs()
+            k = next((i for i, r in enumerate(runs) if r[0] == int(first) and r[1] == int(last)), None)
+            if k is None:
+                return {"error": f"no clip plays bars {first}-{last} in the montage now"}
+            name = runs[k][2]
+            if name == "none":
+                return {"error": "those bars show nothing: put a clip there first"}
+            n = len(self.bars()) - 1
+            a, b = max(1, int(new_first)), min(n, int(new_last))
+            if a > b:
+                return {"error": "a clip keeps one bar at least (Delete: nothing there)"}
+            before = runs[k - 1][2] if k > 0 else "none"
+            after = runs[k + 1][2] if k + 1 < len(runs) else "none"
+            if (a, b) == (int(first), int(last)):
+                return self._answer()
+            change = {**{x: name for x in range(a, b + 1)},           # all its bars: the draw around stays
+                      **{x: before for x in range(int(first), a)}, **{x: after for x in range(b + 1, int(last) + 1)}}
+
+            def put(s):
+                pins = {int(x): v for x, v in (s.get("pins") or {}).items()}
+                pins.update(change)
+                return {**{x: v for x, v in s.items() if x != "pins"}, "pins": dict(sorted(pins.items()))}
+            self._edit(["clips"], put)
+            return self._answer(montage=True, select={"montage": [a, b]},
+                                note=f"{name}: bars {a}-{b} (pinned)")
+
     def pin(self, bar: int, clip=None) -> dict:
         return self.set_pins(bar, bar, clip)
 

@@ -105,7 +105,7 @@ const ON = {
   load: e => onLoadStep(e),
   opened: st => onOpened(st),
   state: st => { if (S) later(() => apply(st)); },
-  montage: segs => { montage = segs || []; later(() => { renderTimeline(); if (sel && sel.type === "montage") renderInspector(); }); },
+  montage: segs => { montage = segs || []; streamEdited(); later(() => { renderTimeline(); if (sel && sel.type === "montage") renderInspector(); }); },
   knobs: () => { knobs.clear(); if (sel && sel.type === "member") renderInspector(); },
   covers: got => { for (const [clip, cover] of Object.entries(got || {})) thumbs.set(clip, cover); scheduleThumbRedraw(); },
   lengths: got => { Object.assign(clipLens, got || {}); scheduleThumbRedraw(); },
@@ -114,12 +114,12 @@ const ON = {
   engine: e => onEngine(e),
   proxies: got => { Object.assign(proxyOf, got || {}); },
   final: j => showFinal(j),
-  demo: e => { if (sel && sel.type === "entry" && sel.key === e.key) renderInspector(); },
+  demo: e => { if (entryKey === e.key) showEntryPanel(); },
   repaint: j => { if (j && j.settings) renderRepaint(); else showRepaint(j); },
   gpu: e => {
     gpuBusy = e.busy || [];
-    $("gpuNote").hidden = !gpuBusy.length;
-    $("gpuNote").textContent = gpuBusy.length ? `The GPU is busy (${gpuBusy.join(", ")}): the live preview waits` : "";
+    $("gpuNote").hidden = !gpuBusy.length || view !== "sketch";
+    $("gpuNote").textContent = gpuBusy.length ? `The GPU is busy (${gpuBusy.join(", ")}): the sketch waits` : "";
   },
 };
 window.arc = { event: (fn, data) => { try { if (ON[fn]) ON[fn](data); } catch (e) { console.error(fn, e); } } };
@@ -156,8 +156,9 @@ const xToBar = x => Math.max(1, Math.min(NB(), Math.floor(x / ppb) + 1));
 let actx = null, audioBuf = null, src = null, playing = false, startCtx = 0, startPos = 0, startPerf = 0, pausedAt = 0;
 let loop = null;               // [first bar, last bar]
 let peaks = null, peaksHz = 200;
+let holding = false;            // playing, but the song waits for the engine's frames
 function now() {
-  if (!playing) return pausedAt;
+  if (!playing || holding) return pausedAt;
   if (audioBuf && actx) return Math.max(startPos, startPos + (actx.currentTime - startCtx));
   return startPos + (performance.now() / 1000 - startPerf);
 }
@@ -174,8 +175,10 @@ async function setPlaying(on) {
   if (on === playing) return;
   if (on) {
     if (actx && actx.state === "suspended") await actx.resume();
-    playing = true; startSource();
-  } else { pausedAt = now(); playing = false; stopSource(); }
+    playing = true;
+    if (view === "live" && !streamHas(pausedAt)) { holding = true; streamAsk(pausedAt); }     // its frames first
+    else startSource();
+  } else { pausedAt = now(); playing = false; holding = false; stopSource(); }
   const pv = $("player").querySelector("video");              // the song plays: the clip's own sound goes off
   if (pv) pv.muted = playing || !clipSound;
   $("playIcon").innerHTML = playing ? '<path d="M3 2h3.5v12H3zM9.5 2H13v12H9.5z"/>' : '<path d="M4 2l10 6-10 6z"/>';
@@ -183,7 +186,8 @@ async function setPlaying(on) {
 }
 function seek(t) {
   t = Math.max(0, Math.min((S ? S.song.duration : 1) - 0.05, t));
-  if (playing) { stopSource(); pausedAt = t; startSource(); } else pausedAt = t;
+  if (playing && !holding) { stopSource(); pausedAt = t; startSource(); } else pausedAt = t;
+  if (view === "live") streamAsk(t);
 }
 let audioUrl = null;
 async function loadAudio(url) {
@@ -616,10 +620,86 @@ let engine = null;             // {url, first, last}
 let view = "live";
 let rendering = false;
 function setView(v) {
+  if (v !== "live" && holding) { holding = false; if (playing) startSource(); }
   view = v;
   $("viewLive").setAttribute("aria-pressed", v === "live");
+  $("viewSketch").setAttribute("aria-pressed", v === "sketch");
   $("viewEngine").setAttribute("aria-pressed", v === "engine");
   $("engineVideo").hidden = v !== "engine";
+  $("streamImg").hidden = v !== "live";
+  $("ovBot").hidden = v !== "sketch";
+  $("gpuNote").hidden = v !== "sketch" || !gpuBusy.length;
+  if (v !== "live") $("streamNote").hidden = true;
+  if (v === "live" && S) streamAsk(now());
+}
+
+// ---------------------------------------------------------------------------
+// Live: the engine itself, made as it plays (core/web/stream.py). Python makes the frames a
+// few seconds ahead of the playhead with the render's own stack; the page shows the one for
+// now, and when the engine is behind the song waits for it: never a picture the render
+// would not make.
+// ---------------------------------------------------------------------------
+let stream = null, streamAsking = 0, streamDirty = 0, streamShown = -1, streamMade = -1, streamBusy = false;
+let streamState = {}, streamRetryAt = 0, streamUrl = null, streamShownN = 0, streamAskBusy = false;
+const picOffset = () => (S && S.project.sync_offset_ms || 0) / 1000;
+const streamFi = t => stream ? Math.floor((t + picOffset() - stream.t0) * stream.fps + 1e-6) : -1;
+function streamHas(t) { const fi = streamFi(t); return !!stream && fi >= 0 && fi <= streamMade; }
+async function streamAsk(t, force = false) {
+  if (!S) return;
+  const n = ++streamAsking;
+  streamAskBusy = true;
+  const r = await call("stream_start", t + picOffset(), force).catch(e => ({ error: e.message }));
+  if (n === streamAsking) streamAskBusy = false;
+  if (n !== streamAsking) return;
+  if (!r || r.error) { stream = null; streamState = { error: r ? r.error : "no answer" }; showStreamNote(); return; }
+  if (!stream || r.gen !== stream.gen) { streamShown = -1; streamMade = r.made; }
+  stream = r; streamState = { error: r.error, what: r.what, ended: r.ended };
+}
+function streamEdited() { streamDirty = performance.now(); }
+function holdSong() { if (holding || !playing) return; pausedAt = now(); holding = true; stopSource(); }
+function releaseSong() { if (!holding) return; holding = false; if (playing) startSource(); }
+async function fetchStreamFrame(gen, fi, show) {
+  streamBusy = true;
+  try {
+    const r = await fetch(`/stream/${gen}/${fi}.jpg`, { cache: "no-store" });
+    if (!stream || stream.gen !== gen) return;
+    if (r.status === 410) { stream = null; return; }
+    const made = +(r.headers.get("X-Made") ?? -1);
+    if (made > streamMade) streamMade = made;
+    const st = r.headers.get("X-State");
+    if (st) streamState = JSON.parse(decodeURIComponent(st));
+    if (r.status === 200 && show) {
+      const url = URL.createObjectURL(await r.blob()), old = streamUrl;
+      $("streamImg").src = url; streamUrl = url; streamShown = fi; streamShownN++;
+      if (old) setTimeout(() => URL.revokeObjectURL(old), 1000);
+    } else if (r.status !== 200) streamRetryAt = performance.now() + 60;
+  } catch (e) { streamRetryAt = performance.now() + 500; }
+  finally { streamBusy = false; }
+}
+function streamTick(t) {
+  if (!S) return;
+  if (streamDirty && performance.now() - streamDirty > 250) { streamDirty = 0; streamAsk(t, true); }
+  if (!stream) { if (!streamAskBusy && !streamState.error) streamAsk(t); showStreamNote(); return; }
+  const fi = streamFi(t);
+  if (fi < 0) { if (!streamBusy) streamAsk(t); return; }
+  const lead = Math.round(stream.fps * 0.75);
+  if (playing && !holding && fi > streamMade && !streamState.ended) holdSong();
+  if (holding && (streamMade >= fi + lead || streamState.ended || streamState.error)) releaseSong();
+  if (!streamBusy && performance.now() >= streamRetryAt) {
+    if (fi !== streamShown && fi <= streamMade) fetchStreamFrame(stream.gen, fi, true);
+    else if (fi > streamMade || (holding && streamMade < fi + lead)) fetchStreamFrame(stream.gen, holding ? fi + lead : fi, !holding);
+  }
+  showStreamNote();
+}
+let lastStreamNote = "";
+function showStreamNote() {
+  const el = $("streamNote");
+  const err = streamState.error, behind = holding || (!playing && stream && streamFi(now()) > streamMade);
+  const text = err ? `The engine could not make it: ${err}` : behind ? `the engine is making it${streamState.what && streamState.what !== "playing" ? `: ${streamState.what}` : "…"}` : "";
+  if (text === lastStreamNote) return;
+  lastStreamNote = text;
+  el.hidden = !text || view !== "live"; el.classList.toggle("bad", !!err);
+  fill(el, h("span", { text }), err ? h("button", { class: "lnkbtn", onclick: () => setView("sketch") }, "Sketch instead") : null);
 }
 // the exact preview's state over the picture: {text, frac, stop, bad} | null
 function showExactOv(o) {
@@ -857,6 +937,21 @@ function montageRuns() {
   return out;
 }
 function runAt(bar) { return montageRuns().find(r => r.first <= bar && bar <= r.last) || null; }
+// a clip's run whose end is under x (its first bar's left side, its last bar's right side)
+function runEdgeAt(x) {
+  const runs = montageRuns().filter(r => r.name !== "none"), near = Math.min(EDGE, ppb / 3);
+  for (const r of runs) {
+    if (Math.abs(x - (r.first - 1) * ppb) <= near) return { run: r, end: "first" };
+    if (Math.abs(x - r.last * ppb) <= near) return { run: r, end: "last" };
+  }
+  return null;
+}
+function showRunEdge(bar) {          // bar: the line before it (null: none)
+  const ed = $("edge"), l = laneById("clips");
+  if (!ed || !l) return;
+  if (bar == null) { ed.hidden = true; return; }
+  ed.hidden = false; ed.style.left = ((bar - 1) * ppb - 1) + "px"; ed.style.top = l.top + "px"; ed.style.height = l.h + "px";
+}
 const thumbs = new Map();     // clip url -> its cover's url
 function drawCells(lane, l) {
   for (let b = 1; b <= NB(); b++) {
@@ -889,7 +984,9 @@ function blockEl(m, s, k, l) {
   const room = Math.floor((width - 14) / 6.2) - tags - pre.length;      // a long name: its end shows (where stems differ)
   const shown = pre + (room > 4 && label.length > room ? "…" + label.slice(label.length - room + 1) : label);
   const colour = m.kind === "clip" && m.colour ? `; --bc:${m.colour}` : "";
-  const el = h("div", { class: cls + (colour ? " tinted" : ""), dataset: { id: idOf(m.ref), k }, style: `left:${left}px; width:${Math.max(4, width)}px; top:${top}px; height:${height}px${colour}`,
+  const file = m.kind === "clip" ? s.file || m.file : null, cov = file ? blockCover(file) : null;
+  const pic = cov ? `; background-image:url(${cov}); background-size:${Math.min(ppb, 2 * height)}px 100%` : "";
+  const el = h("div", { class: cls + (colour ? " tinted" : "") + (cov ? " thumb" : ""), dataset: { id: idOf(m.ref), k }, style: `left:${left}px; width:${Math.max(4, width)}px; top:${top}px; height:${height}px${colour}${pic}`,
     title: `${m.label} (${kindName(m)}) · bars ${s.first}–${s.last} of ${NB()}${m.cued ? " · cued (REAPER): hide bars of it from its menu" : ""}${m.always ? " · the whole song: drag an end to give it bars" : ""}${live ? "" : " · at the render"}${m.enabled ? "" : " · off"}${s.missing ? ` · MISSING: ${s.file || m.file}` : ""}${s.file || m.file ? `\n${s.file || m.file}` : ""}` },
     h("span", { class: "nm", text: shown }),
     s.from ? h("span", { class: "sg", text: `@${fmt(s.from)}s` }) : null,
@@ -897,6 +994,23 @@ function blockEl(m, s, k, l) {
     m.own_fx ? h("span", { class: "sg", text: `+${m.own_fx}fx` }) : null);
   if (m.own_fx) el.append(h("i", { class: "fxstrip", title: m.fx.map(f => f.label).join(", ") }));
   return el;
+}
+// the covers of the clips on the lanes (any folder), asked of Python as blocks need them
+const blockCovers = new Map(), coversAsked = new Set();
+let coversTimer = 0;
+function blockCover(file) {
+  if (blockCovers.has(file)) return blockCovers.get(file);
+  if (!coversAsked.has(file)) {
+    coversAsked.add(file);
+    clearTimeout(coversTimer);
+    coversTimer = setTimeout(async () => {
+      const want = [...coversAsked].filter(f => !blockCovers.has(f));
+      const got = await ask("covers_for", want);
+      for (const f of want) blockCovers.set(f, (got && got[f]) || null);
+      if (got && Object.keys(got).length) later(renderTimeline);
+    }, 120);
+  }
+  return null;
 }
 // a clip's name on its block: its file's stem; a generic one ("final.mp4") with its folder
 function clipLabel(path) {
@@ -938,6 +1052,7 @@ function apply(st) {
   rowsOf = st.rows || {}; groups = st.groups || {}; has = st.has || {}; board = st.board || {};
   if (st.montage) montage = st.montage;
   if (st.montage_bars) montageBars = st.montage_bars;
+  streamEdited();
   if ("dirty" in st) { dirty = st.dirty; savedAt = st.saved_at || ""; }
   if (st.select !== undefined) {
     const s2 = st.select;
@@ -1017,7 +1132,11 @@ inner.addEventListener("pointerdown", e => {
     try { bEl.setPointerCapture(e.pointerId); } catch (err) { /* a pointer that is not down */ }
     return;
   }
-  if (e.target.closest(".cell") || (l && l.kind === "clips")) { drag = { type: "range", bar0: bar, first: bar, last: bar, moved: false }; return; }
+  if (e.target.closest(".cell") || (l && l.kind === "clips")) {
+    const end = e.shiftKey ? runEdgeAt(x) : null;
+    if (end) { drag = { type: "runend", run: end.run, end: end.end, first: end.run.first, last: end.run.last, moved: false }; try { inner.setPointerCapture(e.pointerId); } catch (err) { /* not down */ } return; }
+    drag = { type: "range", bar0: bar, first: bar, last: bar, moved: false }; return;
+  }
   if (l && l.kind === "track") drag = { type: "new", lane: l.id, row: rowAtY(l, y), bar0: bar, first: bar, last: bar, moved: false };
   else drag = { type: "span", bar0: bar, first: bar, last: bar, moved: false };
   try { inner.setPointerCapture(e.pointerId); } catch (err) { /* a pointer that is not down */ }
@@ -1025,6 +1144,14 @@ inner.addEventListener("pointerdown", e => {
 inner.addEventListener("pointermove", e => {
   const [x, y] = innerXY(e);
   if (!drag) {
+    const cl = laneAtY(y);                    // the montage: Shift on a clip's end shows it can be dragged
+    if (cl && cl.kind === "clips") {
+      const end = e.shiftKey ? runEdgeAt(x) : null;
+      inner.style.cursor = end ? "ew-resize" : "";
+      showRunEdge(end ? (end.end === "first" ? end.run.first : end.run.last + 1) : null);
+      return;
+    }
+    inner.style.cursor = "";
     const bEl = e.target.closest(".block");
     hoverAt = bEl ? { el: bEl, x: e.clientX } : null;
     const end = bEl ? edgeOf(bEl, e.clientX, e.shiftKey) : null;
@@ -1047,6 +1174,15 @@ inner.addEventListener("pointermove", e => {
     drag.moved = drag.moved || dB !== 0 || lane !== drag.m.lane || row !== drag.m.row;
     Object.assign(drag.el.style, { left: (drag.first - 1) * ppb + 1 + "px", width: (drag.last - drag.first + 1) * ppb - 2 + "px", top: rowTop(l, row) + 1 + "px", cursor: drag.mode === "move" ? "grabbing" : "ew-resize" });
     if (drag.mode !== "move") showEdge(drag.el, drag.mode);
+    return;
+  }
+  if (drag.type === "runend") {
+    const r = drag.run;
+    if (drag.end === "first") drag.first = Math.max(1, Math.min(r.last, Math.round(x / ppb) + 1));
+    else drag.last = Math.max(r.first, Math.min(NB(), Math.round(x / ppb)));
+    drag.moved = drag.first !== r.first || drag.last !== r.last;
+    document.querySelectorAll(".cell").forEach(c => c.classList.toggle("sel", +c.dataset.bar >= drag.first && +c.dataset.bar <= drag.last));
+    showRunEdge(drag.end === "first" ? drag.first : drag.last + 1);
     return;
   }
   drag.moved = drag.moved || bar !== drag.bar0;
@@ -1077,6 +1213,10 @@ inner.addEventListener("pointerup", e => {
     if (pk && accepts(l, pk)) edit("new_member", d.lane, pk.type === "clip" ? pk.path : pk.key, d.first, d.last, d.row, pk.from || 0);
     else if (d.moved) { setLoop(d.first, d.last); toast(`bars ${d.first}–${d.last} chosen · to put something there, pick it in the browser first`); }
     else { sel = null; seek(xToT(x)); loop = [bar, bar]; renderTimeline(); renderInspector(); }     // an empty place: that bar chosen
+  } else if (d.type === "runend") {
+    showRunEdge(null);
+    if (d.moved) edit("resize_run", d.run.first, d.run.last, d.first, d.last);
+    else renderTimeline();
   } else if (d.type === "range") {
     let first = d.first, last = d.last;
     if (!d.moved) { const run = runAt(bar); if (run) { first = run.first; last = run.last; if (run.path) chooseClip(run.path, 0); } }
@@ -1402,7 +1542,7 @@ function renderBrowser() {
       const it = { type: "cat", key: c.key, kind: c.kind, label: c.label };
       const flags = (c.takes_input ? " *" : "") + c.needs.map(n => ` (${n})`).join("");
       const row = h("div", { class: "bitem" + (isPicked(it) ? " picked" : ""), title: (c.about || c.key) + (c.takes_input ? "\n* takes the picture below as input" : "") + (bad ? `\nGLSL ES: ${st.error}` : ""),
-        onclick: e => { if (e.target.closest("button")) return; pick(it); sel = { type: "entry", key: c.key }; renderTimeline(); renderInspector(); } },
+        onclick: e => { if (e.target.closest("button")) return; pick(it); entryKey = c.key; showEntryPanel(); } },
         h("span", { class: "nm", text: c.label + flags }),
         h("span", { class: `badge ${c.live && !bad ? "live" : bad ? "bad" : "engine"}`, text: c.live && !bad ? "live" : bad ? "glsl" : "engine" }),
         h("button", { class: "add", title: c.kind === "gen" ? "Put 4 bars of it in the BG at the playhead" : "Put it on the master, all the song", "aria-label": `Add ${c.label}`, onclick: () => c.kind === "gen" ? putItem(it, "bg", barAt(now())) : addFx(["master"], c.key) }, "+"));
@@ -2340,10 +2480,27 @@ async function closeSam(ok) {
 // ---------------------------------------------------------------------------
 // A catalog entry: what it is and its demo (core/demos.py), made on asking
 // ---------------------------------------------------------------------------
+// the entry picked in the browser, under its list: its demo, what it is, Make demo
+let entryKey = null, entryReq = 0;
+async function showEntryPanel() {
+  const box = $("entryPanel");
+  if (!entryKey || (tab !== "gen" && tab !== "fx")) { box.hidden = true; return; }
+  const n = ++entryReq, key = entryKey;
+  const e = await ask("entry", key);
+  if (!e || n !== entryReq) return;
+  box.hidden = false;
+  box.replaceChildren(h("div", { class: "row nowrap entryhead" }, h("b", { text: e.label }), h("span", { class: "chip", text: e.category }), h("span", { class: "spacer" }),
+    h("button", { class: "lnkbtn", "aria-label": "Close", onclick: () => { entryKey = null; showEntryPanel(); } }, "✕")));
+  entryInto(box, e, key);
+}
 async function inspEntry(box, key) {
   const e = await ask("entry", key);
   if (!e || !(sel && sel.type === "entry" && sel.key === key)) return;
   $("inspTitle").textContent = e.kind;
+  box.append(h("div", { class: "ptitle" }, h("h3", { text: e.label }), h("div", { class: "src", text: `${e.kind} · ${e.category}` })));
+  entryInto(box, e, key);
+}
+function entryInto(box, e, key) {
   const d = e.demo;
   if (d.url) {
     const v = h("video", { src: d.url, muted: true, loop: true, autoplay: true, playsinline: true, class: "demo", title: "click it: bigger" });
@@ -2355,8 +2512,7 @@ async function inspEntry(box, key) {
     failed: `its demo failed: ${d.error || "see the log"}`, ready: "click it: bigger" };
   box.append(h("div", { class: "row" }, h("span", { class: "about", style: d.state === "failed" ? "color:var(--danger)" : "", text: states[d.state] || d.state }),
     d.state === "missing" || d.state === "failed" || d.state === "stale" ? h("button", { class: "btn sm", title: "on the GPU: a few seconds, minutes for the 3D fractals",
-      onclick: async () => { const r = await ask("make_demo", key); if (r) { toast(`${e.label}: making its demo`); renderInspector(); } } }, d.state === "stale" ? "Make it again" : "Make demo") : null));
-  box.append(h("div", { class: "ptitle" }, h("h3", { text: e.label }), h("div", { class: "src", text: `${e.kind} · ${e.category}` })));
+      onclick: async () => { const r = await ask("make_demo", key); if (r) { toast(`${e.label}: making its demo`); showEntryPanel(); } } }, d.state === "stale" ? "Make it again" : "Make demo") : null));
   if (e.about) box.append(h("div", { class: "about", text: e.about }));
   const notes = [e.takes_input ? "* can also take the picture below as its input" : null,
     e.needs.includes("masks") ? "needs a mask track (SAM2)" : null, e.needs.includes("cuts") ? "works at the clip montage's cuts" : null].filter(Boolean);
@@ -2365,8 +2521,8 @@ async function inspEntry(box, key) {
   if (e.kind === "FX") box.append(h("div", { class: "btnrow" }, h("button", { class: "btn", onclick: () => addFx(["master"], key) }, "Add to the master")),
     h("div", { class: "hint", text: "or drag across an FX track (a lane's, the master's); or right-click a block: its own" }));
   else box.append(h("div", { class: "hint", text: "drag across the BG or the FG to put it there" }));
-  box.append(sect(`Parameters (${e.params.length}; ~ the music can move it)`),
-    h("div", { class: "plist2" }, e.params.map(p => h("div", { class: "mono small", title: p.about || "" }, `${p.knob ? "~ " : "  "}${p.name} = ${p.default == null ? "-" : p.default}`))));
+  box.append(h("details", { class: "params" }, h("summary", { text: `Parameters (${e.params.length}; ~ the music can move it)` }),
+    h("div", { class: "plist2" }, e.params.map(p => h("div", { class: "mono small", title: p.about || "" }, `${p.knob ? "~ " : "  "}${p.name} = ${p.default == null ? "-" : p.default}`)))));
 }
 function showDemoBig(e, url) {
   const m = $("modal");
@@ -2452,7 +2608,8 @@ function tick() {
     if (playing && loop && t >= B[loop[1]]) { seek(B[loop[0] - 1]); t = now(); }
     if (playing && t >= S.song.duration - 0.05) { setPlaying(false); pausedAt = loop ? B[loop[0] - 1] : 0; t = pausedAt; }
     frameNo++;
-    if (gl && view === "live" && !gpuBusy.length) { drawFrame(t + ((S.project.sync_offset_ms || 0) / 1000)); showChips(); }
+    if (gl && view === "sketch" && !gpuBusy.length) { drawFrame(t + ((S.project.sync_offset_ms || 0) / 1000)); showChips(); }
+    if (view === "live") streamTick(t);
     syncEngineVideo(t);
     const bar = barAt(t), beats = S.song.beats;
     let beat = 1; if (beats.length) { const i = lastIdx(beats, t + 1e-4), i0 = lastIdx(beats, B[bar - 1] + 1e-4); beat = Math.max(1, i - i0 + 1); }
@@ -2467,7 +2624,11 @@ function tick() {
     updateMeters(t);
     frames++;
     const n = performance.now();
-    if (n - fpsT > 500) { $("fpsText").textContent = view === "live" ? `live · ${W}×${H} · ${Math.round(frames * 1000 / (n - fpsT))} fps` : "engine render"; frames = 0; fpsT = n; }
+    if (n - fpsT > 500) {
+      const k = 1000 / (n - fpsT);
+      $("fpsText").textContent = view === "sketch" ? `sketch · ${W}×${H} · ${Math.round(frames * k)} fps` : view === "live" ? `live: the engine · ${Math.round(streamShownN * k)} fps` : "exact: a render";
+      frames = 0; streamShownN = 0; fpsT = n;
+    }
   }
   requestAnimationFrame(tick);
 }
@@ -2539,10 +2700,12 @@ async function openProject(source) {
   log("out", `open ${name}`);
   loadGen++;
   S = null; members = []; montage = []; pins = {}; sel = null; loop = null; engine = null; peaks = null; audioBuf = null; audioUrl = null;
+  blockCovers.clear(); coversAsked.clear(); entryKey = null; showEntryPanel();
   picked = null; pickedFx = null; rowsOf = {}; groups = {}; has = {}; board = {}; montageBars = []; lastNote = ""; showPicked();
   knobs.clear(); thumbs.clear(); shaders.clear(); dirty = false; savedAt = "";
   for (const v of vids.values()) { v.el.removeAttribute("src"); v.el.load(); }
   vids.clear();
+  stream = null; streamState = {}; streamMade = -1; streamShown = -1; holding = false;
   setView("live"); $("viewEngine").disabled = true;
   renderTimeline(); renderInspector(); showSaveState();
   $("projName").textContent = typeof source === "string" ? source.split(/[\\/]/).pop().replace(/\.ya?ml$/, "") : "untitled";
@@ -2676,7 +2839,7 @@ async function reloadScene() {
 // ---------------------------------------------------------------------------
 // Wiring and start
 // ---------------------------------------------------------------------------
-document.querySelectorAll(".browser .tab").forEach(b => b.addEventListener("click", () => { tab = b.dataset.tab; renderBrowser(); }));
+document.querySelectorAll(".browser .tab").forEach(b => b.addEventListener("click", () => { tab = b.dataset.tab; renderBrowser(); showEntryPanel(); }));
 $("search").addEventListener("input", () => { if (tab === "clips") loadClipList(clipFolder); else renderBrowser(); });
 function showDock(which) {
   document.querySelectorAll(".dock .tab").forEach(b => b.setAttribute("aria-selected", b.dataset.dock === which));
@@ -2734,6 +2897,7 @@ $("exactN").addEventListener("change", e => { exactN = +e.target.value; try { lo
 $("bRenderVideo").addEventListener("click", openRenderDialog);
 $("bStop").addEventListener("click", () => call("stop_render"));
 $("viewLive").addEventListener("click", () => setView("live"));
+$("viewSketch").addEventListener("click", () => setView("sketch"));
 $("viewEngine").addEventListener("click", () => { if (engine) setView("engine"); });
 $("loadChip").addEventListener("click", () => showLoad($("loadPanel").hidden));
 $("lpClose").addEventListener("click", () => showLoad(false));

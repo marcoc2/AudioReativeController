@@ -96,3 +96,14 @@ found and fixed: the preview was 360x640 for a 480x768 project (now the project'
 
 Not checked anywhere: a repaint against ComfyUI, a real drag from the Explorer, a proxy made
 from a real `.mov`.
+
+## Marco's review (2026-10-21)
+
+| What | Now |
+|---|---|
+| The instant preview did not obey the timeline | It was a WebGL sketch that left out every layer without a live version. **Live is now the engine itself** (`core/web/stream.py`): the render's own stack makes the frames a few seconds ahead of the playhead and the page shows them; when the engine is behind, the song waits for it. The WebGL one stays as **Sketch**, said to be approximate. The engine's config was checked against the old studio's for every project: the same (the render and the exact preview never differed) |
+| Each request to the local server took ~250 ms | Keep-alive and no Nagle: 3 ms (the stream reaches the engine's speed, ~32 fps on coracao_esfolado) |
+| The demo of an FX or Generator was across the window | Under the browser's list, where it is picked |
+| BG clips showed no picture on the timeline | Their covers, bar after bar, as the montage's cells |
+| Clips in the Clips lane could not be resized | Shift+drag a clip's end: all its bars pinned to it, the bars it gives up to the clip next to them |
+

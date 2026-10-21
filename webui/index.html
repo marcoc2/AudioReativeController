@@ -53,6 +53,7 @@
     </div>
     <input class="search" id="search" type="search" placeholder="Filter…" aria-label="Filter the browser">
     <div class="blist" id="blist"></div>
+    <div class="entrypanel" id="entryPanel" hidden></div>
     <div class="pickedbar" id="picked" hidden></div>
     <div class="player" id="player" hidden></div>
     <div class="legend">
@@ -64,13 +65,16 @@
   <section class="pane stage" aria-label="Preview">
     <div class="phead"><h2>Preview</h2>
       <div class="seg" role="group" aria-label="What the preview shows">
-        <button id="viewLive" aria-pressed="true">Live</button>
+        <button id="viewLive" aria-pressed="true" title="The engine itself, made as it plays: what the render makes">Live</button>
+        <button id="viewSketch" aria-pressed="false" title="A quick WebGL sketch: only the layers that have a live version (the others are left out)">Sketch</button>
         <button id="viewEngine" aria-pressed="false" disabled title="Make an exact preview of some bars first">Exact</button>
       </div>
       <span class="spacer"></span><span class="chip"><span class="dot"></span><span id="fpsText">live</span></span></div>
     <div class="screen" id="screen">
       <canvas id="gl" width="640" height="360"></canvas>
+      <img id="streamImg" alt="" hidden>
       <video id="engineVideo" muted playsinline hidden></video>
+      <div class="streamnote" id="streamNote" hidden></div>
       <div class="ov bot" id="ovBot"></div>
       <div class="gpunote" id="gpuNote" hidden></div>
       <div class="exactov" id="exactOv" hidden></div>

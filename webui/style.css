@@ -444,3 +444,19 @@ button.bcat small { color: var(--dim); font-family: var(--f-mono); font-weight: 
 .exactov.bad { color: var(--danger); }
 .hint.status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60%; }
 #exactN { padding-left: 6px; padding-right: 4px; }
+
+/* Live: the engine's frames over the sketch's canvas */
+.screen img#streamImg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.streamnote { position: absolute; left: 8px; top: 8px; display: flex; gap: 8px; align-items: center; padding: 4px 9px; border-radius: 5px; background: rgba(10,11,14,.82); color: var(--accent); font-size: 11.5px; z-index: 5; max-width: calc(100% - 16px); }
+.streamnote.bad { color: var(--danger); }
+
+/* a clip block's cover, bar after bar (the name over it, readable) */
+.block.thumb { background-repeat: repeat-x; background-position: left center; }
+.block.thumb .nm, .block.thumb .sg { text-shadow: 0 1px 2px #000, 0 0 4px #000; color: #fff; }
+/* the catalog entry picked: under the browser's list, its demo where the eye already is */
+.entrypanel { flex: none; max-height: 48%; overflow: auto; border-top: 1px solid var(--line); padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+.entrypanel .entryhead { gap: 6px; }
+.entrypanel video.demo { max-width: 100%; max-height: 220px; }
+.entrypanel .about { font-size: 11.5px; }
+details.params summary { cursor: pointer; font-size: 11px; color: var(--dim); }
+.browser:has(#entryPanel:not([hidden])) .blist { height: 230px; }
