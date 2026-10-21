@@ -159,18 +159,17 @@ class KnobEditor:
     def knob_sources(self) -> dict:
         """What a knob can read in this project: MIDI tracks, audio features (stems among
         them), the transcription."""
-        from core.feature_extractor import AudioFeatureExtractor
-        from core.texture import TEXTURE_NAMES
         with self.lock:
             tracks = sorted({n.track for n in self.notes if n.track})
             stems = sorted(getattr(self, "stem_names", None) or [])
             score = ""
             if self.audio is not None and (self.audio.parent / "sheetsage").exists():
                 score = (self.audio.parent / "sheetsage").as_posix()
-        features = (["centroid", "flux"] + [f"subbands.{k}" for k in AudioFeatureExtractor.SUBBAND_RANGES]
-                    + [f"texture.{n}" for n in TEXTURE_NAMES] + [f"stems.{n}" for n in stems])
-        return {"tracks": tracks, "features": features, "score": score, "midi": self.midi_tracks(),
-                "audios": self.project_audios()}
+        from core import feature_info
+        features = feature_info.names(stems)
+        info = {n: feature_info.describe(n, stems) for n in features}
+        return {"tracks": tracks, "features": features, "feature_info": info, "feature_groups": list(feature_info.GROUPS),
+                "score": score, "midi": self.midi_tracks(), "audios": self.project_audios()}
 
     def midi_tracks(self) -> list:
         """Who can play in the MIDI: each track (the most played first) as a trigger names it
@@ -245,6 +244,7 @@ class KnobEditor:
                     if s["kind"] in (("knob",) if mode == "knob" else (mode,)) and s["name"] != name]
             return {"mode": mode, "state": st, "shared": shared, "signals": sigs,
                     "link": name if shared and shared.startswith("*") else None,
+                    "param": {"name": str(list(keypath)[-1]), **self.param_range(path, keypath)},
                     "schema": self.knob_schema(), "sources": self.knob_sources(),
                     "yaml": _flow(value) if value is not None else ""}
 

@@ -26,6 +26,7 @@ import yaml
 from core.web.clips import Clips
 from core.web.edits import Edits
 from core.web.knobs import KnobEditor
+from core.web.lab import Lab
 from core.web.plugin import LayerText, Plugin
 from core.web.project import ProjectEdits
 from core.web.util import (PREVIEW_RES, RESOLUTIONS, copy_keeping_signals, cue_key, num, preview_res, resolve,  # noqa: F401
@@ -106,7 +107,7 @@ def _name_from_comments(pairs: list, seq, first_lead=None) -> None:
                 base["name"] = name
 
 
-class Session(Edits, KnobEditor, Plugin, LayerText, ProjectEdits, Clips):
+class Session(Edits, KnobEditor, Lab, Plugin, LayerText, ProjectEdits, Clips):
     """The open project: its song and bars, its scene, the arrangement being edited."""
 
     def __init__(self, media, events):
@@ -148,6 +149,8 @@ class Session(Edits, KnobEditor, Plugin, LayerText, ProjectEdits, Clips):
             self.segments: list = []
             self.stem_names: list = []      # the stems the features have (stems.<name> a knob reads)
             self.stem_waves: list = []      # the stems with sound as the timeline draws them (load.stem_waves)
+            self.stem_files: dict = {}      # stem name -> its audio file (the Lab plays it)
+            self.draft = None               # (path, keypath, spec): a link tried on Live before Apply (lab.py)
             self.board_links = None         # what Copy took: music links, FX
             self.board_fx = None
 
@@ -491,10 +494,11 @@ class Session(Edits, KnobEditor, Plugin, LayerText, ProjectEdits, Clips):
         return {}
 
     # -- the montage (the composer's dry run) --------------------------------------------
-    def video_cfg(self) -> dict:
+    def video_cfg(self, draft: bool = False) -> dict:
         """The scene's video settings as the render resolves them (the studio's
         ``_effective_video_cfg``): the arrangement as it is now, the project's clip order,
-        gravity override, seed and pinned bars."""
+        gravity override, seed and pinned bars; ``draft``: with the link being edited in its
+        place (the previews; never what is saved)."""
         from core.scene_doc import plain
         with self.lock:
             cfg = copy.deepcopy(self.video)
@@ -512,7 +516,7 @@ class Session(Edits, KnobEditor, Plugin, LayerText, ProjectEdits, Clips):
                 cfg["seed"] = clips["seed"]
             if clips.get("overrides"):
                 cfg["overrides"] = {**(cfg.get("overrides") or {}), **{int(k): v for k, v in clips["overrides"].items()}}
-            return cfg
+            return self._with_draft(cfg) if draft else cfg
 
     def montage_inputs(self):
         """What resolving the montage needs, copied under the lock: (generation, cfg)."""

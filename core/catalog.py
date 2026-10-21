@@ -113,11 +113,24 @@ SHADER_CATEGORIES = {
 }
 
 
+# "0..11", "-0.5 .. 0.5", "0 minor .. 1 major", "1 -> 0" (a pulse)
+RANGE = re.compile(r"(?<![\w.])(-?\d+(?:\.\d+)?)(?:\s+[^\W\d_]+)?\s*(?:\.\.|->)\s*(-?\d+(?:\.\d+)?)(?![\w.])")
+
+
 @dataclass
 class Param:
     name: str
     default: object = None            # None: a structure (a trigger, a list) or required
     about: str = ""
+
+    @property
+    def range(self) -> Optional[list]:
+        """The values it expects, when its about text says them ("0..11", "-0.5..0.5"), or
+        0..1 for how much of a layer shows."""
+        if self.name in ("mix", "opacity"):
+            return [0.0, 1.0]
+        m = RANGE.search(self.about or "")
+        return sorted([float(m.group(1)), float(m.group(2))]) if m else None
 
     @property
     def knob(self) -> bool:

@@ -174,9 +174,15 @@ function now() {
 function startSource() {
   startPos = pausedAt; startPerf = performance.now() / 1000;
   if (audioBuf && actx) {
-    src = actx.createBufferSource(); src.buffer = audioBuf; src.connect(actx.destination);
+    const how = hearing();                       // the song, or what the Lab's feature listens to
+    src = actx.createBufferSource(); src.buffer = how.buf;
+    let out = src;
+    if (how.lo != null) for (const [type, f] of [["highpass", how.lo], ["highpass", how.lo], ["lowpass", how.hi], ["lowpass", how.hi]]) {
+      const b = actx.createBiquadFilter(); b.type = type; b.frequency.value = f; out.connect(b); out = b;
+    }
+    out.connect(actx.destination);
     startCtx = actx.currentTime + 0.03;
-    src.start(startCtx, Math.min(pausedAt, audioBuf.duration - 0.01));
+    src.start(startCtx, Math.min(pausedAt, how.buf.duration - 0.01));
   }
 }
 function stopSource() { if (src) { try { src.stop(); } catch (e) { } src.disconnect(); src = null; } }
@@ -816,6 +822,7 @@ const roomy = () => rowH >= 30;
 const pickFor = l => l && isFxLane(l.id) ? pickedFx : picked;
 
 function computeLayout() {
+  if (labOn()) return labLayout();               // the Feature Lab in the timeline's place
   let y = 0; const L = [];
   for (const d of LANES) {
     let hh = 0, shown = 0;
@@ -878,6 +885,7 @@ function renderTimeline() {
     if (l.kind === "audio") { const c = canvasFor(width, l.h); lane.append(c); drawWave(c); }
     if (l.kind === "stem") { const c = canvasFor(width, l.h); lane.append(c); drawStem(c, l.wave, l.c); }
     if (l.kind === "midi") { const c = canvasFor(width, l.h); lane.append(c); drawMidi(c); }
+    if (l.kind.startsWith("lab")) { const c = canvasFor(width, l.h); c.dataset.lab = l.kind; c.dataset.id = l.id; lane.append(c); }
     if (l.kind === "clips") drawCells(lane, l);
     if (l.kind === "track") {
       for (let r = 1; r < l.shown; r++) lane.append(h("div", { class: "rowline", style: `top:${r * rowH + 2}px` }));
@@ -902,6 +910,7 @@ function renderTimeline() {
   updateLoopChip();
   $("bUndo").disabled = !undoN; $("bRedo").disabled = !redoN;
   $("zoomText").textContent = `${ppb}px a bar · rows ${rowH}px`;
+  if (labOn()) { if (lab.ppb !== ppb) labRefresh(); labDraw(); }
 }
 function drawRuler(cv) {
   const g = cv.getContext("2d"), d = devicePixelRatio || 1;
@@ -2061,10 +2070,11 @@ const subTop = () => subStack[subStack.length - 1] || null;
 function pushSub(it) { subStack.push(it); renderSub(); renderInspector(); $("subBody").scrollTop = 0; }
 function popSub() {
   const it = subStack.pop();
-  if (it && it.type === "knob") knobCtx = null;
+  if (it && it.type === "knob") { knobCtx = null; leaveLink(); }
   renderSub(); renderInspector(); renderTimeline();
 }
-function closeSubAll() { subStack = []; knobCtx = null; renderSub(); renderInspector(); renderTimeline(); }
+function closeSubAll() { const had = !!knobCtx; subStack = []; knobCtx = null; if (had) leaveLink(); renderSub(); renderInspector(); renderTimeline(); }
+function leaveLink() { if (lab) { const was = lab.hear; lab = null; showLabBar(); if (was !== "mix") rehear(); } clearDraft(); }
 // the lit row in the middle of its panel (only the panel scrolls, not the page)
 function centreInPanel(el) {
   const box = el.isConnected && el.closest(".insp"); if (!box) return;
@@ -2108,7 +2118,7 @@ async function openKnob(o) {
   openKnobCtx({ ...o, data, state: data.state, link: data.link || "", anchor: "" });
 }
 function openKnobCtx(ctx) {
-  if (subStack.length && subTop().type === "knob") subStack.pop();    // one link at a time
+  if (subStack.length && subTop().type === "knob") { subStack.pop(); leaveLink(); }    // one link at a time
   knobCtx = ctx;
   pushSub({ type: "knob", ref: ctx.ref, param: ctx.param || null, title: ctx.title });
 }
@@ -2139,7 +2149,10 @@ function inspKnob(box) {
   box.append(sect("It writes"), yamlOut, err);
   if (k.mode === "knob" && !k.link) box.append(h("div", { class: "fxhead" }, h("span", { class: "sect", text: "Its curve" }),
     h("select", { "aria-label": "Over", onchange: e => { k.span = e.target.value; checkKnob(); } }, [["around", "16 s around"], ["view", "the bars in view"], ["here", "8 bars on"], ["song", "the whole song"]].map(([v, t]) => h("option", { value: v, selected: v === (k.span || "around"), text: t })))), cv);
-  fill($("subActions"), h("button", { class: "btn sm primary", onclick: applyKnob }, "Apply"), h("button", { class: "btn sm", onclick: closeKnob }, "Cancel"));
+  const labBtn = k.mode === "knob" && !k.link ? h("button", { class: "btn sm" + (labOn() ? " on" : ""), "aria-pressed": labOn(),
+    title: "The Feature Lab: this link drawn step by step in the timeline's place (the song, what it hears, the feature, the value), its changes on Live at once",
+    onclick: () => labOn() ? closeLab() : openLab() }, "Lab") : null;
+  fill($("subActions"), labBtn, h("button", { class: "btn sm primary", onclick: applyKnob }, "Apply"), h("button", { class: "btn sm", onclick: closeKnob }, "Cancel"));
   checkKnob();
 }
 // who plays, picked from what the project has: a MIDI track (all its notes, or some), the
@@ -2218,6 +2231,16 @@ function knobSetting(name, def, kind, help, get, set) {
   else input = h("input", { type: "number", step: kind === "int" ? 1 : "any", value: v, onchange: e => { set(kind === "int" ? Math.round(+e.target.value) : +e.target.value); checkKnob(); } });
   return field(name, input, help);
 }
+// clip: the value held inside lo..hi (after gain and bias); on, it starts at the parameter's range
+function clipField(st, d) {
+  const rng = d.param && d.param.range;
+  const on = h("input", { type: "checkbox", checked: !!st.clip, "aria-label": "hold inside", onchange: e => {
+    st.clip = e.target.checked ? (rng ? [...rng] : [0, 1]) : null; renderSub(); } });
+  const num = i => h("input", { type: "number", step: "any", value: st.clip ? st.clip[i] : "", disabled: !st.clip, "aria-label": i ? "clip high" : "clip low",
+    onchange: e => { if (st.clip) { st.clip[i] = +e.target.value; checkKnob(); if (labOn()) showLabBar(); } } });
+  return field("clip", h("span", { class: "row nowrap" }, on, num(0), h("span", { class: "hint", text: ".." }), num(1)),
+    rng ? `held inside (its range: ${fmt(rng[0])}..${fmt(rng[1])})` : "held inside lo..hi");
+}
 function drawState(box, st, depth, onlySource, F, d) {
   if (st.form === "custom") { box.append(h("div", { class: "about", text: "A knob the editor has no form for: it stays as written (edit it in the layer's YAML)." }), h("pre", { class: "code", text: JSON.stringify(st.custom) })); return; }
   const f = F[st.form];
@@ -2247,14 +2270,21 @@ function drawState(box, st, depth, onlySource, F, d) {
     box.append(h("div", { class: "fields" }, field("Transcription", textField(src.score || d.sources.score, "its folder", v => { src.score = v; checkKnob(); })),
       field("Snap", h("select", { onchange: e => { src.snap = e.target.value; checkKnob(); } }, d.schema.snaps.map(x => h("option", { value: x, selected: x === (src.snap || "auto"), text: x }))))));
   } else if (f.source === "feature") {
+    const info = d.sources.feature_info || {}, groups = d.sources.feature_groups || [];
     const feats = d.sources.features.includes(st.source) ? d.sources.features : [st.source, ...d.sources.features];
-    box.append(field("Feature", h("select", { onchange: e => { st.source = e.target.value; checkKnob(); } }, feats.map(x => h("option", { value: x, selected: x === st.source, text: x })))));
+    const opt = x => h("option", { value: x, selected: x === st.source, text: info[x] ? info[x].label : x, title: info[x] ? `${x}: ${info[x].about}` : x });
+    const other = feats.filter(x => !info[x]);
+    box.append(field("Feature", h("select", { onchange: e => { st.source = e.target.value; renderSub(); } },
+      groups.map(g => { const xs = feats.filter(x => info[x] && info[x].group === g); return xs.length ? h("optgroup", { label: g }, xs.map(opt)) : null; }),
+      other.length ? h("optgroup", { label: "other" }, other.map(opt)) : null),
+      info[st.source] ? `${info[st.source].about} · ${st.source}, ${fmt(info[st.source].range[0])}..${fmt(info[st.source].range[1])}${info[st.source].unit ? ` ${info[st.source].unit}` : ""}` : st.source));
   }
   if (onlySource) return;
   // how it responds
   const ps = h("div", { class: "fields" });
   for (const [name, def, kind, help] of f.params) ps.append(knobSetting(name, def, kind, help, () => st.params[name], v => { st.params[name] = v; if (!(st.keep || []).includes(name)) (st.keep = st.keep || []).push(name); }));
   if (st.form !== "constant") for (const [name, def, kind, help] of d.schema.shaping) ps.append(knobSetting(name, def, kind, help, () => st[name], v => { st[name] = v; }));
+  if (st.form !== "constant") ps.append(clipField(st, d));
   box.append(ps);
   if (st.form === "rate") {
     if (st.from) {
@@ -2280,6 +2310,8 @@ function checkKnob() {
     $("knobYaml").textContent = r.yaml || ""; $("knobErr").textContent = r.error || "";
     if (r.values) drawCurve($("knobCurve"), r, t0, t1);
     if (r.hits != null) showHits(r);
+    if (!r.error) sendDraft(k, r.yaml);
+    if (labOn()) { lab.hits = r.hit_times || null; labRefresh(); }
   }, 150);
 }
 function drawCurve(cv, r, t0, t1) {
@@ -2305,9 +2337,322 @@ function drawCurve(cv, r, t0, t1) {
 }
 async function applyKnob() {
   const k = knobCtx; if (!k) return;
+  await clearDraft(false);                        // the edit itself makes Live again
   const r = await edit("knob_apply", k.ref, k.keypath, k.state, k.mode, k.anchor, k.link);
   if (r && !r.error) { toast("Applied"); closeKnob(); }
+  else { k.drafted = false; checkKnob(); }
 }
+// the link being edited, on Live before Apply (core/web/lab.py knob_draft): only once it
+// differs from what the scene says; Cancel takes it away
+async function sendDraft(k, yaml) {
+  if (k.mode !== "knob" || k.link) return;
+  if (k.openedYaml == null) { k.openedYaml = yaml; return; }
+  if (yaml === k.openedYaml && !k.drafted) return;
+  const r = await call("knob_draft", k.ref, k.keypath, k.state, k.mode).catch(() => null);
+  if (!r || !r.ok || knobCtx !== k) return;
+  k.drafted = true;
+  if (view === "live") streamAsk(now(), true);
+}
+async function clearDraft(remake = true) {
+  const r = await call("knob_draft_clear").catch(() => null);
+  if (remake && r && r.had && view === "live") streamAsk(now(), true);
+}
+
+// ---------------------------------------------------------------------------
+// The Feature Lab: the link being edited drawn step by step in the timeline's place (the
+// same bars, zoom and playhead): the song, what the feature listens to, the feature, each
+// step of the link, and what the parameter gets inside the range it expects. The settings
+// stay in the area on the right; every change redraws the lanes and goes to Live at once.
+// The curves are the render's own (core/web/lab.py knob_stages), for the bars in view.
+// ---------------------------------------------------------------------------
+let lab = null;          // {k: the link (knobCtx) it is for, data, heard, wave, hear: mix | heard, map, hits}
+const labOn = () => !!lab && !!knobCtx && lab.k === knobCtx;
+// the lanes share the timeline's height (it stays as it is): a weight and a least height each
+const LAB_H = { audio: [0.55, 22], labheard: [0.7, 26], labfeat: [1.3, 42], labshape: [1.0, 34], labparam: [1.6, 52] };
+const isFeatureForm = st => st && (st.form === "feature" || st.form === "relative");
+const stemBufs = new Map();   // a stem's URL -> its decoded audio (the Lab plays it)
+let labSeq = 0, labScrollT = 0;
+function openLab() {
+  const k = knobCtx; if (!k || k.mode !== "knob" || k.link) return;
+  lab = { k, data: null, heard: null, wave: null, feature: null, hear: lab ? lab.hear : "mix", map: null, hits: null, ppb };
+  showLabBar(); renderTimeline(); renderSub(); labRefresh();
+}
+function closeLab() {
+  if (!lab) return;
+  const was = lab.hear; lab = null;
+  showLabBar(); renderTimeline();
+  if (was !== "mix") rehear();
+  if (knobCtx) renderSub();
+}
+function labLayout() {
+  const L = []; let y = 0;
+  const add = (o, hh) => { L.push({ shown: 0, ...o, top: 0, h: hh }); };
+  const st = lab.k.state, F = lab.k.data.schema.forms[st.form] || {}, info = featInfo(st);
+  add({ id: "audio", name: "Song", kind: "audio", c: "var(--dim)" }, LAB_H.audio);
+  if (isFeatureForm(st)) add({ id: "lab:heard", name: "Heard", sub: heardSub(), kind: "labheard", c: "#6aa7d8" }, LAB_H.labheard);
+  const trig = F.source === "trigger" || (st.form === "rate" && st.from && (lab.k.data.schema.forms[st.from.form] || {}).source === "trigger");
+  if (trig && S.tracks.length) add({ id: "midi", name: "MIDI", kind: "midi", c: "var(--lane-midi, #c27cf0)" }, 8 + 9 * S.tracks.length);
+  if (isFeatureForm(st)) add({ id: "lab:feature", name: "Feature", sub: info ? info.label : st.source, kind: "labfeat", c: "#9fb36a" }, LAB_H.labfeat);
+  const mid = labStage("glided") || labStage("ratio");
+  if (mid) add({ id: "lab:shape", name: "Shaped", sub: mid.label, kind: "labshape", c: "#d78bb0" }, LAB_H.labshape);
+  const p = lab.k.data.param || {};
+  add({ id: "lab:param", name: "Parameter", sub: `${p.name || "the value"}${p.range ? ` · ${fmt(p.range[0])}..${fmt(p.range[1])}` : ""}`, kind: "labparam", c: "var(--accent)" }, LAB_H.labparam);
+  const fixed = L.filter(l => !Array.isArray(l.h)).reduce((a, l) => a + l.h, 0);
+  const room = Math.max(0, $("scroll").clientHeight - RULER_H - 14 - fixed);
+  const weight = L.filter(l => Array.isArray(l.h)).reduce((a, l) => a + l.h[0], 0);
+  for (const l of L) { if (Array.isArray(l.h)) l.h = Math.max(l.h[1], Math.floor(room * l.h[0] / weight)); l.top = y; y += l.h; }
+  return { lanes: L, height: y };
+}
+const labStage = key => lab && lab.data && lab.data.stages ? lab.data.stages.find(s => s.key === key) || null : null;
+const featInfo = st => isFeatureForm(st) && lab && lab.k.data.sources.feature_info ? lab.k.data.sources.feature_info[st.source] || null : null;
+function heardSub() {
+  const hd = lab.heard && lab.heard.heard;
+  if (!hd) return "…";
+  return hd.kind === "stem" ? `the ${hd.stem} stem` : hd.kind === "band" ? `the mix, ${fmtHz(hd.lo)}–${fmtHz(hd.hi)}` : hd.why || "the mix";
+}
+const fmtHz = f => f >= 1000 ? `${fmt(f / 1000)} kHz` : `${fmt(f)} Hz`;
+// the span the lanes are made for: the bars in view and half a view on each side
+function labSpan() {
+  const sc = $("scroll"), a = xToT(sc.scrollLeft), b = xToT(sc.scrollLeft + Math.max(50, sc.clientWidth - HEAD_W));
+  const w = Math.max(1, b - a), dur = S.song.duration;
+  return [Math.max(0, a - w / 2), Math.min(dur, b + w / 2)];
+}
+async function labRefresh() {
+  if (!labOn()) return;
+  const k = lab.k, n = ++labSeq, [t0, t1] = labSpan();
+  const cols = Math.max(20, Math.min(4000, Math.round(tToX(t1) - tToX(t0))));
+  if (isFeatureForm(k.state) && lab.feature !== k.state.source) {
+    lab.feature = k.state.source; lab.heard = null; lab.wave = null;
+    const feature = lab.feature;
+    call("lab_heard", feature).then(r => { if (labOn() && lab.feature === feature) { lab.heard = r && !r.error ? r : null; renderTimeline(); if (lab.hear !== "mix") rehear(); } }).catch(() => { });
+    call("lab_wave", feature).then(r => { if (labOn() && lab.feature === feature) { lab.wave = r && !r.error ? r : null; labDraw(); } }).catch(() => { });
+  }
+  const r = await call("knob_stages", k.state, t0, t1, cols).catch(e => ({ error: e.message }));
+  if (n !== labSeq || !labOn()) return;
+  const before = lab.data ? lab.data.stages.map(s => s.key).join() : null;
+  lab.data = r && !r.error ? r : null; lab.error = r && r.error; lab.ppb = ppb;
+  if (!lab.map) lab.map = mapOf(k.state);
+  showLabBar();
+  if (!lab.data || before !== lab.data.stages.map(s => s.key).join()) renderTimeline(); else labDraw();
+}
+// the map gain / bias say: the input's lo..hi (on the step before the final) onto the output's lo..hi
+function mapOf(st) {
+  const pre = labStage("glided") || labStage("ratio") || labStage("feature"), fin = labStage("final");
+  const p = lab.k.data.param || {}, g = +st.gain || 1, b = +st.bias || 0;
+  const out = p.range ? [...p.range] : fin ? [fin.p5, fin.p95] : [0, 1];
+  if (Math.abs(g) < 1e-9) return { inLo: pre ? pre.p5 : 0, inHi: pre ? pre.p95 : 1, outLo: out[0], outHi: out[1] };
+  return { inLo: (out[0] - b) / g, inHi: (out[1] - b) / g, outLo: out[0], outHi: out[1] };
+}
+function commitMap(m) {
+  const st = lab.k.state;
+  if (Math.abs(m.inHi - m.inLo) < 1e-9) return;
+  st.gain = +((m.outHi - m.outLo) / (m.inHi - m.inLo)).toFixed(4);
+  st.bias = +(m.outLo - st.gain * m.inLo).toFixed(4);
+  lab.map = m; renderSub();
+}
+function labFit() {
+  const pre = labStage("glided") || labStage("ratio") || labStage("feature"); if (!pre) return;
+  const p = lab.k.data.param || {}, cur = lab.map || mapOf(lab.k.state);
+  const out = p.range ? p.range : [cur.outLo, cur.outHi];
+  if (pre.p95 - pre.p5 < 1e-6) { toast("The feature hardly moves in these bars: nothing to fit", true); return; }
+  commitMap({ inLo: pre.p5, inHi: pre.p95, outLo: out[0], outHi: out[1] });
+}
+async function setLabRange(lo, hi) {
+  const p = lab.k.data.param; if (!p) return;
+  const r = await call("set_param_range", p.key, lo, hi).catch(e => ({ error: e.message }));
+  if (!r || r.error) { toast(r ? r.error : "not kept", true); return; }
+  Object.assign(p, await ask("param_range", lab.k.ref, lab.k.keypath) || {});
+  lab.map = null; renderTimeline(); labRefresh();
+}
+function setHear(mode) { if (!lab) return; lab.hear = mode; showLabBar(); rehear(); }
+// what plays: the song, the stem the feature listens to, or the song through its band
+function hearing() {
+  const hd = labOn() && lab.hear === "heard" && lab.heard ? lab.heard.heard : null;
+  if (hd && hd.kind === "stem" && stemBufs.get(hd.url) instanceof AudioBuffer) return { buf: stemBufs.get(hd.url) };
+  if (hd && hd.kind === "band" && actx) return { buf: audioBuf, lo: hd.lo, hi: Math.min(hd.hi, actx.sampleRate / 2 - 50) };
+  return { buf: audioBuf };
+}
+async function rehear() {
+  const hd = labOn() && lab.hear === "heard" && lab.heard ? lab.heard.heard : null;
+  if (hd && hd.kind === "stem" && !stemBufs.has(hd.url)) {
+    stemBufs.set(hd.url, "loading"); showLabBar();
+    try {
+      if (!actx) actx = new AudioContext();
+      const r = await fetch(hd.url); if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      stemBufs.set(hd.url, await actx.decodeAudioData(await r.arrayBuffer()));
+    } catch (e) { stemBufs.delete(hd.url); toast(`The stem could not be played: ${e.message}`, true); }
+    showLabBar();
+  }
+  if (playing && !holding) { const t = now(); stopSource(); pausedAt = t; startSource(); }
+}
+function showLabBar() {
+  const bar = $("labBar"); if (!bar) return;
+  if (!labOn()) { bar.hidden = true; bar.replaceChildren(); return; }
+  bar.hidden = false;
+  const k = lab.k, st = k.state, p = k.data.param || {}, info = featInfo(st), feat = isFeatureForm(st);
+  const hd = lab.heard && lab.heard.heard, loading = hd && hd.kind === "stem" && stemBufs.get(hd.url) === "loading";
+  const seg = (v, label, title) => h("button", { class: "btn sm" + (lab.hear === v ? " on" : ""), "aria-pressed": lab.hear === v, title, disabled: v === "heard" && (!hd || hd.kind === "mix"), onclick: () => setHear(v) }, label);
+  const lo = h("input", { type: "number", step: "any", value: p.range ? p.range[0] : "", placeholder: "lo", "aria-label": "the range's low end" });
+  const hi = h("input", { type: "number", step: "any", value: p.range ? p.range[1] : "", placeholder: "hi", "aria-label": "the range's high end" });
+  const keep = () => { if (lo.value !== "" && hi.value !== "") setLabRange(+lo.value, +hi.value); };
+  lo.onchange = keep; hi.onchange = keep;
+  const clip = h("input", { type: "checkbox", checked: !!st.clip, disabled: !p.range && !st.clip, onchange: e => { st.clip = e.target.checked && p.range ? [...p.range] : null; renderSub(); } });
+  fill(bar, h("b", { text: "Feature Lab" }),
+    h("span", { class: "hint", text: `${p.name || "the value"} ← ${info ? info.label : st.form}` }),
+    feat ? h("span", { class: "tgroup" }, h("span", { class: "tlabel", text: "Hear" }), seg("mix", "the mix", "the song as it is"),
+      seg("heard", loading ? "loading…" : "what it hears", hd && hd.kind === "mix" ? "it listens to the whole mix" : hd && hd.kind === "band" ? `the mix through ${fmtHz(hd.lo)}–${fmtHz(hd.hi)} only` : hd ? `the ${hd.stem} stem alone` : "…")) : null,
+    feat ? h("button", { class: "btn sm", title: "The feature's usual values in these bars (p5..p95) mapped onto the parameter's range: writes gain and bias", onclick: labFit }, "Fit") : null,
+    h("span", { class: "tgroup", title: p.from === "yours" ? "the range you set (kept for this parameter)" : p.from === "about" ? "the range its description says" : "its description says no range: set the one you want" },
+      h("span", { class: "tlabel", text: "Range" }), lo, h("span", { class: "hint", text: ".." }), hi,
+      p.from === "yours" ? h("button", { class: "lnkbtn", onclick: () => setLabRange(null, null) }, "as described") : h("span", { class: "hint", text: p.from === "about" ? "described" : "none" })),
+    h("label", { class: "row nowrap", title: "the value held inside the range (clip), so a rare peak cannot throw it out" }, clip, h("span", { text: "hold inside" })),
+    h("span", { class: "hint mono", text: `gain ${fmt(+st.gain || 1)} · bias ${fmt(+st.bias || 0)}${st.clip ? ` · clip ${fmt(st.clip[0])}..${fmt(st.clip[1])}` : ""}` }),
+    lab.error ? h("span", { class: "err", text: lab.error }) : null,
+    h("span", { class: "spacer" }),
+    h("button", { class: "btn sm", onclick: closeLab }, "Back to the timeline"));
+}
+// the lanes' pictures, for the span the data has
+function labDraw() {
+  if (!labOn() || !layout) return;
+  const inner = $("inner");
+  for (const cv of inner.querySelectorAll("canvas[data-lab]")) {
+    const l = laneById(cv.dataset.id); if (!l) continue;
+    const g = cv.getContext("2d"), d = devicePixelRatio || 1;
+    g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, cv.width, cv.height); g.setTransform(d, 0, 0, d, 0, 0);
+    if (l.kind === "labheard") drawHeard(g, l);
+    else drawLabLane(g, l);
+  }
+  for (const el of inner.querySelectorAll(".labhandle")) el.remove();
+  if (lab.data && isFeatureForm(lab.k.state)) labHandles();
+}
+function drawHeard(g, l) {
+  const w = lab.wave, mid = l.h / 2;
+  if (!w) { g.fillStyle = "#4b5263"; g.font = "10px 'IBM Plex Mono', monospace"; g.fillText(lab.heard ? "…" : "reading it…", $("scroll").scrollLeft + 6, mid); return; }
+  const src = w.kind === "mix" ? peaks : w.peaks, hz = w.kind === "mix" ? peaksHz : w.hz;
+  if (!src) return;
+  const sc = $("scroll"), x0 = Math.max(0, sc.scrollLeft - 200), x1 = sc.scrollLeft + sc.clientWidth + 200;
+  g.fillStyle = l.c;
+  for (let x = x0; x < x1; x += 1.5) {
+    const t0 = xToT(x), t1 = xToT(x + 1.5);
+    let m = 0; for (let i = Math.floor(t0 * hz); i <= Math.floor(t1 * hz) && i < src.length; i++) if (src[i] > m) m = src[i];
+    const hh = Math.min(1, m) * (mid - 2);
+    if (hh > 0.2) g.fillRect(x, mid - hh, 1.2, hh * 2);
+  }
+}
+function drawLabLane(g, l) {
+  const r = lab.data, H = l.h, pad = 8;
+  const sc = $("scroll"), vx = sc.scrollLeft;
+  g.font = "10px 'IBM Plex Mono', Consolas, monospace";
+  if (!r) { g.fillStyle = lab.error ? "#e2665a" : "#4b5263"; g.fillText(lab.error || "…", vx + 6, H / 2); return; }
+  const info = featInfo(lab.k.state), p = lab.k.data.param || {};
+  const st = l.kind === "labfeat" ? labStage("feature") : l.kind === "labshape" ? (labStage("glided") || labStage("ratio")) : labStage("final");
+  if (!st) return;
+  // the scale: the feature's own range on the feature (and a glide of it), the parameter's on the parameter
+  let lo = st.min, hi = st.max;
+  const fr = info && info.range, same = l.kind === "labfeat" || (l.kind === "labshape" && st.key === "glided");
+  if (same && fr) { lo = Math.min(lo, fr[0]); hi = Math.max(hi, fr[1]); }
+  // a rare peak does not flatten the rest: the scale stops at what is usual, past it is marked
+  if (st.key === "ratio") { lo = 0; hi = Math.max(2, Math.min(st.max, st.p95 * 2)); }
+  if (l.kind === "labparam") {
+    const base = p.range ? [...p.range] : [st.p5, st.p95], w = Math.max(1e-6, base[1] - base[0]);
+    if (lab.map) { base[0] = Math.min(base[0], lab.map.outLo); base[1] = Math.max(base[1], lab.map.outHi); }
+    lo = Math.max(st.min, base[0] - 1.5 * w); hi = Math.min(st.max, base[1] + 1.5 * w);
+    lo = Math.min(lo, base[0]); hi = Math.max(hi, base[1]);
+  }
+  if (hi - lo < 1e-6) { lo -= 0.5; hi += 0.5; }
+  const span = hi - lo; lo -= span * 0.04; hi += span * 0.04;
+  const Y = v => Math.max(1, Math.min(H - 1, pad + (1 - (v - lo) / (hi - lo)) * (H - 2 * pad)));
+  l.scale = { lo, hi, Y, inv: y => lo + (1 - (y - pad) / (H - 2 * pad)) * (hi - lo) };
+  const n = st.lo.length, dt = (r.t1 - r.t0) / n, X = c => tToX(r.t0 + (c + 0.5) * dt);
+  const W = tToX(r.t1);
+  const right = vx + sc.clientWidth - HEAD_W - 6;           // the guides' words at the right of the view, the lane's at the left
+  const guide = (v, colour, text, dash) => {
+    const y = Y(v); g.strokeStyle = colour; g.setLineDash(dash || []); g.lineWidth = 1; g.beginPath(); g.moveTo(tToX(r.t0), y + 0.5); g.lineTo(W, y + 0.5); g.stroke(); g.setLineDash([]);
+    if (text) { g.fillStyle = colour; g.textAlign = "right"; g.fillText(text, right, Math.max(10, Math.min(H - 3, y - 2))); g.textAlign = "left"; }
+  };
+  if (l.kind === "labparam") {
+    const m = lab.k.ref && (memberById(idOf(lab.k.ref)) || (lab.k.ref.lastIndexOf("fx") >= 2 ? memberById(idOf(lab.k.ref.slice(0, lab.k.ref.lastIndexOf("fx")))) : null));
+    if (m && !m.always && m.spans) {                     // outside the layer's bars: dimmed (it does not show there)
+      g.fillStyle = "rgba(0,0,0,.28)"; let from = 0;
+      for (const s of [...m.spans].sort((a, b) => a.first - b.first)) { g.fillRect(from, 0, (s.first - 1) * ppb - from, H); from = s.last * ppb; }
+      g.fillRect(from, 0, NB() * ppb - from, H);
+    }
+    if (p.range) { g.fillStyle = "rgba(240,160,75,.07)"; g.fillRect(tToX(r.t0), Y(p.range[1]), W - tToX(r.t0), Y(p.range[0]) - Y(p.range[1])); }
+  }
+  if (same && fr) { guide(fr[0], "#3b4352", null); guide(fr[1], "#3b4352", null); }
+  if (l.kind === "labfeat" && r.song) {
+    guide(r.song.p5, "rgba(159,179,106,.45)", `p5 ${fmt(r.song.p5)} (the song)`, [3, 4]);
+    guide(r.song.p95, "rgba(159,179,106,.45)", `p95 ${fmt(r.song.p95)}`, [3, 4]);
+  }
+  if (st.key === "ratio") guide(1, "rgba(215,139,176,.5)", "1 = as usual lately", [3, 4]);
+  if (l.kind === "labparam" && p.range) { guide(p.range[0], "rgba(240,160,75,.55)", `${fmt(p.range[0])}`, null); guide(p.range[1], "rgba(240,160,75,.55)", `${fmt(p.range[1])} · the range it expects`, null); }
+  if (l.kind === "labparam" && lab.k.state.clip) { const c = lab.k.state.clip; guide(c[0], "rgba(233,229,219,.35)", null, [2, 3]); guide(c[1], "rgba(233,229,219,.35)", "held inside", [2, 3]); }
+  const curve = (s, colour, alpha) => {
+    g.fillStyle = colour; g.globalAlpha = alpha * 0.35; g.beginPath();
+    for (let c = 0; c < n; c++) { const x = X(c), y = Y(s.hi[c]); c ? g.lineTo(x, y) : g.moveTo(x, y); }
+    for (let c = n - 1; c >= 0; c--) g.lineTo(X(c), Y(s.lo[c]));
+    g.closePath(); g.fill(); g.globalAlpha = alpha;
+    g.strokeStyle = colour; g.lineWidth = 1.3; g.beginPath();
+    for (let c = 0; c < n; c++) { const x = X(c), y = Y((s.hi[c] + s.lo[c]) / 2); c ? g.lineTo(x, y) : g.moveTo(x, y); }
+    g.stroke(); g.globalAlpha = 1;
+  };
+  if (l.kind === "labfeat" && labStage("average")) { g.setLineDash([4, 3]); curve(labStage("average"), "#e9e5db", 0.5); g.setLineDash([]); }
+  if (l.kind === "labshape" && st.key === "glided") curve(labStage("feature"), "#9fb36a", 0.3);   // the raw one under it
+  curve(st, l.kind === "labparam" ? "#f0a04b" : l.c, 1);
+  if (l.kind === "labparam" && p.range) {                      // out of its range: red
+    g.fillStyle = "rgba(226,102,90,.85)";
+    for (let c = 0; c < n; c++) {
+      if (st.hi[c] > p.range[1] + 1e-9) g.fillRect(X(c) - 1, Y(st.hi[c]), 2, Math.max(1, Y(p.range[1]) - Y(st.hi[c])));
+      if (st.lo[c] < p.range[0] - 1e-9) g.fillRect(X(c) - 1, Y(p.range[0]), 2, Math.max(1, Y(st.lo[c]) - Y(p.range[0])));
+    }
+  }
+  if (st.max > hi || st.min < lo) {                            // past the scale: marked, and how far
+    g.fillStyle = "rgba(226,102,90,.9)";
+    for (let c = 0; c < n; c++) { if (st.hi[c] > hi) g.fillRect(X(c) - 1, 0, 2, 4); if (st.lo[c] < lo) g.fillRect(X(c) - 1, H - 4, 2, 4); }
+    g.textAlign = "right";
+    if (st.max > hi) g.fillText(`↑ up to ${fmt(st.max)}`, right, 22);
+    if (st.min < lo) g.fillText(`↓ down to ${fmt(st.min)}`, right, H - 6);
+    g.textAlign = "left";
+  }
+  if (l.kind === "labparam" && lab.hits) { g.fillStyle = "rgba(240,160,75,.6)"; for (const t of lab.hits) if (t >= r.t0 && t <= r.t1) g.fillRect(tToX(t), 0, 1, 5); }
+  const said = l.kind === "labparam" ? `${fmt(st.min)}..${fmt(st.max)} in these bars` : `${fmt(st.min)}..${fmt(st.max)} · p5 ${fmt(st.p5)} · p95 ${fmt(st.p95)} in these bars`;
+  g.fillStyle = "rgba(20,23,29,.75)"; g.fillRect(vx + 2, 1, g.measureText(said).width + 6, 12);
+  g.fillStyle = "#9097a7"; g.fillText(said, vx + 5, 10);
+}
+// the map's four handles: the input's lo / hi on the step before the final, the output's on the parameter
+function labHandles() {
+  const pre = laneById("lab:shape") || laneById("lab:feature"), out = laneById("lab:param");
+  if (!pre || !out || !pre.scale || !out.scale) return;
+  const m = lab.map || mapOf(lab.k.state);
+  const put = (l, key, text) => {
+    const el = h("div", { class: "labhandle" + (key.startsWith("out") ? " out" : ""), style: `top:${l.top + l.scale.Y(m[key])}px`, title: `${text}: drag up or down (writes gain and bias)` },
+      h("span", { class: "tag", text: `${text} ${fmt(m[key])}` }));
+    el.addEventListener("pointerdown", e => {
+      e.stopPropagation(); e.preventDefault();
+      try { el.setPointerCapture(e.pointerId); } catch (err) { /* not down */ }
+      const top = $("inner").getBoundingClientRect().top;
+      const move = ev => {
+        const y = Math.max(l.top + 2, Math.min(l.top + l.h - 2, ev.clientY - top));
+        m[key] = +l.scale.inv(y - l.top).toFixed(4); el.style.top = `${y}px`; el.firstChild.textContent = `${text} ${fmt(m[key])}`;
+      };
+      const up = ev => { el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up); ev.stopPropagation(); commitMap({ ...m }); };
+      el.addEventListener("pointermove", move); el.addEventListener("pointerup", up);
+    });
+    $("inner").append(el);
+  };
+  put(pre, "inLo", "from"); put(pre, "inHi", "from");
+  put(out, "outLo", "to"); put(out, "outHi", "to");
+}
+// scrolled: the lanes drawn where one looks, and made again past the span they have
+$("scroll").addEventListener("scroll", () => {
+  if (!labOn()) return;
+  clearTimeout(labScrollT);
+  labScrollT = setTimeout(() => {
+    if (!labOn()) return;
+    const [a, b] = labSpan(), r = lab.data;
+    if (!r || a < r.t0 - 0.05 || b > r.t1 + 0.05) labRefresh(); else labDraw();
+  }, 120);
+});
 
 // ---------------------------------------------------------------------------
 // Signals: the scene's anchors (a browser tab); choosing one lights what follows it
@@ -3264,6 +3609,7 @@ function showOutChips() {
   }
 }
 for (const b of document.querySelectorAll(".ib.detach")) b.addEventListener("click", () => detachPanel(b.dataset.panel));
+setInterval(() => { for (const [cls, w] of Object.entries(outWins)) if (w.closed) attachPanel(cls, false); }, 500);   // its window closed
 for (const kind of ["keydown", "keyup"]) document.addEventListener(kind, e => {
   if (e.key !== "Shift" || drag) return;
   shiftHeld = kind === "keydown";
@@ -3298,4 +3644,3 @@ async function boot() {
 }
 window.addEventListener("pywebviewready", boot);
 setTimeout(() => { if (!window.pywebview) boot(); }, 700);
-setInterval(() => { for (const [cls, w] of Object.entries(outWins)) if (w.closed) attachPanel(cls, false); }, 500);   // its window closed

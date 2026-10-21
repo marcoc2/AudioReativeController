@@ -48,7 +48,7 @@ def _guarded(fn):
     return call
 
 
-UI_PREFS = {"theme": str, "right_w": int}     # the window's look, kept between runs (the page's
+UI_PREFS = {"theme": str, "right_w": int, "ranges": dict}     # the window's look, kept between runs (the page's
 # storage is not: pywebview runs private)
 
 
@@ -141,6 +141,20 @@ class Api:
             return {"error": f"{key}: not a setting of the window"}
         remember(ui={**self.ui_prefs(), key: value})
         return self.ui_prefs()
+
+    @_guarded
+    def set_param_range(self, key: str, lo=None, hi=None):
+        """The values a parameter expects, as the user sets them in the Lab (``key``: the
+        entry's and the parameter's name, from param_range); lo None: forget it."""
+        ranges = dict(self.ui_prefs().get("ranges") or {})
+        if lo is None or hi is None:
+            ranges.pop(str(key), None)
+        else:
+            lo, hi = sorted((float(lo), float(hi)))
+            if hi - lo <= 0:
+                return {"error": "the range needs two different values"}
+            ranges[str(key)] = [lo, hi]
+        return self.set_ui_pref("ranges", ranges)
 
     @_guarded
     def projects(self):
@@ -540,7 +554,8 @@ SESSION_CALLS = ("spans", "relane", "add", "remove", "set_param", "set_layer", "
                  "add_gesture", "drop_item", "add_role", "set_role", "set_mask", "keypath_of",
                  "knob_open", "knob_new", "knob_check", "knob_apply", "signals", "edit_signal", "project_fields",
                  "list_clips", "clip_info", "covers_for", "place_clips", "clip_frame", "sam_open", "sam_check", "sam_apply", "sam_for_clip",
-                 "layer_text", "set_layer_text")
+                 "layer_text", "set_layer_text",
+                 "param_range", "knob_stages", "lab_heard", "lab_wave", "knob_draft", "knob_draft_clear")
 
 
 def _session_call(name):

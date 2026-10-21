@@ -107,3 +107,31 @@ def test_features_at_time_contains_new_keys(click_extractor):
     assert "flux" in f and 0.0 <= f["flux"] <= 1.0
     assert "onset" in f and isinstance(f["onset"], bool)
     assert "subbands" in f and set(f["subbands"]) == set(ex.subband_names)
+
+
+def test_a_smoothed_value_is_the_same_whoever_asked_before(click_extractor, tmp_path):
+    """The gravity (bands, stems) runs along the frames: once a frame, as one reader saw it
+    before, but now also with three readers a frame, or asked out of order (a seek)."""
+    ex = click_extractor
+    sf.write(tmp_path / "kick.wav", _click_track(bpm=120, seconds=4.0), 22050)
+    ex.prebuilt_stems = {"kick": str(tmp_path / "kick.wav")}
+    ex._load_prebuilt_stems()
+    ex._smooth = {}
+    ts = np.arange(0, 3.9, 1 / 24)
+
+    def seq(readers):
+        out = []
+        for t in ts:
+            for _ in range(readers):
+                f = ex.get_features_at_time(t, apply_gate=False)
+            out.append([f["stems"]["kick"], *f["bands"], f["spectrum"][40]])
+        return np.array(out)
+
+    one = seq(1)
+    assert np.allclose(seq(3), one)
+    backwards = [ex.get_features_at_time(t, apply_gate=False)["stems"]["kick"] for t in ts[::-7]]
+    assert np.allclose(backwards, one[::-7, 0])
+    falls = one[:, 0]
+    i = int(np.argmax(falls))
+    assert 0 < falls[i + 2] < falls[i]                    # it falls slowly (gravity), not at once
+    assert ex.stem_files["kick"].endswith("kick.wav")

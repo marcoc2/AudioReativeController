@@ -42,7 +42,7 @@ def build_stack(s, start_t: float, end_t: float, check=lambda: None, tell=lambda
         clips_dir, meta = s.clips_dir(), s.lib
         res = preview_res(s.proj.get("render") or {})
     w, h = (int(x) for x in res.split("x"))
-    cfg = s.video_cfg()
+    cfg = s.video_cfg(draft=True)
     layers = cfg.get("layers")
     uses_clips = layers is None or any((l or {}).get("source", "clips") == "clips" for l in layers)
     comp = None

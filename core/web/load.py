@@ -328,6 +328,7 @@ class Loader:
             raise Cancelled()
         s.set_features(lambda t: ex.get_features_at_time(t, apply_gate=False))
         s.stem_names = sorted(ex.stems_energy)
+        s.stem_files = dict(getattr(ex, "stem_files", {}) or {})
         s.stem_waves = stem_waves(ex)
         self.events.emit("stems", {"gen": gen, "list": s.stem_waves})
         self.extractor = ex
