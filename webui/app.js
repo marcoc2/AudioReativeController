@@ -2932,6 +2932,9 @@ for (const kind of ["keydown", "keyup"]) document.addEventListener(kind, e => {
   }
 });
 
+// the toolbar's height (it wraps on a narrow window): the browser stays in view under it
+new ResizeObserver(() => document.documentElement.style.setProperty("--tbh", $("bProject").closest(".toolbar").offsetHeight + "px"))
+  .observe(document.querySelector(".toolbar"));
 let booted = false;
 async function boot() {
   if (booted) return;
