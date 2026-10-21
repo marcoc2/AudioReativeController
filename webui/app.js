@@ -699,7 +699,11 @@ function showStreamNote() {
   if (text === lastStreamNote) return;
   lastStreamNote = text;
   el.hidden = !text || view !== "live"; el.classList.toggle("bad", !!err);
-  fill(el, h("span", { text }), err ? h("button", { class: "lnkbtn", onclick: () => setView("sketch") }, "Sketch instead") : null);
+  const montage = err && /clip montage/.test(err);            // a montage without its clips folder: settle it here
+  fill(el, h("span", { text }),
+    montage ? h("button", { class: "lnkbtn", onclick: () => edit("remove_montage") }, "Remove the montage") : null,
+    montage ? h("button", { class: "lnkbtn", onclick: async () => { if (await chooseClipsDir()) streamEdited(); } }, "Choose the clips folder") : null,
+    err ? h("button", { class: "lnkbtn", onclick: () => setView("sketch") }, "Sketch instead") : null);
 }
 // the exact preview's state over the picture: {text, frac, stop, bad} | null
 function showExactOv(o) {

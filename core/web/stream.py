@@ -28,6 +28,10 @@ class Cancelled(Exception):
     pass
 
 
+class NotReady(Exception):
+    """What the project lacks for the engine (a montage without its clips folder)."""
+
+
 class EngineStream:
     def __init__(self, session, events):
         self.s, self.events = session, events
@@ -116,7 +120,7 @@ class EngineStream:
                 if why is None:
                     break
                 if "loading" not in why and "probed" not in why:
-                    raise RuntimeError(why)
+                    raise NotReady(why)
                 self.what = why
                 self._check(gen)
                 time.sleep(0.3)
@@ -152,6 +156,12 @@ class EngineStream:
                     self.ended, self.what = True, "the song's end"
         except Cancelled:
             pass
+        except NotReady as exc:                            # the project's to settle: said, no trace
+            with self.lock:
+                if gen == self.gen:
+                    self.error = str(exc)
+            self.events.log("warn", f"live: {exc}")
+            self.events.emit("stream", {"gen": gen, "error": self.error})
         except Exception as exc:
             self.events.log("trace", traceback.format_exc())
             with self.lock:

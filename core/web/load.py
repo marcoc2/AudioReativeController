@@ -121,7 +121,8 @@ class Loader:
                 self.steps[k].update(state="skipped", message="cancelled")
         for k in steps:
             self.events.emit("load", {"gen": gen, "step": k, "state": "skipped", "message": "cancelled", "title": NAMES[k]})
-        self.events.log("warn", "loading cancelled: what was read so far can be edited")
+        if steps:                                            # said only when something was stopped
+            self.events.log("warn", "loading cancelled: what was read so far can be edited")
 
     def retry(self, step: str) -> None:
         """Run a failed (or skipped) step again, and what depends on it."""
