@@ -100,7 +100,9 @@ class ProjectEdits:
         with self.lock:
             changed = [k for k, v in clean.items() if self.proj.get(k) != v and not (
                 k in ("midi_offset", "sync_offset_ms") and float(self.proj.get(k) or 0) == float(v))]
-            if not changed:
+            if not changed and self.proj_path is not None:
+                write_project(self.proj_path, {k: v for k, v in self.proj.items() if not k.startswith("_")
+                                               and k in ("clips",)})       # the seed drawn at the opening, kept
                 return {"fields": self.project_fields(), "reload": []}
             for k in changed:
                 self.proj[k] = clean[k]
@@ -132,7 +134,8 @@ def render_settings_of(proj: dict) -> dict:
     r = proj.get("render") or {}
     c = proj.get("clips") or {}
     g = c.get("gravity") or {}
-    return {"fps": int(r.get("fps") or 30), "resolution": str(r.get("resolution") or "854x480"),
+    return {"fps": int(r.get("fps") or 24), "resolution": str(r.get("resolution") or "854x480"),
+            "bars": int(r.get("bars") or 8),
             "codec": str(r.get("codec") or "x264"), "start_time": float(r.get("start_time") or 0.0),
             "stems": bool(r.get("stems")), "clip_fit": str(r.get("clip_fit") or "contain"),
             "turn_wide": bool(r.get("turn_wide")), "masks": str(r.get("masks") or ""), "profile": bool(r.get("profile")),
@@ -143,7 +146,7 @@ def render_settings_of(proj: dict) -> dict:
                         "curve": float(g.get("curve", 2.0))}}
 
 
-RENDER_KEYS = {"fps": ("render.fps", int), "codec": ("render.codec", str), "start_time": ("render.start_time", float),
+RENDER_KEYS = {"fps": ("render.fps", int), "bars": ("render.bars", int), "codec": ("render.codec", str), "start_time": ("render.start_time", float),
                "stems": ("render.stems", bool), "clip_fit": ("render.clip_fit", str), "turn_wide": ("render.turn_wide", bool),
                "masks": ("render.masks", str), "profile": ("render.profile", bool), "clips_dir": ("clips.dir", str),
                "order": ("clips.order", str), "seed": ("clips.seed", int), "cache_size": ("clips.cache_size", int),

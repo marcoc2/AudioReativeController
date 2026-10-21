@@ -28,14 +28,18 @@ class Clips:
         from core import arrangement as arr
         from core.web.api import prefs, remember
         folder = str(folder or "").strip()
-        if not folder:
-            d = self.clips_dir()
-            folder = str(d) if d is not None else prefs().get("clips_folder", "")
+        if not folder:                                    # the last one listed, else the project's
+            folder = prefs().get("clips_folder", "")
+            if not folder or not resolve(folder).is_dir():
+                d = self.clips_dir()
+                folder = str(d) if d is not None else ""
+
         if not folder or not resolve(folder).is_dir():
             return {"folder": folder, "clips": [], "error": f"no folder at {folder}" if folder else None}
         root = resolve(folder)
         paths = arr.list_clips(str(root), pattern or "")
         remember(clips_folder=str(root))
+        self.browser_folder = root
         out = [{"path": str(p), "name": _rel(p, root), "url": self.media.url(p)} for p in paths]
         self._covers_later([str(p) for p in paths[:COVERS_MAX]])
         return {"folder": str(root), "clips": out}

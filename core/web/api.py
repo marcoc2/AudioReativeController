@@ -14,6 +14,7 @@ import yaml
 
 from core.web import ROOT
 from core.web.load import Loader
+from core.web.extras import Demos, Repaint
 from core.web.preview import ExactPreview
 from core.web.project import checked_render, render_settings_of, write_project
 from core.web.render import EngineRender, FinalRender, gpu
@@ -60,15 +61,19 @@ def remember(**values) -> None:
 class Api:
     """The page's calls. Attributes are private so pywebview exposes only the methods."""
 
-    def __init__(self, first=None, browser: bool = False, skip_separation: bool = False):
+    def __init__(self, first=None, browser: bool = False, skip_separation: bool = False, stems: Optional[dict] = None):
         self._media = Media()
         self._events = Events()
         self._session = Session(self._media, self._events)
         self._loader = Loader(self._session, self._events, self._media)
         self._engine = EngineRender(self._session, self._events, self._media)
-        self._final = FinalRender(self._session, self._events, self._media)
+        self._final = FinalRender(self._session, self._events, self._media, on_done=self._render_done)
+        self._demos = Demos(self._media, self._events)
+        self._repaint = Repaint(self._session, self._events, self._media)
         self._preview = ExactPreview(self._session, self._loader, self._events, self._media, self._engine)
+        self._preview.final = self._final
         self._loader.skip_separation = skip_separation
+        self._loader.extra_stems = dict(stems or {})
         self._first = first                  # what to open at start: a project path or a project dict
         self._browser = browser
         self._window = None
@@ -94,6 +99,8 @@ class Api:
             self._events.log("warn", f"files dropped from the Explorer will not be heard: {exc}")
 
     def _close(self) -> None:
+        if self._repaint.proc is not None and self._repaint.proc.poll() is None:
+            self._repaint.proc.kill()
         self._preview.stop()
         self._engine.stop()
         self._final.stop()
@@ -159,14 +166,24 @@ class Api:
                 "folders": [str(p) for p in ps if p.is_dir()]}
 
     @_guarded
-    def pick_file(self, kind: str, save: bool = False, suggested: str = ""):
-        """A native file dialog (in the window): kind is project, audio, scene or folder."""
+    def pick_file(self, kind: str, save: bool = False, suggested: str = "", at: str = ""):
+        """A native file dialog (in the window): kind is project, audio, midi, video, scene,
+        masks or folder; ``at``: the value it has now (the dialog starts there)."""
         if self._window is None:
             return {"error": "file dialogs need the app window (the browser cannot hand Python a path): type the path"}
         import webview
         types = {"project": ("Projects (*.yaml)",), "scene": ("Scenes (*.yaml)",),
-                 "audio": ("Audio (*.wav;*.mp3;*.flac;*.ogg;*.m4a)",)}.get(kind, ())
-        start = {"project": ROOT / "projects", "scene": ROOT / "scenes", "audio": ROOT / "input"}.get(kind, ROOT)
+                 "audio": ("Audio (*.wav;*.mp3;*.flac;*.ogg;*.m4a)",), "midi": ("MIDI (*.mid;*.midi)",),
+                 "video": ("Videos (*.mp4;*.mov;*.mkv;*.webm;*.avi)", "All files (*.*)")}.get(kind, ())
+        start = {"project": ROOT / "projects", "scene": ROOT / "scenes", "audio": ROOT / "input", "midi": ROOT / "input",
+                 "video": ROOT / "render_output", "masks": ROOT / "render_output"}.get(kind, ROOT)
+        if at:
+            here = resolve(at)
+            here = here if here.is_dir() else here.parent
+            if here.is_dir():
+                start = here
+        if kind == "masks":
+            kind = "folder"
         mode = (webview.FOLDER_DIALOG if kind == "folder" else webview.SAVE_DIALOG if save else webview.OPEN_DIALOG)
         got = self._window.create_file_dialog(mode, directory=str(start), file_types=types,
                                               save_filename=suggested or "")
@@ -254,8 +271,6 @@ class Api:
     @_guarded
     def render(self, first: int, last: int):
         """The exact preview of these bars (in this process when it can, else the engine's)."""
-        if self._final.running():
-            return {"error": "the final render is running: the preview waits for it"}
         return self._preview.start(first, last)
 
     @_guarded
@@ -264,11 +279,12 @@ class Api:
 
     # -- the final video -------------------------------------------------------------------
     @_guarded
-    def render_settings(self, first=None, last=None):
+    def render_settings(self, first=None, last=None, what="song"):
         s = self._session
         with s.lock:
             got = render_settings_of(s.proj)
-        return {**got, "gpu": gpu(), "where": self._final.where(first, last) if s.audio and s.scene else "",
+        return {**got, "gpu": gpu(), "where": self._final.where(first, last, what) if s.audio and s.scene else "",
+                "problem": self._final.problem() if s.grid is not None else None,
                 "job": {k: v for k, v in self._final.job.items() if k != "tail"}, "dirty": s.dirty,
                 "choices": {"codec": ["x264", "nvenc"], "clip_fit": ["contain", "cover"],
                             "order": ["(scene)", "sequential", "random", "shuffle"]}}
@@ -283,18 +299,40 @@ class Api:
         except ValueError as exc:
             return {"error": str(exc)}
         with s.lock:
+            old_fps = s.fps
             for k, v in keys.items():
                 set_in(s.proj, k, v)
             if s.proj_path is not None:
                 write_project(s.proj_path, keys)
-        if any(k.startswith("clips.") for k in keys):
+            s.fps = int((s.proj.get("render") or {}).get("fps") or 24)
+        if s.fps != old_fps:                          # the bars, the features and the montage at the new fps
+            self._events.log("in", f"fps {old_fps} -> {s.fps}: the bars and the features again")
+            self._loader.reload(["bars", "features"])
+        elif any(k.startswith("clips.") for k in keys):
             s.montage_later()
         return self.render_settings()
 
     @_guarded
-    def render_final(self, first=None, last=None):
+    def bar_beat(self, text: str = "", playhead: Optional[float] = None):
+        """Song seconds of "bar.beat" (or of the bar the playhead is in), and back."""
+        from core.rhythm.bar_beat import bar_beat_to_time, time_to_bar_beat
+        s = self._session
+        if s.grid is None:
+            return {"error": "load the project first (no bars yet)"}
+        try:
+            if playhead is not None:
+                db = s.bars()[:-1]
+                t = max([d for d in db if d <= float(playhead) + 1e-6] or [db[0]])
+            else:
+                t = bar_beat_to_time(text, s.grid)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        return {"seconds": round(float(t), 3), "bar_beat": time_to_bar_beat(t, s.grid)}
+
+    @_guarded
+    def render_final(self, first=None, last=None, what="song"):
         busy = self._engine.running() or self._preview.busy()
-        got = self._final.start(first, last, busy=busy)
+        got = self._final.start(first, last, busy=busy, what=what)
         if got.get("saved"):
             self._events.emit("state", self._session.state())
         return got
@@ -306,6 +344,43 @@ class Api:
     @_guarded
     def open_output(self, what: str = "video"):
         return self._final.open(what)
+
+    def _render_done(self, out: str, start: float) -> None:
+        """A finished render becomes the video to repaint (from where it starts in the song)."""
+        try:
+            self._repaint.set({"video": out, "start": start})
+            self._events.emit("repaint", {**self._repaint.job, "settings": True})
+        except Exception:
+            pass
+
+    # -- the catalog's demos, the repaint ----------------------------------------------------
+    @_guarded
+    def entry(self, key: str):
+        return self._demos.entry(key)
+
+    @_guarded
+    def make_demo(self, key: str):
+        return self._demos.make(key)
+
+    @_guarded
+    def repaint_settings(self):
+        return self._repaint.settings()
+
+    @_guarded
+    def set_repaint(self, changes: dict):
+        return self._repaint.set(changes)
+
+    @_guarded
+    def repaint_check(self):
+        return self._repaint.check()
+
+    @_guarded
+    def repaint_start(self):
+        return self._repaint.start()
+
+    @_guarded
+    def repaint_stop(self):
+        return self._repaint.stop()
 
     # -- the project's inputs ------------------------------------------------------------
     @_guarded
@@ -345,7 +420,8 @@ SESSION_CALLS = ("spans", "relane", "add", "remove", "set_param", "set_layer", "
                  "plugin", "set_value", "set_text", "add_trigger", "rename_trigger", "drop_trigger", "set_trigger",
                  "add_gesture", "drop_item", "add_role", "set_role", "set_mask", "keypath_of",
                  "knob_open", "knob_new", "knob_check", "knob_apply", "signals", "edit_signal", "project_fields",
-                 "list_clips", "clip_info", "place_clips", "clip_frame", "sam_open", "sam_check", "sam_apply", "sam_for_clip")
+                 "list_clips", "clip_info", "place_clips", "clip_frame", "sam_open", "sam_check", "sam_apply", "sam_for_clip",
+                 "layer_text", "set_layer_text")
 
 
 def _session_call(name):
@@ -360,16 +436,22 @@ for _name in SESSION_CALLS:
     setattr(Api, _name, _session_call(_name))
 
 
+def stems_from_args(args) -> dict:
+    """--stems name=path ... as {name: path}."""
+    stems = {}
+    for item in getattr(args, "stems", None) or []:
+        name, _, path = item.partition("=")
+        if name and path:
+            stems[name] = path
+    return stems
+
+
 def project_from_args(args) -> Optional[object]:
     """What the command line asks to open: a project file, or one made of --audio/--midi/--scene."""
     if args.project:
         return args.project
     if not (args.audio or args.midi or args.scene):
         return None
-    stems = {}
-    for item in args.stems or []:
-        name, _, path = item.partition("=")
-        if name and path:
-            stems[name] = path
+    stems = stems_from_args(args)
     return {"audio": args.audio or "", "midi": args.midi or "", "scene": args.scene or "",
             "stems": stems, "skip_separation": bool(args.skip_separation)}

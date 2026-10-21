@@ -240,7 +240,8 @@ class Edits:
             self._put(path, None)
         at = self._insert(lane, alone, sub, first, last)
         return self._answer(select={"ref": at, "k": 0},
-                            note=f"{arr.label_of(alone)} -> {TITLES[lane]}, row {int(sub) + 1}, bars {first}-{last}")
+                            note=f"{arr.label_of(alone)} -> {TITLES[lane]}, row {int(sub) + 1}, bars {first}-{last}"
+                            + (" (Ctrl+Z puts it back)" if lane != src else ""))
 
     def new_member(self, lane: str, what: str, first: int, last: int, row: Optional[int] = None,
                    start: float = 0.0) -> dict:
@@ -260,7 +261,7 @@ class Edits:
                 if e.kind != catalog.GENERATOR:
                     return {"error": f"{e.label} is an FX: drop it on an FX track, or on a block (Add FX)"}
                 spec = {**e.spec(), "bars": [[first, last]]}
-                d = self.clips_dir()
+                d = getattr(self, "browser_folder", None) or self.clips_dir()       # the browser's folder
                 if d is not None and any(p.name == "clips_dir" for p in e.params):     # its own clips: these
                     spec["clips_dir"] = shown_path(d)
             else:
@@ -357,7 +358,8 @@ class Edits:
                 return {"error": "a lane itself is not deleted"}
             self._push()
             self._put(path, None)
-            return self._answer(select={"ref": None})
+            lane = "master" if path[0] == "master" else path[0]
+            return self._answer(select={"lane": lane})
 
     # -- a member's settings ----------------------------------------------------------
     def toggle(self, path) -> dict:
@@ -450,14 +452,15 @@ class Edits:
             if list(owner) == ["master"]:
                 self._push()
                 at = self._insert("master", spec, None, 1, 1)
-                return self._answer(select={"ref": at, "k": 0 if bars else None}, note=f"{e.label} on the master")
+                return self._answer(select={"ref": at, "k": 0 if bars else None},
+                                    note=f"{e.label} on the master" + ("" if bars else ", all the song: drag its ends, or give it bars"))
             if list(owner) in (["BG"], ["FG"]):
                 if owner[0] not in self.groups():
                     return {"error": f"there is no {owner[0]} lane"}
                 self._push()
                 at = self._insert("bgfx" if owner[0] == "BG" else "fgfx", spec, None, 1, 1)
                 return self._answer(select={"ref": at, "k": 0 if bars else None},
-                                    note=f"{e.label} on the whole {owner[0]}")
+                                    note=f"{e.label} on the whole {owner[0]}" + ("" if bars else ", all the song: drag its ends, or give it bars"))
             self._edit(owner, lambda s: {**s, "fx": list(s.get("fx") or []) + [spec]})
             label = arr.label_of(self.get(owner))
             return self._answer(note=f"{e.label} on {label} only: it plays all the time {label} does - give it bars "
@@ -634,7 +637,8 @@ class Edits:
                 else:
                     spans = self._spans_of(spec)
                     a, b = int(spans[0][0]), int(spans[-1][1])
-                out.append({"label": f"Preview its bars ({a}-{min(b, a + 7)})", "page": "preview", "args": [a, b]})
+                out.append({"label": f"Play its bars ({a}-{b}, live)", "page": "preview", "args": [a, b]})
+                out.append({"label": f"Exact its bars ({a}-{min(b, a + 7)}, the engine)", "page": "exact", "args": [a, b]})
                 if hit and len(blocks) > 1:
                     out.append({"label": "Delete this block (Delete)", "call": "delete_block", "args": [path, k],
                                 "danger": True})
@@ -745,7 +749,11 @@ class Edits:
             pins = {int(k) for k in self.pins()}
             if any(first <= b <= last for b in pins):
                 out.append({"label": "Back to the montage's choice", "call": "set_pins", "args": [first, last, None]})
-            out.append({"label": f"Preview {bars}", "page": "preview", "args": [first, last]})
+            out.append({"label": f"Play {bars} (live)", "page": "preview", "args": [first, last]})
+            out.append({"label": f"Exact {bars} (the engine)", "page": "exact", "args": [first, last]})
+            out.append({"sep": True})
+            out.append({"label": "Add FX to the master (over everything)", "catalog": "fx", "call": "add_fx",
+                        "args": [["master"], "$key"]})
             return out
 
     def video_settings(self) -> dict:

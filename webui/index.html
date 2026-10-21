@@ -33,6 +33,8 @@
     <div class="menuwrap"><button class="btn icononly" id="bSaveMenu" aria-haspopup="menu" aria-expanded="false" aria-label="More: save as, reload" title="Save as…, Reload"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4z"/></svg></button></div>
   </div>
   <div class="tgroup">
+    <select class="btn" id="exactN" aria-label="How many bars the exact preview makes from the playhead" title="Bars the exact preview makes from the playhead (when no bars are chosen)">
+      <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option></select>
     <button class="btn" id="bRender" title="Exact: the chosen bars as the render makes them (on the GPU; Shift+Space)">Exact bars</button>
     <button class="btn primary" id="bRenderVideo" title="The final video: the whole song or some bars">Render video…</button>
     <button class="btn danger" id="bStop" hidden>Stop</button>
@@ -71,6 +73,7 @@
       <video id="engineVideo" muted playsinline hidden></video>
       <div class="ov bot" id="ovBot"></div>
       <div class="gpunote" id="gpuNote" hidden></div>
+      <div class="exactov" id="exactOv" hidden></div>
     </div>
     <div class="meters" id="meters"></div>
   </section>
@@ -93,7 +96,7 @@
     <button class="ibtn sm" id="rowsMore" title="Taller rows (Shift+wheel)" aria-label="Taller rows">+</button>
     <span class="hint" id="zoomText"></span>
     <span class="spacer"></span>
-    <span class="hint">Alt+wheel: along the song · right click: the menu · a lane's name: its settings</span>
+    <span class="hint status" id="statusLine" aria-live="polite" title="what the last edit did; the undo steps"></span>
   </div>
   <div class="scroll" id="scroll">
     <div class="tgrid" id="tgrid">
@@ -110,6 +113,7 @@
     <button class="tab" role="tab" data-dock="log" aria-selected="true">Log <span class="errbadge" id="errBadge" hidden></span></button>
     <button class="tab" role="tab" data-dock="yaml" aria-selected="false">YAML</button>
     <button class="tab" role="tab" data-dock="project" aria-selected="false">Project</button>
+    <button class="tab" role="tab" data-dock="repaint" aria-selected="false">Repaint</button>
     <span class="spacer"></span>
     <div class="logfilter" id="logFilter" role="group" aria-label="Show in the log">
       <button data-kind="all" aria-pressed="true">All</button>
@@ -121,6 +125,7 @@
   </div>
   <div class="dockbody" id="dockLog"><div class="log" id="log"></div></div>
   <div class="dockbody" id="dockProject" hidden></div>
+  <div class="dockbody" id="dockRepaint" hidden></div>
   <div class="dockbody" id="dockYaml" hidden><pre class="yaml" id="yaml">Pick a block: its layer shows here. Save shows the whole scene.</pre></div>
 </section>
 

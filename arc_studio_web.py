@@ -36,10 +36,11 @@ def parse_args(argv=None):
 
 
 def main(argv=None) -> None:
-    from core.web.api import Api, project_from_args
+    from core.web.api import Api, project_from_args, stems_from_args
     from core.web.server import Server
     args = parse_args(argv)
-    api = Api(project_from_args(args), browser=args.browser, skip_separation=args.skip_separation)
+    api = Api(project_from_args(args), browser=args.browser, skip_separation=args.skip_separation,
+              stems=stems_from_args(args))     # --stems alone: over the opened project's own
     server = Server(api, api._media, api._events)
     if args.browser and args.token:
         server.token = args.token

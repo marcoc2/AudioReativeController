@@ -42,6 +42,9 @@ class ExactPreview:
     def ready(self) -> Optional[str]:
         """Why it cannot run in this process yet (None: it can)."""
         s = self.s
+        final = getattr(self, "final", None)
+        if final is not None and final.running():
+            return "the final render is running: the preview comes when it is done"
         if s.grid is None or s.doc is None:
             return "the project is loading"
         if s.features_at is None:
@@ -58,7 +61,7 @@ class ExactPreview:
         first = max(1, int(first))
         last = min(n, max(first, int(last)), first + MAX_BARS - 1)
         why = self.ready()
-        if why and "loading" not in why and "probed" not in why:
+        if why and "loading" not in why and "probed" not in why and "final render" not in why:
             return self.engine.start(first, last)              # the subprocess makes it instead
         if why or self.busy():
             self.queued = (first, last)
@@ -100,6 +103,9 @@ class ExactPreview:
         self.thread.start()
 
     def _video_cfg(self) -> dict:
+        return self.s.video_cfg()
+
+    def _video_cfg_old(self) -> dict:
         """The scene's video settings as the render resolves them (the studio's
         ``_effective_video_cfg``), with the arrangement as it is now."""
         from core.scene_doc import plain

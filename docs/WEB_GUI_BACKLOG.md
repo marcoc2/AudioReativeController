@@ -622,7 +622,7 @@ under the mouse, on the browser a folder is listed and a clip is chosen. In a pl
 (`--browser`) the page says it needs the app window. Checked: the handler registers in the real
 window, and a drop was simulated with the paths it gives (a real drag from the Explorer not yet).
 
-## 26. [ ] Catalog and demos
+## 26. [x] Catalog and demos
 
 **Today.** Generators and FX by category, search, flags, about tooltips; picking one shows
 its demo (ready / stale / rendering / missing / failed, "Make demo" / "Make it again",
@@ -631,6 +631,12 @@ the master".
 
 **Do.** All of it; demos play as `<video>` from `demos.video_path`, "Make demo" runs
 `python -m core.demos render --only KEY --force` with its progress in the log.
+
+**Done (2026-10-21).** A click on an entry in the browser shows it in the inspector
+(`core/web/extras.py` `Demos`): its demo looping (click: bigger), its state (ready, stale,
+rendering, missing, failed), Make demo / Make it again (the command above, its lines in the log),
+its about, what it needs, its file, its parameters (~ the music can move it); FX get "Add to the
+master". Categories show their counts and fold. Not checked: making a demo (the GPU was busy).
 
 ## 27. [x] SAM2 seeds
 
@@ -653,7 +659,7 @@ but object 1), soft edge, the cache state; OK writes the `sam_cutout` FX (`sam_a
 takes away one just added. Opened from "Cut out by SAM2…", the FX's ✂ in a list, Seeds… on a
 character, the browser's "Cut it out (SAM2)", and Add FX → sam_cutout.
 
-## 28. [ ] Repaint (ComfyUI)
+## 28. [x] Repaint (ComfyUI)
 
 **Today.** Main window only: video, start, workflow (`reference/*.json`), scene with
 `repaint:`, prompt, FPS, seconds; "Check ComfyUI/GPU" (queue and `nvidia-smi`), Repaint
@@ -661,6 +667,11 @@ character, the browser's "Cut it out (SAM2)", and Add FX → sam_cutout.
 
 **Do.** A Repaint panel with the same, its settings saved in the project's `repaint:`;
 after a render, its output is offered as the video to repaint.
+
+**Done (2026-10-21).** The Repaint dock tab (`Repaint` in `core/web/extras.py`): the same
+fields, saved in `repaint:`, scenes with a top-level `repaint:`, Check (ComfyUI's queue and the
+GPU), Repaint with its progress, Stop at any time (kills it and cancels ComfyUI's jobs); a
+finished render becomes its video and start. Not run against ComfyUI.
 
 ---
 

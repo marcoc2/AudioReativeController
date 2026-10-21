@@ -169,3 +169,25 @@ def test_a_knobs_values_take_its_gain_and_bias(project):
     s = _session(project)
     got = s.knob("{hits: {track: kick}, envelope: 0.25, gain: 0.06, bias: 0.72}")["values"]
     assert min(got) >= 0.72 - 1e-6 and max(got) <= 0.78 + 1e-6
+
+
+def test_a_layers_own_yaml_edited_as_text(project):
+    s = _session(project)
+    river = _member(s.state(), "the river")["ref"]
+    text = s.layer_text(river)["text"]
+    assert "role: background" in text and "blocks" not in text
+    st = s.set_layer_text(river, text.replace("role: background", "role: background\nhold: 0.5"))
+    spec = s.get(river)
+    assert spec["hold"] == 0.5 and len(spec["blocks"]) == 2
+    assert "error" in s.set_layer_text(river, "role: [unclosed")
+    assert "error" in s.set_layer_text(river, "hold: 1")
+
+
+def test_the_text_of_an_fx_added_since_the_scene_was_read(project):
+    s = _session(project)
+    river = _member(s.state(), "the river")["ref"]
+    n = len(s.get(river).get("fx") or [])
+    s.add_fx(river, "rgb_split")
+    s.add_fx(river, "rgb_split")
+    text = s.layer_text([*river, "fx", n + 1])["text"]
+    assert "rgb_split" in text

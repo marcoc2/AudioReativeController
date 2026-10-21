@@ -52,6 +52,7 @@ class Loader:
         self.source = None                  # what was opened: a project path, or a project dict
         self.extractor = None
         self.skip_separation = False        # --skip-separation: no AI separation, whatever the project says
+        self.extra_stems: dict = {}         # --stems name=path: over the project's own (not written into it)
         self._stopped: set = set()          # openings cancelled: what still runs of them stops
         self._lock = threading.Lock()
 
@@ -277,7 +278,7 @@ class Loader:
         from core.feature_extractor import AudioFeatureExtractor
         s = self.s
         proj = s.proj
-        prebuilt = {k: str(resolve(v)) for k, v in (proj.get("stems") or {}).items() if k and v}
+        prebuilt = {k: str(resolve(v)) for k, v in {**(proj.get("stems") or {}), **self.extra_stems}.items() if k and v}
         skip = bool(proj.get("skip_separation")) or self.skip_separation
 
         def progress(stage, done, of, message=""):

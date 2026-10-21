@@ -317,3 +317,36 @@ def sample(spec: Any, t0: float, t1: float, n: int = 400, notes=(), features_at=
                     None if cuts is None else np.asarray(cuts, dtype=float))
     ts = np.linspace(float(t0), float(t1), int(n))
     return ts, np.array([float(f(t)) for t in ts])
+
+
+def describe(v) -> str:
+    """A link to the music, said: what moves it, around what, by how much."""
+    if not isinstance(v, dict):
+        return str(v)
+
+    def who(t):
+        if not isinstance(t, dict):
+            return str(t)
+        track = t.get("track")
+        track = ", ".join(map(str, track)) if isinstance(track, (list, tuple)) else track
+        notes = f" (notes {', '.join(map(str, t['notes']))})" if t.get("notes") else ""
+        return f"{track}{notes}" if track else ", ".join(f"{k}: {x}" for k, x in t.items())
+    if "hits" in v:
+        what = f"a jump on each {who(v['hits'])} hit, fading in {v.get('envelope', 0.1):g} s"
+    elif "adsr" in v:
+        what = f"swells and fades with {who(v['adsr'])}"
+    elif "pitch" in v:
+        what = f"higher with {who(v['pitch'])}'s notes"
+    elif "random_on" in v:
+        what = f"somewhere new on each {who(v['random_on'])} hit"
+    elif "lfo" in v:
+        what = f"a {v['lfo']} wave, one every {v.get('period', '?')}"
+    elif "feature" in v:
+        what = f"the song's {v['feature']}"
+    elif "from" in v:
+        what = f"moving at {v.get('rate', 1):g}/s, pushed by " + describe(v["from"])
+    else:
+        what = ", ".join(f"{k}: {x}" for k, x in v.items())
+    around = f"; around {v['bias']:g}" if isinstance(v.get("bias"), (int, float)) else ""
+    by = f", by {v['gain']:g}" if isinstance(v.get("gain"), (int, float)) else ""
+    return what + around + by

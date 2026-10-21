@@ -109,7 +109,7 @@ class KnobEditor:
                 value = plain(s["obj"])
                 out.append({"name": name, "kind": signal_kind(value), "yaml": _flow(value)[:200],
                             "def": s["def"], "uses": s["uses"]})
-            return sorted(out, key=lambda s: s["name"].lower())
+            return out                                          # in the scene's stack order
 
     def _defines(self, path, keypath, obj) -> bool:
         """This place is the first in the stack to hold ``obj`` (what the file writes as &name)."""

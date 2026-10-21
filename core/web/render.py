@@ -144,46 +144,65 @@ class FinalRender:
     """The final video (the Arrange's "Render video..."): saved first (the engine reads the
     scene file), the project's settings, its progress and the time left, Stop."""
 
-    def __init__(self, session, events, media):
+    def __init__(self, session, events, media, on_done=None):
         self.s, self.events, self.media = session, events, media
+        self.on_done = on_done              # (output, its start in the song): the repaint's video
         self.proc: Optional[subprocess.Popen] = None
         self.job: dict = {"running": False, "result": "", "out": None}
 
     def running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
-    def where(self, first: Optional[int] = None, last: Optional[int] = None) -> str:
+    def where(self, first: Optional[int] = None, last: Optional[int] = None, what: str = "song") -> str:
         s = self.s
-        start = 0.0 if first else render_settings_of(s.proj)["start_time"]
+        start = render_settings_of(s.proj)["start_time"] if what == "start" else 0.0
         return shown_path(output_path(s.audio, s.scene, first, last, start))
 
-    def start(self, first: Optional[int] = None, last: Optional[int] = None, busy: bool = False) -> dict:
+    def problem(self) -> Optional[str]:
+        """Why the engine cannot render this project (the studio's ``_render_problem``)."""
+        s = self.s
+        if s.audio is None or not s.audio.is_file():
+            return "the project's song is missing"
+        if any(sp.get("source", "clips") == "clips" for sp in s.specs()) and s.clips_dir() is None:
+            return "this scene uses clips (the montage): choose the project's clips folder first"
+        return None
+
+    def start(self, first: Optional[int] = None, last: Optional[int] = None, busy: bool = False,
+              what: str = "song") -> dict:
+        """``what``: song (all of it, from 0), bars (first..last), start (from the settings'
+        start time: their N bars, or to the end when N is 0)."""
         if self.running() or busy:
             return {"error": "the engine is busy with another render: Stop it first"}
         s = self.s
         with s.lock:
             if s.grid is None or s.doc is None or s.audio is None:
                 return {"error": "the project is not loaded yet"}
+            why = self.problem()
+            if why:
+                return {"error": why}
             saved = None
             if s.dirty:
                 saved = s.save()["path"]
                 self.events.log("in", f"saved {saved} first: the engine reads the scene file")
             rs = render_settings_of(s.proj)
             db = s.bars()
-            if first:
+            if first and what == "bars":
                 first, last = max(1, int(first)), min(len(db) - 1, int(last or first))
                 start, bars = db[first - 1], last - first + 1
+            elif what == "start":
+                first = last = None
+                start, bars = rs["start_time"], rs["bars"]
             else:
                 first = last = None
-                start, bars = rs["start_time"], 0
-            out = output_path(s.audio, s.scene, first, last, rs["start_time"] if not first else 0.0)
+                start, bars = 0.0, 0
+            out = output_path(s.audio, s.scene, first, last, start if what == "start" else 0.0)
             cmd = build_cmd(s.proj, s.audio, s.scene, start, bars, rs["resolution"], out, final=True)
         self.events.log("out", " ".join(Path(c).name if i < 2 else c for i, c in enumerate(cmd)))
         self.proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                      encoding="utf-8", errors="replace", bufsize=1,
                                      env={**os.environ, "PYTHONUNBUFFERED": "1"})
         self.job = {"running": True, "done": 0, "total": 0, "out": str(out), "result": "", "line": "",
-                    "started": time.time(), "first": first, "last": last}
+                    "started": time.time(), "first": first, "last": last, "start": float(start)}
         self.events.gpu("the final render", True)
         self.events.emit("final", {k: v for k, v in self.job.items()})
         threading.Thread(target=self._watch, args=(self.proc,), daemon=True).start()
@@ -216,6 +235,8 @@ class FinalRender:
         if self.job["result"] == "done":
             self.job["url"] = self.media.url(self.job["out"])
             self.events.log("in", f"rendered {shown_path(Path(self.job['out']))}")
+            if self.on_done is not None:
+                self.on_done(self.job["out"], self.job.get("start", 0.0))
         elif not stopped:
             self.events.log("err", f"the render failed (exit {code}):")
             for t in tail:

@@ -78,6 +78,10 @@ class Events:
     def log(self, kind: str, text: str) -> None:
         """A line of the log: ``kind`` is in (sent to Python), out (asked), sys, warn, err, trace."""
         self.emit("log", {"kind": kind, "text": text})
+        try:
+            print(text if kind != "trace" else text.rstrip(), flush=True)
+        except (OSError, UnicodeError):
+            pass
 
     def gpu(self, what: str, on: bool) -> None:
         """Python's work on the GPU starts (``on``) or ends: while any runs, the page's live

@@ -482,3 +482,52 @@ def _show(v):
     if v is None or isinstance(v, (bool, int, float, str)):
         return v
     return _flow(v)
+
+
+class LayerText:
+    """A layer's own YAML, edited as text (the fallback for anything without a widget): the
+    scene's own lines when the layer is as it was loaded (its comments kept), the signals it
+    follows as ``*name``; its bars and blocks stay with the lanes."""
+
+    SKIP = ("bars", "blocks")
+
+    def _node_of(self, path):
+        """The layer's tree in the scene file (None for one added or moved since)."""
+        top = self.items[self._top(path)]
+        node = top[0]
+        for k in self._rest(path):
+            if node is None:
+                return None
+            if isinstance(node, list):                   # an FX added since: the file has fewer
+                node = node[int(k)] if 0 <= int(k) < len(node) else None
+            else:
+                node = node.get(k) if hasattr(node, "get") else None
+        return node
+
+    def layer_text(self, path) -> dict:
+        from core.scene_doc import plain
+        with self.lock:
+            spec = self.get(path)
+            node = self._node_of(path)
+            src = node if node is not None and plain(node) == plain(spec) else spec
+            text = self.doc.text_of(src, extra=self._signal_objects(), skip=self.SKIP)
+            return {"text": text}
+
+    def set_layer_text(self, path, text: str) -> dict:
+        """The layer as the text says (its bars and blocks as they are)."""
+        try:
+            with self.lock:
+                body = self.doc.parse_text(text, extra=self._signal_objects())
+        except KeyError as exc:
+            return {"error": f"no signal {exc} in the scene"}
+        except Exception as exc:
+            first = str(exc).strip().splitlines()
+            return {"error": f"not YAML: {first[0] if first else exc}"}
+        if not body.get("source"):
+            return {"error": "a layer needs its source:"}
+        with self.lock:
+            def put(spec):
+                keep = {k: spec[k] for k in self.SKIP if k in spec}
+                return {**dict(body), **keep}
+            self._edit(path, put)
+            return self._answer()

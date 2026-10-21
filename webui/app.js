@@ -57,6 +57,8 @@ function h(tag, props, ...kids) {
   for (const c of kids.flat()) if (c != null && c !== false) el.append(c.nodeType ? c : document.createTextNode(String(c)));
   return el;
 }
+// an element's children, the null ones (a part not shown) left out
+function fill(el, ...kids) { el.replaceChildren(...kids.filter(k => k != null && k !== false)); }
 const fmt = v => { if (!isFinite(v)) return "0"; const s = Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(3); return s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s; };
 const fmtTime = t => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, "0")}`;
 const idOf = ref => JSON.stringify(ref);
@@ -112,6 +114,8 @@ const ON = {
   engine: e => onEngine(e),
   proxies: got => { Object.assign(proxyOf, got || {}); },
   final: j => showFinal(j),
+  demo: e => { if (sel && sel.type === "entry" && sel.key === e.key) renderInspector(); },
+  repaint: j => { if (j && j.settings) renderRepaint(); else showRepaint(j); },
   gpu: e => {
     gpuBusy = e.busy || [];
     $("gpuNote").hidden = !gpuBusy.length;
@@ -172,6 +176,8 @@ async function setPlaying(on) {
     if (actx && actx.state === "suspended") await actx.resume();
     playing = true; startSource();
   } else { pausedAt = now(); playing = false; stopSource(); }
+  const pv = $("player").querySelector("video");              // the song plays: the clip's own sound goes off
+  if (pv) pv.muted = playing || !clipSound;
   $("playIcon").innerHTML = playing ? '<path d="M3 2h3.5v12H3zM9.5 2H13v12H9.5z"/>' : '<path d="M4 2l10 6-10 6z"/>';
   $("bPlay").classList.toggle("on", playing);
 }
@@ -615,18 +621,41 @@ function setView(v) {
   $("viewEngine").setAttribute("aria-pressed", v === "engine");
   $("engineVideo").hidden = v !== "engine";
 }
+// the exact preview's state over the picture: {text, frac, stop, bad} | null
+function showExactOv(o) {
+  const el = $("exactOv");
+  if (!el) return;
+  if (!o) { el.hidden = true; return; }
+  el.hidden = false; el.classList.toggle("bad", !!o.bad);
+  fill(el, h("span", { text: o.text }),
+    o.frac != null ? h("div", { class: "progress wide" }, h("i", { style: `width:${Math.round(100 * o.frac)}%` })) : null,
+    o.stop ? h("button", { class: "btn sm danger", onclick: () => call("stop_render") }, "Stop") : h("button", { class: "lnkbtn", "aria-label": "Close", onclick: () => showExactOv(null) }, "✕"));
+}
+let lastFrame = null;
 function onEngine(e) {
   if (e.event === "progress" || e.event === "queued") {
     rendering = true;
     $("bStop").hidden = false; $("prog").hidden = e.event === "queued"; $("engineDot").classList.add("busy");
-    if (e.event === "progress") $("progBar").style.width = (100 * e.frame / Math.max(1, e.of)) + "%";
-    $("engineText").textContent = e.event === "queued" ? `exact preview waits: ${e.why}` : `${e.what || "rendering"} ${e.frame}/${e.of}`;
+    const pct = e.event === "progress" ? Math.round(100 * e.frame / Math.max(1, e.of)) : 0;
+    if (e.event === "progress") { $("progBar").style.width = pct + "%"; lastFrame = [e.frame, e.of]; }
     if (e.first) renderSpan = [e.first, e.last];
+    const what = e.event === "queued" ? `the exact preview waits: ${e.why}` : e.frame ? `${e.what || "rendering"}: frame ${e.frame}/${e.of} · ${pct}%` : `${e.what || "starting"}…`;
+    $("engineText").textContent = what;
+    $("bRender").textContent = e.event === "queued" ? "Exact: waiting" : `Rendering ${pct}%`;
+    showExactOv({ text: `bars ${renderSpan[0]}–${renderSpan[1]}: ${what}`, frac: e.event === "progress" ? pct / 100 : null, stop: true });
     return;
   }
   rendering = false;
-  if (e.event === "stopped") { $("bRender").disabled = false; $("bStop").hidden = true; $("prog").hidden = true; $("engineDot").classList.remove("busy"); $("engineText").textContent = "engine idle"; return; }
-  $("bRender").disabled = false; $("bStop").hidden = true; $("prog").hidden = true; $("engineDot").classList.remove("busy");
+  const idle = () => { $("bRender").disabled = false; $("bStop").hidden = true; $("prog").hidden = true; $("engineDot").classList.remove("busy"); updateLoopChip(); };
+  if (e.event === "stopped") {
+    idle();
+    const at = lastFrame ? ` at frame ${lastFrame[0]}/${lastFrame[1]}` : "";
+    $("engineText").textContent = `stopped${at}`; showExactOv({ text: `the exact preview stopped${at}` }); lastFrame = null;
+    return;
+  }
+  idle(); lastFrame = null;
+  if (e.event === "done") showExactOv(null);
+  else showExactOv({ text: `the exact preview failed: ${(e.tail || []).slice(-1)[0] || `exit ${e.code}`} (the log has the rest)`, bad: true });
   if (e.event === "done") {
     $("engineText").textContent = "engine idle";
     const span = e.first ? [e.first, e.last] : renderSpan;
@@ -643,13 +672,13 @@ function onEngine(e) {
 let renderSpan = [1, 4];
 async function startRender() {
   if (rendering || !S) return;
-  const bar = barAt(now());
-  renderSpan = loop ? [loop[0], loop[1]] : [bar, Math.min(NB(), bar + 3)];
+  renderSpan = exactSpan();
   const r = await call("render", renderSpan[0], renderSpan[1]);
-  if (r.error) { toast(r.error); return; }
+  if (r.error) { toast(r.error, true); showExactOv({ text: `the exact preview: ${r.error}`, bad: true }); return; }
   rendering = true;
   $("bRender").disabled = true; $("bStop").hidden = false; $("prog").hidden = false; $("progBar").style.width = "0";
-  $("engineDot").classList.remove("bad"); $("engineDot").classList.add("busy"); $("engineText").textContent = "starting the engine";
+  $("engineDot").classList.remove("bad"); $("engineDot").classList.add("busy"); $("engineText").textContent = "starting: reading the song and the clips";
+  showExactOv({ text: `bars ${renderSpan[0]}–${renderSpan[1]}: starting, reading the song and the clips`, frac: 0, stop: true });
 }
 function syncEngineVideo(t) {
   const v = $("engineVideo");
@@ -678,15 +707,19 @@ const LANES = [
 ];
 const FX_LANES = ["bgfx", "fgfx", "master"];
 const SAME_KIND = [["bg", "fg"], ["bgfx", "fgfx"]];
-const RULER_H = 34, HEAD_W = 132, EDGE = 7, ROW_MIN = 20, ROW_MAX = 120;
-let rowH = 26;                 // a row's height: the vertical zoom
+const RULER_H = 42, DENS_H = 10, HEAD_W = 132, EDGE = 7, ROW_MIN = 20, ROW_MAX = 120;
+let rowH = 30;                 // a row's height: the vertical zoom
 let layout = null;
 let rowsOf = {};               // lane -> how many sub-rows its members take (Python's pack)
 let groups = {}, has = {}, board = {};
 let picked = null;             // what the browser picked: {type: "cat", key, kind, label} | {type: "clip", path, name, url, from}
+let pickedFx = null;           // and an FX, at the same time: {type: "cat", key, kind: "fx", label}
+let montageBars = [];          // the bars the montage plays ([] all of them)
+let lastNote = "";             // what the last edit did (the status line)
 const isFxLane = id => FX_LANES.includes(id);
 const sameKind = (a, b) => a === b || SAME_KIND.some(p => p.includes(a) && p.includes(b));
 const roomy = () => rowH >= 30;
+const pickFor = l => l && isFxLane(l.id) ? pickedFx : picked;
 
 function computeLayout() {
   let y = 0; const L = [];
@@ -717,7 +750,9 @@ function renderTimeline() {
   layout = computeLayout();
   const width = NB() * ppb;
   $("tgrid").style.gridTemplateColumns = `${HEAD_W}px ${width}px`;
-  $("corner").textContent = `${S.song.meter} · ${Math.round(S.song.bpm)} BPM`;
+  const sg = S.song;
+  $("corner").replaceChildren(h("b", { text: `${sg.meter} · ${Math.round(sg.bpm)} BPM` }), h("span", { text: `bar ${fmt(sg.bar_seconds || 0)} s · ${fmtTime(sg.duration)}` }));
+  $("corner").title = `${NB()} bars · ${sg.meter} · ${fmt(sg.bpm)} BPM · a bar ${fmt(sg.bar_seconds || 0)} s · the audio ${fmtTime(sg.duration)}`;
   // the ruler: bar numbers, beats, meter changes, how busy the MIDI is, REAPER's markers
   ruler.style.width = width + "px";
   const rc = canvasFor(width, RULER_H); drawRuler(rc);
@@ -739,14 +774,15 @@ function renderTimeline() {
   inner.style.width = width + "px"; inner.style.height = layout.height + "px";
   inner.replaceChildren();
   for (const l of layout.lanes) {
-    const lane = h("div", { class: "lane " + l.kind, dataset: { lane: l.id }, style: `top:${l.top}px; height:${l.h}px; background-image: repeating-linear-gradient(to right, var(--line) 0 1px, transparent 1px ${ppb}px);` });
+    const lit = sel && ((sel.type === "lane" && l.group === sel.group) || (sel.type === "master" && l.id === "master") || ((sel.type === "clips" || sel.type === "montage") && l.id === "clips"));
+    const lane = h("div", { class: "lane " + l.kind + (lit ? " lit" : ""), dataset: { lane: l.id }, style: `top:${l.top}px; height:${l.h}px; background-image: repeating-linear-gradient(to right, var(--line-2) 0 1px, transparent 1px ${4 * ppb}px), repeating-linear-gradient(to right, var(--line) 0 1px, transparent 1px ${ppb}px);` });
     if (l.kind === "audio") { const c = canvasFor(width, l.h); lane.append(c); drawWave(c); }
     if (l.kind === "midi") { const c = canvasFor(width, l.h); lane.append(c); drawMidi(c); }
     if (l.kind === "clips") drawCells(lane, l);
     if (l.kind === "track") {
       for (let r = 1; r < l.shown; r++) lane.append(h("div", { class: "rowline", style: `top:${r * rowH + 2}px` }));
       if ((l.id === "fg" || l.id === "bg") && roomy()) lane.append(h("div", { class: "newrow", style: `top:${(l.shown - 1) * rowH + 2}px; height:${rowH}px`, text: picked && accepts(l, picked) ? `drag across: ${picked.label || picked.name}, new` : "drag here: new" }));
-      if (isFxLane(l.id) && !(rowsOf[l.id] || 0) && roomy()) lane.append(h("div", { class: "newrow", style: `top:2px; height:${rowH}px`, text: "right-click: an FX here · or pick one in FX and drag across" }));
+      if (isFxLane(l.id) && roomy() && (!(rowsOf[l.id] || 0) || pickedFx)) lane.append(h("div", { class: "newrow", style: `top:${(l.shown - 1) * rowH + 2}px; height:${rowH}px`, text: pickedFx ? `drag across: ${pickedFx.label}` : "right-click: an FX here · or pick one in FX and drag across" }));
     }
     if (l.kind === "track" || l.kind === "clips") wireLaneDrop(lane, l);
     inner.append(lane);
@@ -775,12 +811,13 @@ function drawRuler(cv) {
   const dens = S.song.density || [];
   for (let b = 1; b <= NB(); b++) {
     const x = (b - 1) * ppb;
-    const v = dens[b - 1] || 0;                 // how busy the MIDI is in this bar
-    if (v > 0) { g.fillStyle = `rgba(240,160,75,${0.12 + 0.6 * v})`; g.fillRect(x, RULER_H - 4, ppb, 4); }
-    g.fillStyle = "#3b4352"; g.fillRect(x, RULER_H - 14, 1, 10);
+    const v = Math.max(0, Math.min(1, dens[b - 1] || 0));     // how busy the MIDI is in this bar: dark to orange
+    g.fillStyle = `rgb(${Math.round(27 + v * 213)},${Math.round(30 + v * 130)},${Math.round(37 + v * 38)})`;
+    g.fillRect(x, RULER_H - DENS_H, Math.max(1, ppb - 1), DENS_H);
+    g.fillStyle = (b - 1) % 4 === 0 ? "#5a6273" : "#3b4352"; g.fillRect(x, RULER_H - DENS_H - 12, 1, 12);
     const n = S.song.bar_beats[b - 1] || S.song.bar_beats[S.song.bar_beats.length - 1] || 4;
     g.fillStyle = "#2b313d";
-    for (let k = 1; k < n; k++) g.fillRect(x + k * ppb / n, RULER_H - 9, 1, 5);
+    for (let k = 1; k < n; k++) g.fillRect(x + k * ppb / n, RULER_H - DENS_H - 6, 1, 6);
     if ((b - 1) % every === 0) { g.fillStyle = "#9097a7"; g.fillText(String(b), x + 3, 3); }
     const before = b > 1 ? (S.song.bar_beats[b - 2] || n) : null;
     if ((b === 1 && n !== (S.song.bar_beats[1] || n)) || (before !== null && n !== before)) { g.fillStyle = "#f0a04b"; g.fillText(`${n}/4`, x + 3, 15); }
@@ -826,10 +863,13 @@ function drawCells(lane, l) {
     const s = clipAtBar(b), pinned = String(b) in pins, none = (pinned && pins[String(b)] === "none") || (s && s.name === "none");
     const th = s && s.url ? thumbs.get(s.url) : null;
     const chosen = sel && sel.type === "montage" && sel.first <= b && b <= sel.last;
-    const cls = "cell" + (none || (montage.length && !s) ? " none" : "") + (pinned ? " pin" : "") + (chosen ? " sel" : "");
-    lane.append(h("div", { class: cls, dataset: { bar: b }, style: `left:${(b - 1) * ppb + 1}px; width:${ppb - 2}px;` + (th && !none ? `background-image:url(${th})` : ""),
-      title: `Bar ${b}: ${none ? "nothing" : s ? s.name : "…"}${pinned ? " (pinned)" : ""}`, text: ppb >= 44 && s && !none ? s.name.slice(0, Math.floor(ppb / 6)) : "" }));
+    const out = montageBars.length && !montageBars.some(([a, z]) => a <= b && b <= z);     // the montage's own bars: not this one
+    const cls = "cell" + (none || (montage.length && !s) ? " none" : "") + (pinned ? " pin" : "") + (chosen ? " sel" : "") + (out ? " out" : "");
+    lane.append(h("div", { class: cls, dataset: { bar: b }, style: `left:${(b - 1) * ppb + 1}px; width:${ppb - 2}px;` + (th && !none ? `background-image:url(${th});` : "") + (s && s.colour && !none ? `--cc:${s.colour}` : ""),
+      title: `Bar ${b}: ${none ? "nothing" : s ? `${s.name}${s.from ? ` from ${fmt(s.from)} s` : ""}${s.dir < 0 ? " (reversed)" : ""}` : "…"}${pinned ? " (pinned)" : ""}${out ? " · the montage does not play here (its bars)" : ""}${s && s.path ? `\n${s.path}` : ""}`,
+      text: ppb >= 44 && s && !none ? s.name.slice(0, Math.floor(ppb / 6)) : "" }));
   }
+  if (montageBars.length) lane.append(h("div", { class: "mbars", title: "the montage plays in these bars" }, ...montageBars.map(([a, z]) => h("i", { style: `left:${(a - 1) * ppb}px; width:${(z - a + 1) * ppb}px` }))));
   if (!montage.length && roomy()) lane.append(h("div", { class: "newrow", style: "top:4px", text: "the montage comes when the clips are probed" }));
 }
 function blockEl(m, s, k, l) {
@@ -842,15 +882,26 @@ function blockEl(m, s, k, l) {
     sigLight && sigLight.ids.has(idOf(m.ref)) ? "sig" : ""].filter(Boolean).join(" ");
   const linked = m.params.filter(p => p.knob != null).length;
   let label = m.label;
-  if (m.kind === "clip" && s.file && !m.name) label = s.file.split(/[\\/]/).pop().replace(/\.[^.]+$/, "");
-  const el = h("div", { class: cls, dataset: { id: idOf(m.ref), k }, style: `left:${left}px; width:${Math.max(4, width)}px; top:${top}px; height:${height}px`,
-    title: `${m.label} · bars ${s.first}–${s.last}${m.cued ? " · cued (REAPER): hide bars of it from its menu" : ""}${m.always ? " · the whole song: drag an end to give it bars" : ""}${live ? "" : " · at the render"}${s.missing ? ` · MISSING: ${s.file || m.file}` : ""}` },
-    h("span", { class: "nm", text: (m.kind === "gen" && !isFxLane(m.lane) ? "" : "") + label + (m.always ? " (the whole song)" : "") }),
+  if (m.kind === "clip" && s.file && !m.name) label = clipLabel(s.file);
+  label += m.always ? " (the whole song)" : "";
+  const pre = m.kind === "gen" && !isFxLane(m.lane) ? "GEN " : "";
+  const tags = (s.from ? `@${fmt(s.from)}s`.length + 1 : 0) + (linked ? 4 : 0) + (m.own_fx ? 6 : 0);
+  const room = Math.floor((width - 14) / 6.2) - tags - pre.length;      // a long name: its end shows (where stems differ)
+  const shown = pre + (room > 4 && label.length > room ? "…" + label.slice(label.length - room + 1) : label);
+  const colour = m.kind === "clip" && m.colour ? `; --bc:${m.colour}` : "";
+  const el = h("div", { class: cls + (colour ? " tinted" : ""), dataset: { id: idOf(m.ref), k }, style: `left:${left}px; width:${Math.max(4, width)}px; top:${top}px; height:${height}px${colour}`,
+    title: `${m.label} (${kindName(m)}) · bars ${s.first}–${s.last} of ${NB()}${m.cued ? " · cued (REAPER): hide bars of it from its menu" : ""}${m.always ? " · the whole song: drag an end to give it bars" : ""}${live ? "" : " · at the render"}${m.enabled ? "" : " · off"}${s.missing ? ` · MISSING: ${s.file || m.file}` : ""}${s.file || m.file ? `\n${s.file || m.file}` : ""}` },
+    h("span", { class: "nm", text: shown }),
     s.from ? h("span", { class: "sg", text: `@${fmt(s.from)}s` }) : null,
     linked ? h("span", { class: "sg", text: `${linked}~` }) : null,
     m.own_fx ? h("span", { class: "sg", text: `+${m.own_fx}fx` }) : null);
   if (m.own_fx) el.append(h("i", { class: "fxstrip", title: m.fx.map(f => f.label).join(", ") }));
   return el;
+}
+// a clip's name on its block: its file's stem; a generic one ("final.mp4") with its folder
+function clipLabel(path) {
+  const parts = String(path).split(/[\\/]/).filter(Boolean), st = (parts.pop() || "").replace(/\.[^.]+$/, "");
+  return /^(final|output|out|render|video|clip|take|\d+)$/i.test(st) && parts.length ? `${parts.pop()}/${st}` : st;
 }
 const memberById = id => members.find(m => idOf(m.ref) === id);
 function laneAtY(y) { return layout && layout.lanes.find(l => y >= l.top && y < l.top + l.h) || null; }
@@ -873,7 +924,7 @@ function edit(name, ...args) {
       const st = await call(name, ...args);
       if (st && st.error) { toast(st.error, true); return st; }      // Python logged it, with where
       if (st && st.lanes) apply(st);
-      if (st && st.note) { toast(st.note); log("in", st.note); }
+      if (st && st.note) { toast(st.note); log("in", st.note); lastNote = st.note; showStatus(); }
       return st;
     } catch (e) { toast(e.message, true); log("err", `${name}: ${e.message}`); }
   };
@@ -886,16 +937,24 @@ function apply(st) {
   members = st.lanes; pins = st.pins || {}; undoN = st.undo; redoN = st.redo;
   rowsOf = st.rows || {}; groups = st.groups || {}; has = st.has || {}; board = st.board || {};
   if (st.montage) montage = st.montage;
+  if (st.montage_bars) montageBars = st.montage_bars;
   if ("dirty" in st) { dirty = st.dirty; savedAt = st.saved_at || ""; }
   if (st.select !== undefined) {
     const s2 = st.select;
     if (!s2 || s2.ref === null) sel = null;
     else if (s2.montage) sel = { type: "montage", first: s2.montage[0], last: s2.montage[1] };
+    else if (s2.lane) sel = s2.lane === "master" ? { type: "master" } : { type: "lane", group: s2.lane };
     else if (s2.ref) sel = { type: "member", id: idOf(s2.ref), ref: s2.ref, k: s2.k };
   }
   if (sel && sel.type === "member" && !memberById(sel.id)) sel = null;
   for (const m of members) if (m.live && m.kind !== "clip") shaderFor(m.key);
-  renderTimeline(); renderInspector(); showSaveState();
+  renderTimeline(); renderInspector(); showSaveState(); showStatus();
+}
+// the status line under the lanes: what the last edit did, the undo steps
+function showStatus() {
+  const el = $("statusLine");
+  if (!el) return;
+  el.textContent = !S ? "" : [lastNote, `undo ${undoN} · redo ${redoN}`].filter(Boolean).join(" · ");
 }
 function showSaveState(text, bad = false) {
   const el = $("saveState");
@@ -934,17 +993,25 @@ function select(s, redraw = true) {
   renderInspector();
 }
 function selectMember(m, k) { select({ type: "member", id: idOf(m.ref), ref: m.ref, k }, false); }
+// a member's bars (a block's; a cued one's: its first cue to its last), chosen
+function barsOf(m, k) {
+  const sp = spansOf(m);
+  if (!sp.length) return null;
+  if (k != null && sp[k]) return [sp[k].first, sp[k].last];
+  return [Math.min(...sp.map(s => s.first)), Math.max(...sp.map(s => s.last))];
+}
+function chooseBarsOf(m, k) { const b = barsOf(m, k); if (b) loop = b; renderTimeline(); renderInspector(); }
 inner.addEventListener("pointerdown", e => {
   if (e.button !== 0 || !S) return;
   closeCtx();
   const [x, y] = innerXY(e), l = laneAtY(y), bar = xToBar(x);
   const bEl = e.target.closest(".block"), note = e.target.closest(".cuenote");
-  if (note) { const m = memberById(note.dataset.id); if (m) selectMember(m, null); return; }
+  if (note) { const m = memberById(note.dataset.id); if (m) { selectMember(m, null); chooseBarsOf(m, null); } return; }
   if (bEl) {
     const m = memberById(bEl.dataset.id), k = +bEl.dataset.k;
     selectMember(m, m.always ? null : k);
-    if (m.kind === "clip") { const s = spansOf(m)[k]; if (s && (s.file || m.file)) pickClip(s.file || m.file, s.from || 0); }
-    if (m.cued) return;
+    if (m.kind === "clip") { const s = spansOf(m)[k]; if (s && (s.file || m.file)) chooseClip(s.file || m.file, s.from || 0); }
+    if (m.cued) { chooseBarsOf(m, null); return; }
     const s = spansOf(m)[Math.max(0, k)];
     drag = { type: "block", m, k, el: bEl, mode: edgeOf(bEl, e.clientX, e.shiftKey) || "move", x0: e.clientX, y0: y, f0: s.first, l0: s.last, first: s.first, last: s.last, lane: m.lane, row: m.row, moved: false };
     try { bEl.setPointerCapture(e.pointerId); } catch (err) { /* a pointer that is not down */ }
@@ -988,8 +1055,9 @@ inner.addEventListener("pointermove", e => {
     const l = laneById(drag.lane), g = $("ghost");
     g.hidden = false;
     Object.assign(g.style, { left: (drag.first - 1) * ppb + "px", width: (drag.last - drag.first + 1) * ppb + "px", top: rowTop(l, drag.row) + "px", height: rowH - 2 + "px" });
-    g.textContent = picked && accepts(l, picked) ? `${picked.label || picked.name} · bars ${drag.first}–${drag.last}` : `bars ${drag.first}–${drag.last}`;
-    g.classList.toggle("put", !!(picked && accepts(l, picked)));
+    const pk = pickFor(l);
+    g.textContent = pk && accepts(l, pk) ? `${pk.label || pk.name} · bars ${drag.first}–${drag.last}` : `bars ${drag.first}–${drag.last}`;
+    g.classList.toggle("put", !!(pk && accepts(l, pk)));
   } else if (drag.type === "range") {
     document.querySelectorAll(".cell").forEach(c => c.classList.toggle("sel", +c.dataset.bar >= drag.first && +c.dataset.bar <= drag.last));
   } else if (drag.type === "span" && drag.moved) { loop = [drag.first, drag.last]; showLoop(); }
@@ -1000,18 +1068,19 @@ inner.addEventListener("pointerup", e => {
   const [x] = innerXY(e), bar = xToBar(x);
   if (d.type === "block") {
     showEdge(null);
-    if (!d.moved) { renderTimeline(); flushAfterDrag(); return; }
+    if (!d.moved) { chooseBarsOf(d.m, d.m.always ? null : d.k); flushAfterDrag(); return; }
     const toRow = d.lane !== d.m.lane || d.row !== d.m.row;
     edit("move", d.m.ref, d.k, d.mode, d.first, d.last, toRow ? d.lane : null, toRow ? d.row : null);
   } else if (d.type === "new") {
     $("ghost").hidden = true;
-    const l = laneById(d.lane);
-    if (picked && accepts(l, picked)) edit("new_member", d.lane, picked.type === "clip" ? picked.path : picked.key, d.first, d.last, d.row, picked.from || 0);
+    const l = laneById(d.lane), pk = pickFor(l);
+    if (pk && accepts(l, pk)) edit("new_member", d.lane, pk.type === "clip" ? pk.path : pk.key, d.first, d.last, d.row, pk.from || 0);
     else if (d.moved) { setLoop(d.first, d.last); toast(`bars ${d.first}–${d.last} chosen · to put something there, pick it in the browser first`); }
-    else { sel = null; seek(xToT(x)); renderTimeline(); renderInspector(); }
+    else { sel = null; seek(xToT(x)); loop = [bar, bar]; renderTimeline(); renderInspector(); }     // an empty place: that bar chosen
   } else if (d.type === "range") {
     let first = d.first, last = d.last;
-    if (!d.moved) { const run = runAt(bar); if (run) { first = run.first; last = run.last; if (run.path) pickClip(run.path, 0); } }
+    if (!d.moved) { const run = runAt(bar); if (run) { first = run.first; last = run.last; if (run.path) chooseClip(run.path, 0); } }
+    loop = [first, last];
     select({ type: "montage", first, last });
   } else if (d.type === "span") {
     if (!d.moved) { seek(xToT(x)); sel = null; renderTimeline(); renderInspector(); }
@@ -1056,6 +1125,18 @@ $("heads").addEventListener("click", e => {
   if (l.id === "master") select({ type: "master" });
   else if (l.id === "clips") select({ type: "clips" });
   else select({ type: "lane", group: l.group });
+});
+$("heads").addEventListener("contextmenu", async e => {
+  const hd = e.target.closest(".head");
+  if (!hd || !S) return;
+  e.preventDefault();
+  const l = LANES.find(x => x.id === hd.dataset.lane);
+  if (!l || !["track", "clips"].includes(l.kind)) return;
+  if (l.id === "master") select({ type: "master" }); else if (l.id === "clips") select({ type: "clips" }); else select({ type: "lane", group: l.group });
+  const first = loop ? loop[0] : 1, last = loop ? loop[1] : NB();
+  const items = l.kind === "clips" ? await ask("montage_menu", first, last, picked && picked.type === "clip" ? picked.path : null)
+    : await ask("menu", l.id, null, null, barAt(now()), loop);
+  if (items) menuAt(e.clientX, e.clientY, pythonItems(items));
 });
 // the wheel: Ctrl zooms along the song around the bar under the mouse, Shift makes the rows
 // taller or lower (the row under the mouse stays), Alt moves along; else it scrolls
@@ -1106,11 +1187,23 @@ function showLoop() {
 function updateLoopChip() {
   $("loopChip").hidden = !loop;
   if (loop) $("loopText").textContent = loop[0] === loop[1] ? `bar ${loop[0]}` : `bars ${loop[0]}–${loop[1]}`;
-  $("bRender").textContent = loop ? `Exact bars ${loop[0]}–${Math.min(loop[1], loop[0] + 7)}` : "Exact 4 bars here";
+  if (rendering) return;
+  const [a, b] = exactSpan();
+  $("bRender").textContent = a === b ? `Exact bar ${a}` : `Exact bars ${a}–${b}`;
 }
+// the exact preview's bars: the chosen ones (at most 8), else N from the playhead's bar
+let exactN = 1;
+try { exactN = Math.max(1, Math.min(8, +localStorage.getItem("arc.exactN") || 1)); } catch (e) { /* no storage */ }
+function exactSpan() {
+  if (!S) return [1, 1];
+  if (loop) return [loop[0], Math.min(loop[1], loop[0] + 7)];
+  const bar = barAt(now());
+  return [bar, Math.min(NB(), bar + exactN - 1)];
+}
+function exactBars(first, last) { loop = [first, Math.min(last, first + 7)]; renderTimeline(); renderInspector(); startRender(); }
 // Preview: the chosen bars played live, over and over (at most 8)
 function previewBars(first, last) {
-  loop = [first, Math.min(last, first + 7)];
+  loop = [first, last];
   renderTimeline(); renderInspector();
   seek(B[loop[0] - 1]); setView("live"); setPlaying(true);
 }
@@ -1147,6 +1240,8 @@ function catalogItems(kind, choose) {
 function runItem(it, key) {
   if (it.page === "plugin") { const m = members.find(x => idOf(x.ref) === idOf(it.args[0])); if (m) openPlugin(m); return; }
   if (it.page === "preview") { previewBars(it.args[0], it.args[1]); return; }
+  if (it.page === "exact") { exactBars(it.args[0], it.args[1]); return; }
+  if (it.catalog === "gen" && key) { const c = catalogByKey.get(key); if (c) { picked = { type: "cat", key, kind: "gen", label: c.label }; showPicked(); } }
   const args = it.args.map(a => a === "$key" ? key : a === "$from" ? (picked && picked.from) || 0 : a);
   edit(it.call, ...args).then(r => {                // a SAM2 cutout just added: its seeds first
     if (r && !r.error && it.call === "add_fx" && key === "sam_cutout" && Array.isArray(args[0]) && args[0].length > 1) {
@@ -1209,11 +1304,32 @@ inner.addEventListener("contextmenu", async e => {
 
 // drops from the browser: what it picked, four bars from the bar under the mouse
 let dragItem = null;
+function dragBars(it) {
+  if (!it) return 4;
+  if (it.type !== "clip") return 4;
+  const len = clipLens[it.url] || (clipChosen && clipChosen.path === it.path ? clipChosen.duration : null);
+  if (!len || !S.song.bar_seconds) return 4;
+  return Math.max(1, Math.round((len - (it.from || 0)) / S.song.bar_seconds));
+}
+function dragGhost(l, e) {
+  const g = $("ghost");
+  if (!g || !dragItem) return;
+  const [x, y] = innerXY(e), bar = xToBar(x), ok = accepts(l, dragItem);
+  const n = dragBars(dragItem), last = Math.min(NB(), bar + n - 1), row = l.kind === "track" ? rowAtY(l, y) : 0;
+  g.hidden = false; g.classList.toggle("put", ok); g.classList.toggle("no", !ok);
+  Object.assign(g.style, { left: (bar - 1) * ppb + "px", width: (last - bar + 1) * ppb + "px", top: (l.kind === "track" ? rowTop(l, row) : l.top + 2) + "px", height: rowH - 2 + "px" });
+  g.textContent = ok ? `${dragItem.label || dragItem.name} · bars ${bar}–${last}${n > 16 ? " (it asks how many)" : ""}`
+    : dragItem.type === "clip" ? "a clip goes on the BG, the FG or Clips" : dragItem.kind === "fx" ? "an FX goes on an FX track" : "a Generator goes on the BG or the FG";
+}
 function wireLaneDrop(el, l) {
-  el.addEventListener("dragover", e => { if (accepts(l, dragItem)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; el.classList.add("drop-ok"); } });
-  el.addEventListener("dragleave", () => el.classList.remove("drop-ok"));
+  el.addEventListener("dragover", e => {
+    if (!dragItem) return;
+    dragGhost(l, e);
+    if (accepts(l, dragItem)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; el.classList.add("drop-ok"); }
+  });
+  el.addEventListener("dragleave", () => { el.classList.remove("drop-ok"); const g = $("ghost"); if (g) g.hidden = true; });
   el.addEventListener("drop", e => {
-    el.classList.remove("drop-ok");
+    el.classList.remove("drop-ok"); const g = $("ghost"); if (g) g.hidden = true;
     if (!accepts(l, dragItem)) return;
     e.preventDefault();
     const it = dragItem; dragItem = null;
@@ -1233,20 +1349,28 @@ function putItem(it, laneId, bar, row = null) {
 // there); dragging one onto a lane puts four bars of it.
 // ---------------------------------------------------------------------------
 let tab = "gen";
+const foldedCats = new Set();      // "gen:Category" folded in the browser
 function pickClip(path, from = 0) {
   const c = (S.clips || []).find(x => x.path === path || x.path.replace(/\\/g, "/").endsWith(String(path).replace(/\\/g, "/")));
   picked = { type: "clip", path, name: String(path).split(/[\\/]/).pop(), label: String(path).split(/[\\/]/).pop().replace(/\.[^.]+$/, ""), url: c ? c.url : null, from };
   showPicked(); if (tab === "clips") renderBrowser();
 }
-function pick(it) { picked = picked && (picked.key || picked.path) === (it.key || it.path) ? null : it; showPicked(); renderBrowser(); }
+function pick(it) {
+  const same = x => x && (x.key || x.path) === (it.key || it.path);
+  if (it.type === "cat" && it.kind === "fx") pickedFx = same(pickedFx) ? null : it;
+  else picked = same(picked) ? null : it;
+  showPicked(); renderBrowser(); renderTimeline();
+}
+// what is picked: a clip or a Generator (for the BG and the FG), and an FX (for the FX tracks)
 function showPicked() {
   const el = $("picked");
-  if (!picked) { el.hidden = true; return; }
+  if (!picked && !pickedFx) { el.hidden = true; return; }
   el.hidden = false;
-  el.replaceChildren(...[h("span", { class: "tlabel", text: "picked" }), h("b", { text: picked.label || picked.name }),
-    picked.type === "clip" && picked.from ? h("span", { class: "mono", text: `from ${fmt(picked.from)} s` }) : null,
-    h("span", { class: "hint", text: picked.type === "cat" && picked.kind === "fx" ? "drag across an FX track, or Add FX on a block" : "drag across a lane to put it there" }),
-    h("button", { class: "lnkbtn", onclick: () => { picked = null; showPicked(); renderBrowser(); }, "aria-label": "Unpick" }, "✕")].filter(Boolean));
+  const line = (p, hint, unpick) => h("div", { class: "row nowrap" }, h("span", { class: "tlabel", text: p.kind === "fx" ? "FX" : p.type === "clip" ? "clip" : "gen" }), h("b", { text: p.label || p.name }),
+    p.type === "clip" && p.from ? h("span", { class: "mono", text: `from ${fmt(p.from)} s` }) : null,
+    h("span", { class: "hint", text: hint }), h("button", { class: "lnkbtn", onclick: unpick, "aria-label": "Unpick" }, "✕"));
+  el.replaceChildren(...[picked ? line(picked, "drag across the BG or the FG", () => { picked = null; showPicked(); renderBrowser(); renderTimeline(); }) : null,
+    pickedFx ? line(pickedFx, "drag across an FX track", () => { pickedFx = null; showPicked(); renderBrowser(); renderTimeline(); }) : null].filter(Boolean));
 }
 function renderBrowser() {
   if (!S) return;
@@ -1258,25 +1382,30 @@ function renderBrowser() {
     el.addEventListener("dragstart", e => { dragItem = it; e.dataTransfer.setData("text/plain", it.key || it.path); e.dataTransfer.effectAllowed = "copy"; });
     el.addEventListener("dragend", () => { dragItem = null; document.querySelectorAll(".drop-ok").forEach(x => x.classList.remove("drop-ok")); });
   };
-  const isPicked = it => picked && (picked.key || picked.path) === (it.key || it.path);
+  const isPicked = it => [picked, pickedFx].some(p => p && (p.key || p.path) === (it.key || it.path));
   if (tab === "signals") { list.append(h("div", { class: "about", text: "…" })); renderSignals(list); return; }
   if (tab === "clips") { renderClipTab(list); return; }
   const byCat = new Map();
   for (const c of S.catalog) if (c.kind === tab && `${c.label} ${c.cat} ${c.about}`.toLowerCase().includes(q)) {
     if (!byCat.has(c.cat)) byCat.set(c.cat, []); byCat.get(c.cat).push(c);
   }
+  list.append(h("div", { class: "about tababout", text: tab === "gen" ? "Generators make a picture: drag one across the BG or the FG (click: its demo and parameters)." : "FX change the picture under them: drag one across an FX track, or Add FX on a block, a lane, the master." }));
   if (!byCat.size) list.append(h("div", { class: "empty-note", text: "Nothing matches." }));
   for (const [cat, items] of byCat) {
-    list.append(h("div", { class: "bcat", text: cat }));
+    const shut = foldedCats.has(`${tab}:${cat}`) && !q;
+    list.append(h("button", { class: "bcat" + (shut ? " shut" : ""), "aria-expanded": String(!shut), onclick: () => { const k = `${tab}:${cat}`; foldedCats.has(k) ? foldedCats.delete(k) : foldedCats.add(k); renderBrowser(); } },
+      h("span", { text: cat }), h("small", { text: String(items.length) })));
+    if (shut) continue;
     for (const c of items) {
       const st = shaders.get(c.key);
       const bad = st && st.status === "bad";
       const it = { type: "cat", key: c.key, kind: c.kind, label: c.label };
       const flags = (c.takes_input ? " *" : "") + c.needs.map(n => ` (${n})`).join("");
-      const row = h("div", { class: "bitem" + (isPicked(it) ? " picked" : ""), title: (c.about || c.key) + (c.takes_input ? "\n* takes the picture below as input" : "") + (bad ? `\nGLSL ES: ${st.error}` : ""), onclick: e => { if (!e.target.closest("button")) pick(it); } },
+      const row = h("div", { class: "bitem" + (isPicked(it) ? " picked" : ""), title: (c.about || c.key) + (c.takes_input ? "\n* takes the picture below as input" : "") + (bad ? `\nGLSL ES: ${st.error}` : ""),
+        onclick: e => { if (e.target.closest("button")) return; pick(it); sel = { type: "entry", key: c.key }; renderTimeline(); renderInspector(); } },
         h("span", { class: "nm", text: c.label + flags }),
         h("span", { class: `badge ${c.live && !bad ? "live" : bad ? "bad" : "engine"}`, text: c.live && !bad ? "live" : bad ? "glsl" : "engine" }),
-        h("button", { class: "add", title: c.kind === "gen" ? "Put 4 bars of it in the BG at the playhead" : "Put it on the master, all the song", "aria-label": `Add ${c.label}`, onclick: () => c.kind === "gen" ? putItem(it, "bg", barAt(now())) : edit("add_fx", ["master"], c.key) }, "+"));
+        h("button", { class: "add", title: c.kind === "gen" ? "Put 4 bars of it in the BG at the playhead" : "Put it on the master, all the song", "aria-label": `Add ${c.label}`, onclick: () => c.kind === "gen" ? putItem(it, "bg", barAt(now())) : addFx(["master"], c.key) }, "+"));
       drag(row, it); list.append(row);
     }
   }
@@ -1315,7 +1444,8 @@ function renderInspector() {
   if (!sel && loop && S) {
     $("inspTitle").textContent = "Bars";
     box.append(h("div", { class: "ptitle" }, h("h3", { text: `Bars ${loop[0]}–${loop[1]}` }), h("div", { class: "src", text: "chosen" })),
-      h("div", { class: "btnrow" }, h("button", { class: "btn", onclick: () => previewBars(loop[0], loop[1]) }, `Preview bars ${loop[0]}–${Math.min(loop[1], loop[0] + 7)} (Space)`),
+      h("div", { class: "btnrow" }, h("button", { class: "btn", title: "the live picture, over and over (Space plays it too)", onclick: () => previewBars(loop[0], loop[1]) }, `Play bars ${loop[0]}–${loop[1]}`),
+        h("button", { class: "btn", title: "as the render makes them, on the GPU (Shift+Space)", onclick: () => exactBars(loop[0], loop[1]) }, `Exact bars ${loop[0]}–${Math.min(loop[1], loop[0] + 7)}`),
         h("button", { class: "btn", onclick: () => { loop = null; renderTimeline(); renderInspector(); } }, "Choose none")),
       h("div", { class: "about", text: "Pick a clip, a Generator or an FX in the browser and drag across a track to put it there; click a block to choose it." }));
     return;
@@ -1339,6 +1469,7 @@ function renderInspector() {
     return;
   }
   if (sel.type === "knob" && knobCtx) return inspKnob(box);
+  if (sel.type === "entry") return inspEntry(box, sel.key);
   if (sel.type === "knob") { sel = null; return renderInspector(); }
   if (sel.type === "plugin") { $("inspTitle").textContent = "FX"; const ref = sel.ref; box.append(h("div", { class: "btnrow" }, h("button", { class: "btn sm", onclick: () => { sel = sel.back || null; renderInspector(); } }, "← back"))); pluginInto(box, ref).then(() => { const p0 = box.querySelector(".plugin"); }); return; }
   if (sel.type === "montage") return inspMontageBars(box, sel.first, sel.last);
@@ -1381,9 +1512,10 @@ function inspMember(box, m) {
         ? h("button", { class: "btn", onclick: () => edit("set_block", m.ref, k, { file: picked.path, start: picked.from || 0 }) }, `Use ${picked.label} and its 'from'`)
         : h("button", { class: "btn", onclick: () => edit("set_block", m.ref, k, { start: picked.from || 0 }) }, "Use the browser's 'from'")));
   }
-  const pb = k != null && blocks[k] ? blocks[k] : m.spans[0];
+  const pbs = barsOf(m, k != null && blocks[k] ? k : null), pb = pbs ? { first: pbs[0], last: pbs[1] } : null;
   box.append(h("div", { class: "btnrow" },
-    pb ? h("button", { class: "btn", onclick: () => previewBars(pb.first, pb.last) }, `Preview bars ${pb.first}–${Math.min(pb.last, pb.first + 7)}`) : null,
+    pb ? h("button", { class: "btn", title: "the live picture, over and over", onclick: () => previewBars(pb.first, pb.last) }, `Play bars ${pb.first}–${pb.last}`) : null,
+    pb ? h("button", { class: "btn", title: "as the render makes them, on the GPU (at most 8 bars)", onclick: () => exactBars(pb.first, pb.last) }, `Exact ${pb.first}–${Math.min(pb.last, pb.first + 7)}`) : null,
     h("button", { class: "btn", onclick: () => edit("toggle", m.ref) }, m.enabled ? "Turn off" : "Turn on"),
     isFxLane(m.lane) ? h("button", { class: "btn", onclick: () => edit("reorder", m.ref, -1) }, "Earlier") : null,
     isFxLane(m.lane) ? h("button", { class: "btn", onclick: () => edit("reorder", m.ref, 1) }, "Later") : null,
@@ -1405,7 +1537,7 @@ function inspMember(box, m) {
   // its own FX
   if (!isFxLane(m.lane)) box.append(fxList(`FX on ${m.label.slice(0, 24)} only, in order`, m.fx.map((f, j) => ({ ...f, ref: [...m.ref, "fx", j] })), [...m.ref], true));
   // what it is and does: every parameter (the plugin), mask:
-  pluginInto(box, m.ref, m).then(() => box.append(sect("The layer, as the scene says (but its bars)"), h("pre", { class: "code", text: m.yaml })));
+  pluginInto(box, m.ref, m).then(fresh => { if (fresh) layerTextInto(box, m.ref); });
   $("yaml").textContent = m.yaml;
 }
 const PLACES = [["x", 0.5, "0 left .. 1 right"], ["y", 0.5, "0 top .. 1 bottom"], ["scale", 1.0, "1: as tall as the frame"]];
@@ -1415,19 +1547,19 @@ function inspPlacement(box, m) {
   for (const [key, def, about] of PLACES) {
     const v = p[key];
     if (v && typeof v === "object") box.append(h("div", { class: "prm linked" }, h("div", { class: "top" }, h("label", { text: key }), h("output", { text: "follows the music" })),
-      h("div", { class: "about mono", text: v.knob }),
-      h("div", { class: "btnrow" }, h("button", { class: "lnkbtn", onclick: () => linkPlace(m, key, v.knob) }, "Edit link…"),
+      v.said ? h("div", { class: "about", text: v.said }) : null, h("div", { class: "about mono small", text: v.knob }),
+      h("div", { class: "btnrow" }, h("button", { class: "lnkbtn", onclick: () => linkPlace(m, key, def) }, "Edit link…"),
         h("button", { class: "lnkbtn", onclick: () => edit("set_param", m.ref, key, String(knobBias(v.knob) ?? def)) }, "Fixed"))));
     else box.append(h("div", { class: "prm" }, h("div", { class: "top" }, h("label", { text: key }), h("small", { class: "hint", text: about })),
       h("div", { class: "slide" }, h("input", { type: "range", min: key === "scale" ? 0.05 : -0.5, max: key === "scale" ? 2 : 1.5, step: 0.01, value: v ?? def, "aria-label": key, onchange: e => edit("set_layer", m.ref, key, +e.target.value) }),
         numField(v ?? def, val => edit("set_layer", m.ref, key, val), { step: 0.05, aria: key })),
-      h("button", { class: "lnkbtn", onclick: () => linkPlace(m, key, `{hits: {track: '${kickTrack()}'}, envelope: 0.25, gain: 0.1, bias: ${fmt(v ?? def)}}`) }, "Follow the music…")));
+      h("button", { class: "lnkbtn", onclick: () => linkPlace(m, key, v ?? def) }, "Follow the music…")));
   }
   box.append(h("div", { class: "fields" },
     field("Fit", h("select", { onchange: e => edit("set_layer", m.ref, "fit", e.target.value) }, ["contain", "cover"].map(f => h("option", { value: f, selected: f === p.fit, text: f })))),
     field("", h("div", { class: "row" }, check("flip", p.flip, v => edit("set_layer", m.ref, "flip", v)), check("loop", p.loop, v => edit("set_layer", m.ref, "loop", v))))));
   if (p.sam != null) {
-    box.append(h("div", { class: "row" }, h("span", { class: "about", style: "color:var(--live)", text: "Cut out by SAM2 at the render." }),
+    box.append(h("div", { class: "row" }, h("span", { class: "about", style: "color:var(--live)", text: p.sam_state || "Cut out by SAM2 at the render." }),
       h("button", { class: "lnkbtn", onclick: () => openSam([...m.ref, "fx", p.sam]) }, "Seeds…")));
   } else if (p.cutout) {
     box.append(h("div", { class: "row" }, h("span", { class: "chip", text: `cut out by ${p.cutout}` }),
@@ -1441,15 +1573,15 @@ function inspPlacement(box, m) {
   if (m.own_fx) box.append(check("its FX may spill outside the figure (trails, glow, split edges)", m.spill, v => edit("set_layer", m.ref, "spill", v)));
 }
 function knobBias(text) { const m = /bias:\s*(-?[\d.]+)/.exec(text || ""); return m ? +m[1] : null; }
-async function linkPlace(m, key, text) {
-  const v = await dialog(`${m.label} · ${key}`, "What in the music moves it, as YAML (the knob editor comes with the plugin's items). It is checked before it is written.", [{ label: "Apply", value: "ok", primary: true }, { label: "Cancel", value: null }], text);
-  if (v && v.value && v.text) edit("set_param", m.ref, key, v.text);
+// x / y / scale linked to the music: the knob editor, as every knob
+function linkPlace(m, key, def) {
+  openKnob({ ref: m.ref, keypath: [key], mode: "knob", default: typeof def === "number" ? def : 0.5, title: `${m.label} · ${key}` });
 }
 // an FX list: a block's own, a lane's, the master's. rows: [{ref, label, enabled, bars_text}]
 function fxList(title, rows, owner, draggable) {
   const wrap = h("div", { class: "fxlist" });
   wrap.append(h("div", { class: "fxhead" }, h("span", { class: "sect", text: title }),
-    h("button", { class: "lnkbtn", onclick: e => menuAt(e.clientX, e.clientY, catalogItems("fx", key => edit("add_fx", owner, key))) }, "Add FX…")));
+    h("button", { class: "lnkbtn", onclick: e => menuAt(e.clientX, e.clientY, catalogItems("fx", key => addFx(owner, key))) }, "Add FX…")));
   if (!rows.length) wrap.append(h("div", { class: "about", text: "none" }));
   rows.forEach((f, j) => {
     const row = h("div", { class: "fxrow" + (f.enabled ? "" : " off"), draggable: draggable ? "true" : null, dataset: { j } },
@@ -1495,15 +1627,17 @@ async function inspMontageBars(box, first, last) {
   for (const r of runs.slice(0, 12)) {
     const pinned = Object.keys(pins).some(b => +b >= r.first && +b <= r.last);
     const th = r.url ? thumbs.get(r.url) : null;
-    box.append(h("div", { class: "runrow" }, h("span", { class: "sw", style: th ? `background-image:url(${th})` : "" }),
-      h("span", { class: "nm", text: r.name, title: r.path || "" }), h("span", { class: "mono", text: r.first === r.last ? `${r.first}` : `${r.first}–${r.last}` }), pinned ? h("span", { class: "chip", text: "pinned" }) : null));
+    box.append(h("div", { class: "runrow", title: `${r.path || r.name}: click to play it`, onclick: () => { if (r.path) chooseClip(r.path, 0); } }, h("span", { class: "sw", style: th ? `background-image:url(${th})` : "" }),
+      h("span", { class: "nm2" }, h("span", { text: r.name }), r.path ? h("small", { class: "mono", text: r.path.split(/[\\/]/).slice(-2, -1)[0] || "" }) : null),
+      h("span", { class: "mono", text: r.first === r.last ? `${r.first}` : `${r.first}–${r.last}` }), pinned ? h("span", { class: "chip", text: "pinned" }) : null));
   }
   if (runs.length > 12) box.append(h("div", { class: "about", text: `… and ${runs.length - 12} more` }));
   const btns = h("div", { class: "btnrow" });
   box.append(btns, h("div", { class: "about", text: "The montage draws a clip for each bar (clip order, the seed, the triggers' cuts and reverses). A pin keeps a clip there; the bars around stay as they were drawn. A clip from another folder, or from another point, goes in the BG over these bars." }));
   const items = await ask("montage_menu", first, last, picked && picked.type === "clip" ? picked.path : null);
   if (!items || !(sel && sel.type === "montage" && sel.first === first && sel.last === last)) return;
-  for (const it of items) if (!it.head && !it.sep) btns.append(h("button", { class: "btn", onclick: () => runItem(it) }, it.label.replace(/ - Delete$/, "")));
+  for (const it of items) if (!it.head && !it.sep && !it.catalog) btns.append(h("button", { class: "btn sm", title: it.label, onclick: () => runItem(it) },
+    it.label.replace(/ - Delete$/, "").replace(/ (bars? [\d–-]+|\(the engine\)|\(live\))/g, "").replace(/ \(.*\)$/, "")));
 }
 async function inspMontage(box) {
   $("inspTitle").textContent = "Clips";
@@ -1522,6 +1656,13 @@ async function inspMontage(box) {
   box.append(sect("Triggers (YAML)"), ta, h("div", { class: "btnrow" }, h("button", { class: "btn", onclick: () => put("triggers", ta.value) }, "Apply")),
     h("div", { class: "about", text: "Who cuts the montage, what each hit does, its gravity. Their own rows come with the plugin's trigger editor." }));
 }
+async function addFx(owner, key) {
+  const r = await edit("add_fx", owner, key);
+  if (r && !r.error && key === "sam_cutout" && owner.length > 1) {
+    const mm = memberById(idOf(owner)); if (mm) openSam([...owner, "fx", mm.fx.length - 1], true);
+  }
+  return r;
+}
 function kickTrack() {
   const t = S.tracks.find(x => /kick|bumbo/i.test(x.name)) || S.tracks[0];
   return t ? t.name : "kick";
@@ -1538,12 +1679,21 @@ async function pluginInto(box, ref, m = null) {
   box.append(at);
   const n = ++pluginReq;
   const p = await ask("plugin", ref);
-  if (!p || n !== pluginReq) return;
+  if (!p || n !== pluginReq) return false;
   at.replaceChildren();
   if (!p.rows.length && !p.about) { at.append(h("div", { class: "about", text: "No parameters the catalog knows of." })); }
+  at.append(h("div", { class: "phead2" }, h("span", { class: "chip", text: p.kind || "layer" }), p.category ? h("span", { class: "chip", text: p.category }) : null,
+    p.rows.some(r => r.follows) ? h("span", { class: "hint", text: "~ the music can move it (its link)" }) : null));
+  if (p.owner && !m) {                          // an FX on a block: its on, its blend, what it does
+    if (p.about) at.append(h("div", { class: "about", text: p.about }));
+    at.append(h("div", { class: "row" }, check("on", p.enabled, () => edit("toggle", p.ref)),
+      h("select", { "aria-label": "Blend", onchange: e => edit("set_layer", p.ref, "blend", e.target.value === "normal" ? null : e.target.value) },
+        Object.keys(BLEND).map(b => h("option", { value: b, selected: b === p.blend, text: b })))));
+  }
   if (p.rows.length) at.append(sect(p.owner ? `${p.label}, on ${p.owner}` : "Its parameters"));
   for (const row of p.rows) at.append(pluginRow(p, row, m));
   at.append(maskBox(p));
+  return true;
 }
 const fnum = v => typeof v === "number" ? fmt(v) : v;
 function pluginRow(p, r, m) {
@@ -1575,7 +1725,7 @@ function pluginRow(p, r, m) {
   } else if (r.widget === "text") {
     const inp = textField(r.value, r.hint, v => edit("set_text", ref, r.keypath, v, r.is_text), r.name);
     wrap.append(h("div", { class: "row nowrap" }, inp, r.pick ? h("button", { class: "ib", title: `choose ${r.pick === "dir" ? "a folder" : "a file"}`, onclick: async () => {
-      const got = await ask("pick_file", r.pick === "dir" ? "folder" : "any"); if (got && got.path) edit("set_text", ref, r.keypath, got.path, true); } }, "…") : null));
+      const got = await ask("pick_file", r.pick === "dir" ? "folder" : "any", false, "", r.value || ""); if (got && got.path) edit("set_text", ref, r.keypath, got.path, true); } }, "…") : null));
   } else if (r.widget === "gestures") wrap.append(gesturesBox(ref, r));
   else if (r.widget === "reactivity") wrap.append(reactivityBox(ref, r));
   else if (r.widget === "roles") wrap.append(rolesBox(ref, r));
@@ -1601,9 +1751,11 @@ function reactivityBox(ref, r) {
       field("Order", h("select", { onchange: e => put("clip_order", e.target.value) }, r.orders.map(o => h("option", { value: o, selected: o === c.clip_order, text: o })))),
       field("Shorter clip", h("select", { onchange: e => put("clip_end", e.target.value) }, r.ends.map(o => h("option", { value: o, selected: o === c.clip_end, text: o })))),
       field("Seed", textField(c.seed ?? "", "none", v => put("seed", /^-?\d+$/.test(v.trim()) ? +v : null)))));
+  box.prepend(h("div", { class: "about", text: "When the montage takes a new clip: at every bar (or every N), in what order, and what a clip shorter than its turn does (bounce, loop, hold)." }));
   const tkp = [...kp, "triggers"], names = r.triggers.map(t => t.name);
   box.append(h("div", { class: "fxhead" }, h("span", { class: "sect", text: "Triggers" }),
-    h("button", { class: "lnkbtn", onclick: async () => { const got = await edit("add_trigger", ref, tkp); if (got && got.added) openKnob({ ref, keypath: [...tkp, got.added], mode: "trigger", title: `${got.added} · who plays` }); } }, "+ trigger")));
+    h("button", { class: "lnkbtn", onclick: async () => { const got = await edit("add_trigger", ref, tkp); if (got && got.added) openKnob({ ref, keypath: [...tkp, got.added], mode: "trigger", title: `${got.added} · who plays` }); } }, "+ trigger")),
+    h("div", { class: "about", text: "A trigger: who plays (a MIDI track and its notes, an audio file, a melody) and what each hit does to the montage: cut to a new clip, reverse it, and so on. Gravity pulls the clips' speed around each hit." }));
   for (const t of r.triggers) {
     const others = names.filter(n => n !== t.name), tp = (k, v) => edit("set_trigger", ref, tkp, t.name, k, v);
     box.append(h("div", { class: "trig" },
@@ -1644,12 +1796,27 @@ function maskBox(p) {
   const box = h("div", { class: "maskbox" }, sect("Mask (in or out of a mask track's figures)"), check("masked", mk.on, v => put(v ? { on: true } : { on: false })));
   if (mk.on) box.append(h("div", { class: "fields" },
     field("Mask track", h("div", { class: "row nowrap" }, textField(mk.track, "the render's --masks", v => put({ track: v })),
-      h("button", { class: "ib", title: "choose its folder", onclick: async () => { const got = await ask("pick_file", "folder"); if (got && got.path) put({ track: got.path }); } }, "…"))),
+      h("button", { class: "ib", title: "choose its folder", onclick: async () => { const got = await ask("pick_file", "folder", false, "", mk.track || ""); if (got && got.path) put({ track: got.path }); } }, "…"))),
     field("Where", h("select", { onchange: e => put({ where: e.target.value }) }, mk.wheres.map(w => h("option", { value: w, selected: w === mk.where, text: w })))),
     field("Objects", textField(mk.objects, "all", v => put({ objects: v })), "ids, like 1, 3"),
     field("Grow (px)", numField(mk.grow, v => put({ grow: v }), { step: 1 })),
     field("Feather (px)", numField(mk.feather, v => put({ feather: v }), { min: 0, step: 1 }))));
   return box;
+}
+
+// the layer's own YAML, edited as text (its comments kept while it is as the scene wrote it)
+async function layerTextInto(box, ref) {
+  const n = pluginReq, got = await ask("layer_text", ref);
+  if (!got || n !== pluginReq) return;
+  const ta = h("textarea", { class: "codeedit", spellcheck: "false", rows: Math.min(18, got.text.split("\n").length + 1), "aria-label": "The layer's YAML" }, got.text);
+  const err = h("div", { class: "err" });
+  box.append(sect("The layer, as the scene says (but its bars)"), ta, err,
+    h("div", { class: "btnrow" }, h("button", { class: "btn sm", onclick: async () => {
+      const r = await call("set_layer_text", ref, ta.value).catch(e => ({ error: e.message }));
+      if (r && r.error) { err.textContent = r.error; return; }
+      err.textContent = ""; apply(r); toast("The layer, as written");
+    } }, "Apply the text"), h("span", { class: "hint", text: "anything without a control of its own; *name follows a signal" })));
+  $("yaml").textContent = got.text;
 }
 
 // ---------------------------------------------------------------------------
@@ -1677,7 +1844,11 @@ function inspKnob(box) {
     const sigSel = h("select", { "aria-label": "Use a signal", onchange: e => { k.link = e.target.value; renderInspector(); } },
       h("option", { value: "", text: "its own" }), d.signals.map(s => h("option", { value: s.name, selected: s.name === k.link, text: `*${s.name} · ${s.yaml.slice(0, 40)}` })));
     box.append(h("div", { class: "fields" }, field("Use a signal", sigSel, "it follows that one, wherever it changes"),
-      k.mode === "knob" ? field("Or name this one", textField(k.anchor, d.shared && d.shared.startsWith("&") ? d.shared.slice(1) : "a new signal", v => { k.anchor = v.trim(); }, "signal name"), d.shared && d.shared.startsWith("&") ? "it is a signal: what follows it changes too" : "others can follow it then") : null));
+      k.mode === "knob" ? field("Or name this one", d.shared && d.shared.startsWith("&")
+        ? h("input", { value: d.shared.slice(1), disabled: true, "aria-label": "signal name" })
+        : textField(k.anchor, "a new signal", v => { k.anchor = v.trim(); }, "signal name"),
+        d.shared && d.shared.startsWith("&") ? "it is a signal (its name stays): what follows it changes too" : "others can follow it then") : null));
+    box.append(h("div", { class: "hint", text: "A signal is a knob with a name (&name in the YAML): others follow it (*name) and move with it; edit it here and they all change." }));
   }
   const body = h("div", { class: "knobbody" });
   if (k.link) body.append(h("div", { class: "about", text: `It follows *${k.link}: ${(d.signals.find(s => s.name === k.link) || {}).yaml || ""}` }));
@@ -1686,7 +1857,7 @@ function inspKnob(box) {
   const cv = h("canvas", { class: "curve", id: "knobCurve", width: 600, height: 120 });
   box.append(body, sect("It writes"), yamlOut, err);
   if (k.mode === "knob" && !k.link) box.append(h("div", { class: "fxhead" }, h("span", { class: "sect", text: "Its curve" }),
-    h("select", { "aria-label": "Over", onchange: e => { k.span = e.target.value; checkKnob(); } }, [["view", "the bars in view"], ["here", "8 bars from the playhead"], ["song", "the whole song"]].map(([v, t]) => h("option", { value: v, selected: v === (k.span || "view"), text: t })))), cv);
+    h("select", { "aria-label": "Over", onchange: e => { k.span = e.target.value; checkKnob(); } }, [["around", "16 s around the playhead"], ["view", "the bars in view"], ["here", "8 bars from the playhead"], ["song", "the whole song"]].map(([v, t]) => h("option", { value: v, selected: v === (k.span || "around"), text: t })))), cv);
   box.append(h("div", { class: "btnrow" }, h("button", { class: "btn primary", onclick: applyKnob }, "Apply"), h("button", { class: "btn", onclick: closeKnob }, "Cancel")));
   checkKnob();
 }
@@ -1721,12 +1892,14 @@ function drawState(box, st, depth, onlySource, F, d) {
     if (src.kind === "track") t.append(field("Track", h("div", { class: "row nowrap" }, textField(src.track, "kick, snare", v => { src.track = v; checkKnob(); }, "track"),
       h("select", { "aria-label": "Add a track", onchange: e => { if (e.target.value) { src.track = src.track ? `${src.track}, ${e.target.value}` : e.target.value; renderInspector(); } } }, h("option", { value: "", text: "+" }), d.sources.tracks.map(x => h("option", { value: x, text: x }))))));
     if (src.kind === "audio") t.append(field("Audio", textField(src.audio, "stems/snare.wav", v => { src.audio = v; checkKnob(); })));
+    if (src.kind === "melody" && !src.score && d.sources.score) src.score = d.sources.score;
     if (src.kind === "melody") t.append(field("Transcription", textField(src.score || d.sources.score, "its folder", v => { src.score = v; checkKnob(); })), field("Voice", textField(src.voice, "any", v => { src.voice = v; checkKnob(); })));
     if (src.kind !== "audio") t.append(field("Notes", textField(src.notes, "all", v => { src.notes = v; checkKnob(); }), "MIDI numbers, like 36, 38"));
     const sigs = d.signals.filter(s => s.kind === "trigger");
     if (sigs.length && k_mode() === "knob") t.append(field("Or a who-plays signal", h("select", { onchange: e => { src.link = e.target.value || undefined; checkKnob(); } }, h("option", { value: "", text: "-" }), sigs.map(s => h("option", { value: s.name, selected: s.name === src.link, text: `*${s.name}` })))));
     box.append(t);
   } else if (f.source === "score" && src) {
+    if (!src.score && d.sources.score) src.score = d.sources.score;      // the song's transcription, written
     box.append(h("div", { class: "fields" }, field("Transcription", textField(src.score || d.sources.score, "its folder", v => { src.score = v; checkKnob(); })),
       field("Snap", h("select", { onchange: e => { src.snap = e.target.value; checkKnob(); } }, d.schema.snaps.map(x => h("option", { value: x, selected: x === (src.snap || "auto"), text: x }))))));
   } else if (f.source === "feature") {
@@ -1754,7 +1927,9 @@ function checkKnob() {
     const k = knobCtx; if (!k) return;
     if (k.link) { const y = $("knobYaml"); if (y) y.textContent = `*${k.link}`; return; }
     let t0 = 0, t1 = S.song.duration;
-    if ((k.span || "view") === "view") { const sc = $("scroll"); t0 = xToT(sc.scrollLeft); t1 = xToT(sc.scrollLeft + sc.clientWidth - HEAD_W); }
+    const span = k.span || "around";
+    if (span === "around") { const p = now(); t0 = Math.max(0, p - 8); t1 = Math.min(S.song.duration, t0 + 16); t0 = Math.max(0, t1 - 16); }
+    else if (span === "view") { const sc = $("scroll"); t0 = xToT(sc.scrollLeft); t1 = xToT(sc.scrollLeft + sc.clientWidth - HEAD_W); }
     else if (k.span === "here") { const b = barAt(now()); t0 = B[b - 1]; t1 = B[Math.min(NB(), b + 8)]; }
     const r = await call("knob_check", k.state, k.mode, t0, t1, 600).catch(e => ({ error: e.message }));
     if (knobCtx !== k) return;
@@ -1769,13 +1944,19 @@ function drawCurve(cv, r, t0, t1) {
   const g = cv.getContext("2d"); g.scale(d, d);
   g.fillStyle = "#0f1115"; g.fillRect(0, 0, w, hh);
   const X = t => (t - t0) / Math.max(1e-6, t1 - t0) * w;
-  const lo = Math.min(0, ...r.values), hi = Math.max(1e-6, ...r.values), Y = v => hh - 6 - (v - lo) / (hi - lo || 1) * (hh - 12);
-  g.fillStyle = "#2b313d"; for (const b of r.bars) g.fillRect(X(b), 0, 1, hh);
+  let lo = Math.min(...r.values), hi = Math.max(...r.values);                 // its own min and max
+  if (hi - lo < 1e-6) { lo -= 0.5; hi += 0.5; }
+  const Y = v => hh - 16 - (v - lo) / (hi - lo) * (hh - 26);
+  g.fillStyle = "#2b313d"; for (const b of r.bars) g.fillRect(X(b), 0, 1, hh - 12);
   g.fillStyle = "rgba(106,167,216,.6)"; for (const c of r.cuts || []) g.fillRect(X(c), hh - 10, 1, 10);
   g.strokeStyle = "#f0a04b"; g.lineWidth = 1.5; g.beginPath();
   r.times.forEach((t, i) => { const x = X(t), y = Y(r.values[i]); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke();
   const p = now(); if (p >= t0 && p <= t1) { g.fillStyle = "#e9e5db"; g.fillRect(X(p), 0, 1, hh); }
-  g.fillStyle = "#9097a7"; g.font = "10px 'IBM Plex Mono', monospace"; g.fillText(`${fmt(hi)}`, 4, 11); g.fillText(`${fmt(lo)}`, 4, hh - 3);
+  g.fillStyle = "#9097a7"; g.font = "10px 'IBM Plex Mono', monospace"; g.fillText(`max ${fmt(hi)}`, 4, 11); g.fillText(`min ${fmt(lo)}`, 4, hh - 15);
+  g.textAlign = "center";                        // the time along it
+  const step = [1, 2, 4, 8, 15, 30, 60, 120].find(s => (t1 - t0) / s <= 8) || 240;
+  for (let t = Math.ceil(t0 / step) * step; t <= t1; t += step) g.fillText(fmtTime(t).replace(/\.0$/, ""), Math.max(14, Math.min(w - 14, X(t))), hh - 2);
+  g.textAlign = "left";
 }
 async function applyKnob() {
   const k = knobCtx; if (!k) return;
@@ -1790,7 +1971,8 @@ let sigLight = null;          // {name, refs: Set of member ids}
 async function renderSignals(list) {
   const sigs = await ask("signals");
   if (!sigs || tab !== "signals") return;
-  list.replaceChildren();
+  list.replaceChildren(h("div", { class: "row nowrap" }, h("span", { class: "hint", text: "in the scene's order" }), h("span", { class: "spacer" }),
+    h("button", { class: "lnkbtn", onclick: () => renderSignals(list) }, "Refresh")));
   if (!sigs.length) list.append(h("div", { class: "empty-note", text: "No signals: a knob named in its editor (Or name this one) becomes one; others can follow it." }));
   for (const s of sigs) {
     const ids = new Set([s.def, ...s.uses].filter(Boolean).map(p => idOf(p.ref)));
@@ -1810,20 +1992,21 @@ async function renderProject() {
   const box = $("dockProject"), f = await ask("project_fields");
   if (!f) return;
   const ch = {}, set = (k, v) => { ch[k] = v; $("projSave").disabled = false; };
-  const pickBtn = (kind, k, inp) => inWebview ? h("button", { class: "ib", title: "choose", onclick: async () => { const got = await ask("pick_file", kind); if (got && got.path) { inp.value = got.path; set(k, got.path); } } }, "…") : null;
+  const pickBtn = (kind, k, inp, onGot = null) => inWebview ? h("button", { class: "ib", title: "choose", onclick: async () => { const got = await ask("pick_file", kind, false, "", inp.value || ""); if (got && got.path) { inp.value = got.path; if (onGot) onGot(got.path); else set(k, got.path); } } }, "…") : null;
   const fileRow = (label, k, kind, hint) => { const inp = h("input", { value: f[k], placeholder: hint, spellcheck: "false", onchange: e => set(k, e.target.value) }); return field(label, h("div", { class: "row nowrap" }, inp, pickBtn(kind, k, inp))); };
   const stems = f.stems.map(s => ({ ...s }));
   const stemBox = h("div", { class: "subrows" });
   const drawStems = () => stemBox.replaceChildren(...stems.map((s, i) => h("div", { class: "subrow" },
     h("input", { value: s.name, placeholder: "name", class: "small", onchange: e => { s.name = e.target.value; set("stems", stems); } }),
-    h("input", { value: s.path, placeholder: "its file", onchange: e => { s.path = e.target.value; set("stems", stems); } }),
+    (() => { const inp = h("input", { value: s.path, placeholder: "its file", onchange: e => { s.path = e.target.value; set("stems", stems); } });
+      return h("div", { class: "row nowrap grow" }, inp, pickBtn("audio", "stems", inp, p => { s.path = p; if (!s.name) s.name = p.split(/[\\/]/).pop().replace(/\.[^.]+$/, ""); drawStems(); set("stems", stems); })); })(),
     h("button", { class: "ib", "aria-label": "Remove", onclick: () => { stems.splice(i, 1); drawStems(); set("stems", stems); } }, "✕"))),
     h("button", { class: "lnkbtn", onclick: () => { stems.push({ name: "", path: "" }); drawStems(); } }, "+ stem"));
   drawStems();
   const syncOut = h("output", { class: "mono", text: `${f.sync_offset_ms} ms` });
   box.replaceChildren(h("div", { class: "projform" },
     h("div", { class: "fields" },
-      fileRow("Audio", "audio", "audio", "the song"), fileRow("MIDI", "midi", "any", "none: the bars from the song's beat"),
+      fileRow("Audio", "audio", "audio", "the song"), fileRow("MIDI", "midi", "midi", "none: the bars from the song's beat"),
       field("MIDI offset (s)", numField(f.midi_offset, v => set("midi_offset", v), { step: 0.001 })),
       field("Meter changes", textField(f.meter, "like 22:6/4,27:5/4", v => set("meter", v))),
       fileRow("Scene", "scene", "scene", "scenes/…yaml"),
@@ -1831,7 +2014,7 @@ async function renderProject() {
       field("Picture against sound", h("div", { class: "row nowrap" }, h("input", { type: "range", min: -500, max: 500, step: 5, value: f.sync_offset_ms, oninput: e => { syncOut.textContent = `${e.target.value} ms`; if (S) S.project.sync_offset_ms = +e.target.value; }, onchange: e => set("sync_offset_ms", +e.target.value) }), syncOut)),
       field("Stem separation", check("skip the AI separation", f.skip_separation, v => set("skip_separation", v)))),
     sect("The project's own stems"), stemBox,
-    h("div", { class: "btnrow" }, h("button", { class: "btn primary", id: "projSave", disabled: true, onclick: async () => {
+    h("div", { class: "btnrow" }, h("button", { class: "btn primary", id: "projSave", title: "writes the project file (as it is, when nothing changed)", onclick: async () => {
       const got = await ask("save_project", ch); if (got) { toast(got.reload && got.reload.length ? `Saved: loading ${got.reload.join(", ")} again` : "Saved"); renderProject(); } } }, "Save the project"),
       h("span", { class: "hint", text: f.path ? `into ${f.path}` : "into projects/<song>.yaml" }))));
 }
@@ -1842,20 +2025,45 @@ async function renderProject() {
 let finalJob = null;
 async function openRenderDialog() {
   if (!S) return;
+  renderBars = loop ? [loop[0], loop[1]] : null;
   const m = $("renderDlg"); m.hidden = false;
   await drawRenderDialog();
 }
+let renderBars = null;          // the dialog's own first / last bars
+let renderProblem = null;       // why the engine cannot render this project
 async function drawRenderDialog() {
-  const box = $("renderBody"), what = $("renderDlg").dataset.what || (loop ? "bars" : "song");
-  const r = await ask("render_settings", what === "bars" && loop ? loop[0] : null, what === "bars" && loop ? loop[1] : null);
+  const dlg = $("renderDlg"), box = $("renderBody"), what = dlg.dataset.what || (loop ? "bars" : "song");
+  if (!renderBars) renderBars = loop ? [loop[0], loop[1]] : [1, Math.min(NB(), 8)];
+  const [fb, lb] = renderBars;
+  const r = await ask("render_settings", what === "bars" ? fb : null, what === "bars" ? lb : null, what);
   if (!r) return;
-  finalJob = r.job;
+  finalJob = r.job; renderProblem = r.problem || null;
   const put = (k, v) => ask("set_render", { [k]: v }).then(x => x && drawRenderDialog());
-  const g = r.gpu;
-  box.replaceChildren(
-    h("div", { class: "row" }, h("label", { class: "toggle" }, h("input", { type: "radio", name: "rwhat", checked: what === "song", onchange: () => { $("renderDlg").dataset.what = "song"; drawRenderDialog(); } }), "the whole song"),
-      h("label", { class: "toggle" }, h("input", { type: "radio", name: "rwhat", checked: what === "bars", disabled: !loop, onchange: () => { $("renderDlg").dataset.what = "bars"; drawRenderDialog(); } }), loop ? `bars ${loop[0]}–${loop[1]}` : "bars (choose them on the ruler)")),
+  const g = r.gpu, radio = (v, label) => h("label", { class: "toggle" }, h("input", { type: "radio", name: "rwhat", checked: what === v, onchange: () => { dlg.dataset.what = v; drawRenderDialog(); } }), label);
+  const setBars = (a, b) => { a = Math.max(1, Math.min(NB(), Math.round(a))); b = Math.max(a, Math.min(NB(), Math.round(b))); renderBars = [a, b]; drawRenderDialog(); };
+  const startIn = textField("", "bar.beat, like 17.1", async v => { if (!v.trim()) return; const got = await ask("bar_beat", v.trim()); if (got) put("start_time", got.seconds); }, "start as bar.beat");
+  const start = r.start_time || 0, startBar = S ? barAt(start + 1e-4) : 1;
+  const folderRow = (k, label, kind, hint) => {
+    const inp = textField(r[k], "none", v => put(k, v), label);
+    return field(label, h("div", { class: "row nowrap" }, inp, inWebview ? h("button", { class: "ib", title: "choose a folder", onclick: async () => { const got = await ask("pick_file", kind, false, "", r[k] || ""); if (got && got.path) put(k, got.path); } }, "…") : null), hint);
+  };
+  const [w, hgt] = String(S.project.resolution || "854x480").split("x").map(Number);
+  const needsMasks = members.some(m => m.lane === "fg" && m.kind === "clip" && !m.place?.sam && !m.place?.cutout) || members.some(m => (catalogByKey.get(m.key) || {}).needs?.includes("masks"));
+  fill(box,
+    h("div", { class: "row" }, radio("song", "the whole song"),
+      radio("bars", "bars"), radio("start", "from a start")),
+    what === "bars" ? h("div", { class: "fields" },
+      field("First bar", numField(fb, v => setBars(v, Math.max(v, lb)), { min: 1, max: NB(), step: 1 })),
+      field("Last bar", numField(lb, v => setBars(Math.min(fb, v), v), { min: 1, max: NB(), step: 1 })),
+      field("", h("button", { class: "btn sm", disabled: !loop, onclick: () => loop && setBars(loop[0], loop[1]) }, loop ? `the chosen ${loop[0]}–${loop[1]}` : "choose bars on the ruler"))) : null,
+    what === "start" ? h("div", { class: "fields" },
+      field("Start (s)", numField(start, v => put("start_time", Math.max(0, v)), { min: 0, step: 0.5 }), `bar ${startBar} · ${fmtTime(start)}`),
+      field("Or as bar.beat", h("div", { class: "row nowrap" }, startIn,
+        h("button", { class: "btn sm", title: "the start of the bar the playhead is in", onclick: async () => { const got = await ask("bar_beat", "", now()); if (got) put("start_time", got.seconds); } }, "← playhead"))),
+      field("Bars", numField(r.bars, v => put("bars", Math.max(0, Math.round(v))), { min: 0, step: 1 }), "0: to the end")) : null,
     h("div", { class: "about mono", text: `→ ${r.where}` }),
+    h("div", { class: "about", text: `${w}×${hgt} at ${r.fps} fps · ${r.codec}${S.project.resolution ? "" : " (the default size)"} · the toolbar's Video sets the size` }),
+    r.problem ? h("div", { class: "about", style: "color:var(--danger)", text: r.problem }) : null,
     h("div", { class: "about", style: g && g.used_mb / g.total_mb > 0.6 ? "color:var(--accent)" : "", text: g ? `GPU ${g.name}: ${g.util}% busy, ${Math.round(g.used_mb / 1024)} of ${Math.round(g.total_mb / 1024)} GB in use` : "no NVIDIA GPU found" }),
     r.dirty ? h("div", { class: "about", style: "color:var(--accent)", text: "The scene has unsaved changes: Render saves it first (the engine reads the file)." }) : null,
     h("div", { class: "fields" },
@@ -1865,15 +2073,14 @@ async function drawRenderDialog() {
       field("Clip order", h("select", { onchange: e => put("order", e.target.value) }, r.choices.order.map(c => h("option", { value: c, selected: c === r.order, text: c })))),
       field("Seed", numField(r.seed ?? "", v => put("seed", Math.round(v)), { step: 1 })),
       field("Clip cache", numField(r.cache_size, v => put("cache_size", Math.round(v)), { min: 1, step: 1 })),
-      field("Start (s)", numField(r.start_time, v => put("start_time", v), { min: 0, step: 0.5 }), "the whole song from here"),
-      field("Clips folder", textField(r.clips_dir, "none", v => put("clips_dir", v))),
-      field("Masks folder", textField(r.masks, "none", v => put("masks", v)))),
+      folderRow("clips_dir", "Clips folder", "folder", "the montage's clips (a scene with clips needs it)"),
+      folderRow("masks", "Masks folder", "masks", needsMasks ? "a cast, a cutout by mask track or a mask: needs it" : "SAM2 mask tracks (for the cast and mask:)")),
     h("div", { class: "row" }, check("turn wide clips", r.turn_wide, v => put("turn_wide", v)), check("AI stems", r.stems, v => put("stems", v)), check("profile", r.profile, v => put("profile", v)),
       check("gravity override", r.gravity.enabled, v => put("gravity.enabled", v))),
     r.gravity.enabled ? h("div", { class: "fields" }, ["peak", "floor", "radius", "curve"].map(k => field(k, numField(r.gravity[k], v => put(`gravity.${k}`, v), { step: 0.05 })))) : null,
     h("div", { class: "progress wide", id: "finalProg" }, h("i", { id: "finalBar" })), h("div", { class: "about", id: "finalText" }),
     h("div", { class: "btnrow" },
-      h("button", { class: "btn primary", id: "finalGo", onclick: async () => { const got = await ask("render_final", what === "bars" && loop ? loop[0] : null, what === "bars" && loop ? loop[1] : null); if (got && got.saved) toast(`Saved ${got.saved} first`); } }, "Render"),
+      h("button", { class: "btn primary", id: "finalGo", disabled: !!r.problem, onclick: async () => { const got = await ask("render_final", what === "bars" ? fb : null, what === "bars" ? lb : null, what); if (got && got.saved) toast(`Saved ${got.saved} first`); } }, "Render"),
       h("button", { class: "btn danger", id: "finalStop", onclick: () => ask("stop_final") }, "Stop"),
       h("button", { class: "btn", id: "finalOpen", onclick: () => ask("open_output", "video") }, "Open the video"),
       h("button", { class: "btn", id: "finalFolder", onclick: () => ask("open_output", "folder") }, "Show it in its folder"),
@@ -1884,14 +2091,16 @@ function showFinal(j) {
   finalJob = j || finalJob;
   const jb = finalJob || {};
   const running = !!jb.running;
-  $("bRenderVideo").classList.toggle("busy", running);
-  if (!$("finalText")) return;
   const frac = jb.total ? jb.done / jb.total : 0, spent = jb.started ? Date.now() / 1000 - jb.started : 0;
+  $("bRenderVideo").classList.toggle("busy", running);
+  $("bRenderVideo").textContent = running ? (jb.total ? `Rendering ${Math.round(frac * 100)}%` : "Rendering: starting") : "Render video…";
+  if (!$("finalText")) return;
   const left = running && frac > 0.01 ? spent / frac * (1 - frac) : null;
   $("finalBar").style.width = `${Math.round(frac * 100)}%`;
-  $("finalText").textContent = running ? `frame ${jb.done || 0} of ${jb.total || "?"}${left != null ? ` · about ${fmtTime(left)} left` : ""}${jb.line ? ` · ${jb.line.slice(0, 80)}` : ""}`
+  $("finalText").textContent = running ? (jb.total ? `${Math.round(frac * 100)}% · frame ${jb.done || 0} of ${jb.total}${left != null ? ` · about ${fmtTime(left)} left` : ""}` : "starting: reading the song and the clips") + (jb.line ? ` · ${jb.line.slice(0, 80)}` : "")
+    : jb.result === "stopped" && jb.total ? `stopped at frame ${jb.done || 0}/${jb.total}`
     : jb.result ? `${jb.result}${jb.out ? `: ${jb.out.split(/[\\/]/).pop()}` : ""}` : "";
-  $("finalGo").disabled = running; $("finalStop").disabled = !running;
+  $("finalGo").disabled = running || !!renderProblem; $("finalStop").disabled = !running;
   $("finalOpen").disabled = $("finalFolder").disabled = jb.result !== "done";
 }
 
@@ -1921,8 +2130,9 @@ function showPlayer() {
   const c = clipChosen;
   box.hidden = false;
   const url = proxyOf[c.url] || c.url;
-  const v = h("video", { src: url, playsinline: true, loop: false, preload: "auto", draggable: "true", title: "drag it onto a lane: it goes there as long as it plays" });
-  v.muted = !clipSound;
+  const v = c.image ? h("img", { src: url, draggable: "true", alt: c.name, title: "an image: drag it onto a lane (4 bars)" })
+    : h("video", { src: url, playsinline: true, loop: false, preload: "auto", draggable: "true", title: "drag it onto a lane: it goes there as long as it plays" });
+  v.muted = !clipSound || playing;
   v.addEventListener("loadedmetadata", () => { v.currentTime = c.from || 0; v.play().catch(() => { }); });
   v.addEventListener("ended", () => { v.currentTime = c.from || 0; v.play().catch(() => { }); });
   v.addEventListener("dragstart", e => { dragItem = { type: "clip", path: c.path, name: c.name, label: c.name, from: c.from || 0 }; e.dataTransfer.setData("text/plain", c.path); e.dataTransfer.effectAllowed = "copy"; });
@@ -1931,12 +2141,12 @@ function showPlayer() {
   const slider = h("input", { type: "range", min: 0, max: Math.max(0.01, c.duration || 0), step: 0.01, value: c.from || 0, "aria-label": "From (s)",
     oninput: e => { c.from = +e.target.value; out.textContent = `${fmt(c.from)} s`; v.currentTime = c.from; },
     onchange: () => { pickClip(c.path, c.from); } });
-  box.replaceChildren(
+  fill(box,
     h("div", { class: "pscreen" }, v, c.proxy === "making" && !proxyOf[c.url] ? h("div", { class: "pnote", text: "making a proxy the page can play…" }) : null),
-    h("div", { class: "pinfo", text: `${c.name} · ${fmt(c.duration || 0)} s · ${c.mask ? `mask: ${c.mask}` : "no mask track"}` }),
-    h("div", { class: "row nowrap" }, h("span", { class: "tlabel", text: "from" }), slider, out),
+    h("div", { class: "pinfo", text: `${c.name} · ${c.image ? "an image" : `${fmt(c.duration || 0)} s`} · ${c.mask ? `mask: ${c.mask}` : "no mask track"}`, title: c.path }),
+    c.image ? null : h("div", { class: "row nowrap" }, h("span", { class: "tlabel", text: "from" }), slider, out),
     h("div", { class: "row" },
-      check("sound", clipSound, on => { clipSound = on; v.muted = !on; }),
+      c.image ? null : check("sound", clipSound, on => { clipSound = on; v.muted = !on || playing; }),
       h("button", { class: "lnkbtn", title: "the SAM2 cutout FX on its member in the FG (its seeds)", onclick: async () => {
         const got = await ask("sam_for_clip", c.path); if (!got) return; if (got.lanes) apply(got); openSam(got.fx, got.new); } }, "Cut it out (SAM2)"),
       h("button", { class: "lnkbtn", onclick: () => { clipChosen = null; showPlayer(); } }, "✕")));
@@ -1948,6 +2158,7 @@ function renderClipTab(list) {
   list.append(h("div", { class: "row nowrap folderrow" }, folderIn,
     h("button", { class: "ib", title: "choose a folder (any drive)", onclick: async () => { const got = await ask("pick_file", "folder"); if (got && got.path) loadClipList(got.path); } }, "…")));
   if (!clipList.length) { list.append(h("div", { class: "empty-note", text: clipFolder ? "No clips here (or drop a folder from the Explorer)." : "Choose a folder of clips (or drop one from the Explorer)." })); return; }
+  list.append(h("div", { class: "hint", text: `${clipList.length} clip${clipList.length === 1 ? "" : "s"} in ${clipFolder.split(/[\\/]/).filter(Boolean).pop() || clipFolder}${q ? ` · ${clipList.filter(c => c.name.toLowerCase().includes(q)).length} match` : ""}`, title: clipFolder }));
   for (const c of clipList.filter(c => c.name.toLowerCase().includes(q)).slice(0, 400)) {
     const it = { type: "clip", path: c.path, name: c.name, label: c.name.replace(/\.[^.]+$/, ""), url: c.url, from: 0 };
     const th = thumbs.get(c.url), len = clipLens[c.url];
@@ -2127,6 +2338,86 @@ async function closeSam(ok) {
 }
 
 // ---------------------------------------------------------------------------
+// A catalog entry: what it is and its demo (core/demos.py), made on asking
+// ---------------------------------------------------------------------------
+async function inspEntry(box, key) {
+  const e = await ask("entry", key);
+  if (!e || !(sel && sel.type === "entry" && sel.key === key)) return;
+  $("inspTitle").textContent = e.kind;
+  const d = e.demo;
+  if (d.url) {
+    const v = h("video", { src: d.url, muted: true, loop: true, autoplay: true, playsinline: true, class: "demo", title: "click it: bigger" });
+    v.muted = true;
+    v.addEventListener("click", () => showDemoBig(e, d.url));
+    box.append(v);
+  }
+  const states = { rendering: "making its demo…", stale: "the layer changed since this demo", missing: "no demo yet",
+    failed: `its demo failed: ${d.error || "see the log"}`, ready: "click it: bigger" };
+  box.append(h("div", { class: "row" }, h("span", { class: "about", style: d.state === "failed" ? "color:var(--danger)" : "", text: states[d.state] || d.state }),
+    d.state === "missing" || d.state === "failed" || d.state === "stale" ? h("button", { class: "btn sm", title: "on the GPU: a few seconds, minutes for the 3D fractals",
+      onclick: async () => { const r = await ask("make_demo", key); if (r) { toast(`${e.label}: making its demo`); renderInspector(); } } }, d.state === "stale" ? "Make it again" : "Make demo") : null));
+  box.append(h("div", { class: "ptitle" }, h("h3", { text: e.label }), h("div", { class: "src", text: `${e.kind} · ${e.category}` })));
+  if (e.about) box.append(h("div", { class: "about", text: e.about }));
+  const notes = [e.takes_input ? "* can also take the picture below as its input" : null,
+    e.needs.includes("masks") ? "needs a mask track (SAM2)" : null, e.needs.includes("cuts") ? "works at the clip montage's cuts" : null].filter(Boolean);
+  for (const n of notes) box.append(h("div", { class: "hint", text: n }));
+  if (e.file) box.append(h("div", { class: "src mono small", text: e.file }));
+  if (e.kind === "FX") box.append(h("div", { class: "btnrow" }, h("button", { class: "btn", onclick: () => addFx(["master"], key) }, "Add to the master")),
+    h("div", { class: "hint", text: "or drag across an FX track (a lane's, the master's); or right-click a block: its own" }));
+  else box.append(h("div", { class: "hint", text: "drag across the BG or the FG to put it there" }));
+  box.append(sect(`Parameters (${e.params.length}; ~ the music can move it)`),
+    h("div", { class: "plist2" }, e.params.map(p => h("div", { class: "mono small", title: p.about || "" }, `${p.knob ? "~ " : "  "}${p.name} = ${p.default == null ? "-" : p.default}`))));
+}
+function showDemoBig(e, url) {
+  const m = $("modal");
+  $("modalTitle").textContent = `demo · ${e.label}`; $("modalText").hidden = true; $("modalInput").hidden = true;
+  const v = h("video", { src: url, muted: true, loop: true, autoplay: true, playsinline: true, class: "demobig" });
+  v.muted = true;
+  $("modalBtns").replaceChildren(h("button", { class: "btn primary", onclick: () => { m.hidden = true; $("modalBig").remove(); } }, "Close"));
+  m.querySelector(".modalcard").insertBefore(h("div", { id: "modalBig" }, v), $("modalBtns"));
+  m.hidden = false;
+}
+
+// ---------------------------------------------------------------------------
+// Repaint: a rendered video repainted frame by frame through a ComfyUI workflow (a dock tab)
+// ---------------------------------------------------------------------------
+let repaintJob = {};
+async function renderRepaint() {
+  const box = $("dockRepaint"), r = await ask("repaint_settings");
+  if (!r) return;
+  repaintJob = r.job || {};
+  const put = (k, v) => ask("set_repaint", { [k]: v }).then(x => x && renderRepaint());
+  const pickBtn = inWebview ? h("button", { class: "ib", title: "choose a video", onclick: async () => { const got = await ask("pick_file", "video", false, "", r.video || ""); if (got && got.path) put("video", got.path); } }, "…") : null;
+  const check = h("div", { class: "about", id: "repaintCheck" });
+  box.replaceChildren(h("div", { class: "projform" },
+    h("div", { class: "about", text: "Every frame of a render repainted through a ComfyUI workflow (img2img / edit). It uses the GPU, and ComfyUI's queue is shared: check it first." }),
+    h("div", { class: "fields" },
+      field("Video", h("div", { class: "row nowrap" }, h("input", { value: r.video, placeholder: "a render (the last one comes here)", spellcheck: "false", onchange: e => put("video", e.target.value) }), pickBtn)),
+      field("It starts in the song at (s)", numField(r.start, v => put("start", v), { min: 0, step: 0.1 })),
+      field("Workflow", h("select", { onchange: e => put("workflow", e.target.value) }, h("option", { value: "", text: "(the scene's)" }), r.workflows.map(w => h("option", { value: w, selected: w === r.workflow, text: w })))),
+      field("Scene", h("select", { onchange: e => put("scene", e.target.value) }, r.scenes.map(sc => h("option", { value: sc, selected: sc === r.scene, text: sc })))),
+      field("Prompt", textField(r.prompt, "empty: the scene's prompts (e.g. make it claymation)", v => put("prompt", v))),
+      field("FPS", numField(r.fps, v => put("fps", v), { min: 1, max: 60, step: 1 })),
+      field("Seconds", numField(r.seconds, v => put("seconds", v), { min: 0, step: 1 }), "0: the whole video")),
+    r.output ? h("div", { class: "about mono", text: `→ ${r.output}` }) : null,
+    h("div", { class: "btnrow" },
+      h("button", { class: "btn", onclick: async () => { check.textContent = "asking ComfyUI…"; const x = await ask("repaint_check"); check.textContent = x ? x.text : ""; } }, "Check ComfyUI / GPU"),
+      h("button", { class: "btn primary", id: "repaintGo", onclick: () => ask("repaint_start") }, "Repaint"),
+      h("button", { class: "btn danger", id: "repaintStop", onclick: async () => { const x = await ask("repaint_stop"); if (x) toast(x.text); } }, "Stop")),
+    check, h("div", { class: "progress wide" }, h("i", { id: "repaintBar" })), h("div", { class: "about", id: "repaintText" })));
+  showRepaint(repaintJob);
+}
+function showRepaint(j) {
+  repaintJob = j || repaintJob;
+  if (!$("repaintText")) return;
+  const r = repaintJob, frac = r.total ? r.done / r.total : 0;
+  const spent = r.started ? Date.now() / 1000 - r.started : 0, left = r.running && frac > 0.01 ? spent / frac * (1 - frac) : null;
+  $("repaintBar").style.width = `${Math.round(frac * 100)}%`;
+  $("repaintText").textContent = r.running ? `frame ${r.done || 0} of ${r.total || "?"}${left != null ? ` · about ${fmtTime(left)} left` : ""}${r.line ? ` · ${r.line.slice(0, 90)}` : ""}` : r.result || "";
+  $("repaintGo").disabled = !!r.running;          // Stop at any time: it also clears ComfyUI's queue
+}
+
+// ---------------------------------------------------------------------------
 // Meters: the MIDI tracks, and the chosen block's knobs
 // ---------------------------------------------------------------------------
 function buildMeters() {
@@ -2248,7 +2539,7 @@ async function openProject(source) {
   log("out", `open ${name}`);
   loadGen++;
   S = null; members = []; montage = []; pins = {}; sel = null; loop = null; engine = null; peaks = null; audioBuf = null; audioUrl = null;
-  picked = null; rowsOf = {}; groups = {}; has = {}; board = {}; showPicked();
+  picked = null; pickedFx = null; rowsOf = {}; groups = {}; has = {}; board = {}; montageBars = []; lastNote = ""; showPicked();
   knobs.clear(); thumbs.clear(); shaders.clear(); dirty = false; savedAt = "";
   for (const v of vids.values()) { v.el.removeAttribute("src"); v.el.load(); }
   vids.clear();
@@ -2275,7 +2566,11 @@ function onOpened(st) {
   buildMeters(); renderBrowser(); renderTimeline(); showResolution();
   loadClipList(st.clips_dir || "");
   if (st.song.audio_url) loadAudio(st.song.audio_url);
-  if (st.project.converted) log("warn", "a flat scene: grouped into BG / FG / master; Save writes it so");
+  if (st.project.converted) {
+    const say = "A flat scene (no BG / FG groups): it is shown grouped into BG, FG and the master; Save writes it so.";
+    log("warn", say); toast(say); lastNote = "a flat scene: Save writes it grouped";
+  }
+  showStatus();
   if (st.load) { steps = st.load; renderSteps(); }
 }
 const STEP_ICON_LABEL = { waiting: "waiting", running: "running", done: "done", failed: "failed", skipped: "skipped" };
@@ -2347,10 +2642,12 @@ async function newFromAudio() {
 // ---------------------------------------------------------------------------
 async function save() {
   if (!S) return null;
-  const r = await ask("save");
-  if (!r) { showSaveState("NOT saved: see the log", true); return null; }
+  let r = null;
+  try { r = await call("save"); } catch (e) { r = { error: e.message }; }
+  if (!r || r.error) { const why = (r && r.error) || "see the log"; showSaveState(`NOT saved: ${why}`.slice(0, 90), true); toast(`Not saved: ${why}`, true); log("err", `not saved: ${why}`); return null; }
   apply(r);
   $("yaml").textContent = r.text;
+  showSaveState("Saved!"); setTimeout(() => showSaveState(), 1500);
   toast(`Saved ${r.path}`);
   return r;
 }
@@ -2384,7 +2681,9 @@ $("search").addEventListener("input", () => { if (tab === "clips") loadClipList(
 function showDock(which) {
   document.querySelectorAll(".dock .tab").forEach(b => b.setAttribute("aria-selected", b.dataset.dock === which));
   $("dockLog").hidden = which !== "log"; $("dockYaml").hidden = which !== "yaml"; $("dockProject").hidden = which !== "project";
+  $("dockRepaint").hidden = which !== "repaint";
   if (which === "project") renderProject();
+  if (which === "repaint") renderRepaint();
   $("logFilter").hidden = which !== "log";
   if (which === "log") { errorsUnseen = 0; showErrBadge(); }
 }
@@ -2430,6 +2729,8 @@ $("bSaveMenu").addEventListener("click", () => menu($("bSaveMenu"), [
   { label: "Save as…", on: saveAs, disabled: !S }, { label: "Reload from disk", hint: "the undo history goes", on: reloadScene, disabled: !S }]));
 $("bProject").addEventListener("click", projectMenu);
 $("bRender").addEventListener("click", startRender);
+$("exactN").value = String(exactN);
+$("exactN").addEventListener("change", e => { exactN = +e.target.value; try { localStorage.setItem("arc.exactN", String(exactN)); } catch (err) { /* no storage */ } updateLoopChip(); });
 $("bRenderVideo").addEventListener("click", openRenderDialog);
 $("bStop").addEventListener("click", () => call("stop_render"));
 $("viewLive").addEventListener("click", () => setView("live"));

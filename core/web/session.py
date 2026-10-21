@@ -26,7 +26,7 @@ import yaml
 from core.web.clips import Clips
 from core.web.edits import Edits
 from core.web.knobs import KnobEditor
-from core.web.plugin import Plugin
+from core.web.plugin import LayerText, Plugin
 from core.web.project import ProjectEdits
 from core.web.util import (PREVIEW_RES, RESOLUTIONS, copy_keeping_signals, cue_key, num, preview_res, resolve,  # noqa: F401
                            shader_live, shown_path, yaml_text)
@@ -34,6 +34,27 @@ from core.web.util import (PREVIEW_RES, RESOLUTIONS, copy_keeping_signals, cue_k
 KNOB_HZ = 30                       # a knob's value is sampled this often over the song
 UNDO_MAX = 200
 LANES = ("master", "fg", "fgfx", "bg", "bgfx")
+
+
+def _said(v) -> str:
+    """A knob in words (what moves it, around what, by how much)."""
+    from core.knob_forms import describe
+    from core.scene_doc import plain
+    try:
+        return describe(plain(v))
+    except Exception:
+        return ""
+
+
+def _sam_state(clip, fx) -> str:
+    """The SAM2 cutout's line: auto or seeded, cut out already or at the next render."""
+    from core.scene_doc import plain
+    from core.video import sam_cutout
+    cfg = sam_cutout.config(plain(fx))
+    seeds = cfg["seeds"]
+    how = "SAM2 finds the objects" if seeds == "auto" else f"{len(seeds.get('objects') or [])} object(s) seeded"
+    done = sam_cutout.cached(str(resolve(clip)), cfg) if clip else None
+    return f"cut out by SAM2 ({how}): " + ("cached, the renders read it" if done else "made at the next exact preview or render, once")
 
 
 def comment_names(seq, first_lead=None) -> list:
@@ -85,7 +106,7 @@ def _name_from_comments(pairs: list, seq, first_lead=None) -> None:
                 base["name"] = name
 
 
-class Session(Edits, KnobEditor, Plugin, ProjectEdits, Clips):
+class Session(Edits, KnobEditor, Plugin, LayerText, ProjectEdits, Clips):
     """The open project: its song and bars, its scene, the arrangement being edited."""
 
     def __init__(self, media, events):
@@ -134,7 +155,14 @@ class Session(Edits, KnobEditor, Plugin, ProjectEdits, Clips):
         with self.lock:
             self.proj = dict(proj)
             self.proj_path = path
-            self.fps = int((proj.get("render") or {}).get("fps") or 30)
+            self.fps = int((proj.get("render") or {}).get("fps") or 24)        # the studio's default
+            if not proj.get("scene") and (ROOT / "scenes" / "default.yaml").is_file():
+                self.proj["scene"] = "scenes/default.yaml"                   # as the studio opens one
+                proj = self.proj
+            clips = self.proj.get("clips") or {}
+            if clips.get("dir") and clips.get("seed") is None:                 # one montage everywhere this session
+                import random
+                self.proj["clips"] = {**clips, "seed": random.randint(1, 2 ** 31 - 1)}
             self.audio = resolve(proj["audio"]) if proj.get("audio") else None
             self.scene = resolve(proj["scene"]) if proj.get("scene") else None
 
@@ -220,11 +248,18 @@ class Session(Edits, KnobEditor, Plugin, ProjectEdits, Clips):
             gi = self.groups()
             return {"lanes": members, "rows": rows, "pins": self.pins(), "undo": len(self.undo),
                     "redo": len(self.redo), "montage": self.montage, "dirty": self.dirty, "saved_at": self.saved_at,
+                    "montage_bars": self._montage_bars(),
                     "has": {"BG": "BG" in gi, "FG": "FG" in gi,
                             "clips": any(s.get("source", "clips") == "clips" for s in self.specs())},
                     "groups": {name: {"spill": bool(self.specs()[i].get("spill")),
                                       "fx": len(self.specs()[i].get("fx") or [])} for name, i in gi.items()},
                     "board": {"links": (self.board_links or {}).get("from"), "fx": (self.board_fx or {}).get("from")}}
+
+    def _montage_bars(self) -> list:
+        """The bars the montage plays (its layer's own ``bars:``), or none: all of them."""
+        from core import arrangement as arr
+        spec = next((s for s in self.specs() if s.get("source", "clips") == "clips"), None)
+        return [[b.first, b.last] for b in arr.windows_of(spec)] if spec else []
 
     def song(self) -> dict:
         with self.lock:
@@ -241,6 +276,7 @@ class Session(Edits, KnobEditor, Plugin, ProjectEdits, Clips):
                     "duration": self.dur, "bars": db, "bar_beats": bb[:n],
                     "beats": [num(x) for x in (g.beats if g.beats is not None else [])],
                     "bpm": num(g.bpm), "meter": f"{g.time_signature[0]}/{g.time_signature[1]}",
+                    "bar_seconds": num(g.bar_duration),
                     "from_midi": bool(self.proj.get("midi")), "density": [round(c / top, 3) for c in counts],
                     "markers": self.markers()}
 
@@ -363,14 +399,17 @@ class Session(Edits, KnobEditor, Plugin, ProjectEdits, Clips):
         if kind == arr.CLIP:
             for key, default in (("x", 0.5), ("y", 0.5), ("scale", 1.0)):
                 v = spec.get(key, default)
-                place[key] = num(v) if isinstance(v, (int, float)) else {"knob": yaml_text(v)}
+                place[key] = num(v) if isinstance(v, (int, float)) else {"knob": yaml_text(v), "said": _said(v)}
             cut = spec.get("cutout")
             track = cut.get("track") if isinstance(cut, dict) else cut
             found = arr.find_mask_track(own) if own and not track else None
             at = spec.get("at") if isinstance(spec.get("at"), (list, tuple)) and len(spec.get("at")) == 2 else (0.5, 0.5)
             for key, default in (("x", at[0]), ("y", at[1])):
                 v = spec.get(key, default)
-                place[key] = num(v) if isinstance(v, (int, float)) else {"knob": yaml_text(v)}
+                place[key] = num(v) if isinstance(v, (int, float)) else {"knob": yaml_text(v), "said": _said(v)}
+            sam_j = next((j for j, f in enumerate(fx) if f.get("source") == arr.SAM), None)
+            if sam_j is not None:
+                place["sam_state"] = _sam_state(own, fx[sam_j])
             if lane == "fg":                                   # what the live preview draws of a character
                 place["cut"] = self.cutouts.describe(spec)
                 place["hold"] = num(spec.get("hold", 0.0)) if isinstance(spec.get("hold", 0.0), (int, float)) else 0.0
@@ -383,7 +422,9 @@ class Session(Edits, KnobEditor, Plugin, ProjectEdits, Clips):
                          drop=bool(isinstance(cut, dict) and cut.get("drop")),
                          sam=next((j for j, f in enumerate(fx) if f.get("source") == arr.SAM), None),
                          mask_track=found)
+        rgb = arr.colour(own or arr.label_of(spec))
         return {"ref": ref, "lane": lane, "kind": {"clip": "clip", "generator": "gen", "fx": "fx"}[kind],
+                "colour": "#%02x%02x%02x" % rgb,
                 "label": arr.label_of(spec), "name": spec.get("name") or "",
                 "default_label": arr.label_of({k: v for k, v in spec.items() if k != "name"}),
                 "key": entry.key if entry else spec.get("source"), "about": entry.about if entry else "",
@@ -449,8 +490,10 @@ class Session(Edits, KnobEditor, Plugin, ProjectEdits, Clips):
         return {}
 
     # -- the montage (the composer's dry run) --------------------------------------------
-    def montage_inputs(self):
-        """What resolving the montage needs, copied under the lock: (generation, cfg)."""
+    def video_cfg(self) -> dict:
+        """The scene's video settings as the render resolves them (the studio's
+        ``_effective_video_cfg``): the arrangement as it is now, the project's clip order,
+        gravity override, seed and pinned bars."""
         from core.scene_doc import plain
         with self.lock:
             cfg = copy.deepcopy(self.video)
@@ -458,8 +501,22 @@ class Session(Edits, KnobEditor, Plugin, ProjectEdits, Clips):
             clips = self.proj.get("clips") or {}
             if clips.get("order") and clips["order"] != "(scene)":
                 cfg["clip_order"] = clips["order"]
-            if clips.get("seed") is not None:
+            g = clips.get("gravity") or {}
+            if g.get("enabled"):
+                for spec in (cfg.get("triggers") or {}).values():
+                    if isinstance(spec, dict) and "gravity" in spec:
+                        spec["gravity"] = {**dict(spec["gravity"]), **{k: float(g[k]) for k in
+                                                                       ("peak", "floor", "radius", "curve") if k in g}}
+            if "seed" not in cfg and clips.get("seed") is not None:
                 cfg["seed"] = clips["seed"]
+            if clips.get("overrides"):
+                cfg["overrides"] = {**(cfg.get("overrides") or {}), **{int(k): v for k, v in clips["overrides"].items()}}
+            return cfg
+
+    def montage_inputs(self):
+        """What resolving the montage needs, copied under the lock: (generation, cfg)."""
+        with self.lock:
+            cfg = self.video_cfg()
             self.montage_gen += 1
             return self.montage_gen, cfg
 
@@ -473,7 +530,9 @@ class Session(Edits, KnobEditor, Plugin, ProjectEdits, Clips):
         start = float(self.grid.start_offset or 0.0)
         segs, _, _ = resolve_song(self.lib, self.grid, self.notes, cfg, self.fps, max(0.0, start), self.dur)
         paths = list(self.lib.paths)
+        from core import arrangement as arr
         out = [{"t0": num(s.t0), "t1": num(s.t1), "name": s.clip_name, "from": num(s.src_t0), "dir": s.direction,
+                "colour": "#%02x%02x%02x" % arr.colour(str(paths[s.clip_idx])) if 0 <= s.clip_idx < len(paths) else None,
                 "proxy": self.proxies.status(paths[s.clip_idx]) if 0 <= s.clip_idx < len(paths) else None,
                 "path": str(paths[s.clip_idx]) if 0 <= s.clip_idx < len(paths) else None,
                 "url": self.media.url(paths[s.clip_idx]) if 0 <= s.clip_idx < len(paths) else None}
