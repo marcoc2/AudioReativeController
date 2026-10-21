@@ -393,7 +393,8 @@ def test_a_new_scene_gets_a_safe_name(tmp_path):
     path = _new_scene_path("me diz: ideia!", str(tmp_path))
     assert path.name == "me_diz_ideia.yaml"
     path.write_text(NEW_SCENE.format(name=path.stem), encoding="utf-8")
-    assert yaml.safe_load(path.read_text())["video"]["layers"] == [{"source": "clips"}]
+    assert [(l["source"], l["name"], l["layers"]) for l in yaml.safe_load(path.read_text())["video"]["layers"]] == [
+        ("group", "BG", []), ("group", "FG", [])]                    # empty: no clip montage
     with pytest.raises(ValueError, match="already exists"):
         _new_scene_path("me_diz_ideia", str(tmp_path))
     with pytest.raises(ValueError):

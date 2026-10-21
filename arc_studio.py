@@ -2446,7 +2446,7 @@ def _clip_preview_frames(start_t: float, n_frames: int, layers=None) -> list:
         video_cfg = {**video_cfg, "layers": layers}
     pw, ph = _preview_size(S.width, S.height)     # the render's aspect, letterboxed
     layers = video_cfg.get("layers")
-    uses_clips = not layers or any((l or {}).get("source", "clips") == "clips" for l in layers)
+    uses_clips = layers is None or any((l or {}).get("source", "clips") == "clips" for l in layers)
     comp = None
     if uses_clips:
         if not S.clips_dir:
@@ -2739,7 +2739,7 @@ def _render_problem() -> str:
             with open(S.scene_path, encoding="utf-8") as f:
                 vc = (yaml.safe_load(f) or {}).get("video", {})
             layers = vc.get("layers")
-            needs_clips = not layers or any(
+            needs_clips = layers is None or any(
                 (l or {}).get("source", "clips") == "clips" for l in layers)
         except Exception:
             pass

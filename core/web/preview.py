@@ -44,7 +44,7 @@ def build_stack(s, start_t: float, end_t: float, check=lambda: None, tell=lambda
     w, h = (int(x) for x in res.split("x"))
     cfg = s.video_cfg()
     layers = cfg.get("layers")
-    uses_clips = not layers or any((l or {}).get("source", "clips") == "clips" for l in layers)
+    uses_clips = layers is None or any((l or {}).get("source", "clips") == "clips" for l in layers)
     comp = None
     tell("loading the clips" if uses_clips else "building the layers")
     if uses_clips:
@@ -90,7 +90,7 @@ class ExactPreview:
             return "the audio features are loading"
         uses_clips = any(sp.get("source", "clips") == "clips" for sp in s.specs())
         if uses_clips and s.clips_dir() is None:
-            return "the scene uses clips: the project needs its clips folder"
+            return "the scene has a clip montage: choose the clips folder (Render video…), or remove the montage (its menu)"
         if uses_clips and s.lib is None:
             return "the clips are being probed"
         return None

@@ -465,13 +465,18 @@ def _keep_comments_with_layers(seq: CommentedSeq, out: list) -> None:
             entry[slot] = trailing[None]
 
 
-NEW_SCENE = """# {name}: a new scene. The clips layer is the base (and the cut schedule the cut knobs
-# read); add the layers on top in the editor.
+NEW_SCENE = """# {name}: a new scene, empty (a bar with nothing in it is black). Put Generators and
+# clips on the BG and the FG, bar by bar; a clip montage (a clip of a folder in each bar)
+# is one more item, added from the BG's menu.
 video:
-  clip_per_bar: true
-  clip_order: shuffle
   layers:
-    - source: clips
+    - source: group
+      name: BG
+      canvas: below
+      layers: []
+    - source: group
+      name: FG
+      layers: []
 """
 
 

@@ -401,6 +401,56 @@ class BarWindow:
         return 0.0
 
 
+def _needs_canvas(spec: dict, built) -> bool:
+    """Whether the stack's first layer needs black under it: it comes and goes (by bars, a
+    mute, an opacity under 1), it is an FX, or it is masked. Otherwise it fills every frame
+    and is the base itself, as it always was."""
+    op = spec.get("opacity")
+    return bool(hasattr(built, "process") or "bars" in spec or spec.get("mute") or spec.get("mask")
+                or (op is not None and not (isinstance(op, (int, float)) and op >= 1)))
+
+
+class BlackCanvas:
+    """Black: what a bar with nothing in it shows. It lies under the stack when its first
+    layer comes and goes by bars (or is an FX, or is masked), so that layer obeys them too."""
+
+    def __init__(self, width: int, height: int):
+        self.W, self.H = width, height
+
+    def frame_at(self, t: float) -> np.ndarray:
+        return np.zeros((self.H, self.W, 3), np.uint8)       # a fresh one: what is over it may write
+
+
+class BlockCuts:
+    """The cut schedule of a scene without a clip montage: a cut where a block of the
+    background begins (a layer's ``bars:`` window, a clip block); with none, every bar. Its
+    ``cut_times`` stands in for the montage's (``ClipComposer.cut_times``)."""
+
+    def __init__(self, layers: list, grid):
+        from core import arrangement as arr
+        self.grid = grid
+        firsts = set()
+        for spec in layers or []:
+            if not isinstance(spec, dict) or spec.get("enabled", True) is False or arr.kind_of(spec) == arr.FX:
+                continue
+            firsts.update(b.first for b in arr.windows_of(spec) + arr.blocks_of(spec))
+        self.firsts = sorted(b for b in firsts if b > 1)
+        self.every_bar = not self.firsts
+
+    def cut_times(self, until: float) -> np.ndarray:
+        if self.grid is None:
+            return np.zeros(0)
+        cuts, bar = [], 1
+        while True:
+            t = float(self.grid.bar_start(bar))
+            if t > until or (not self.every_bar and bar + 1 > self.firsts[-1]):
+                break
+            if self.every_bar or bar + 1 in self.firsts:          # bar_start(bar): bar number bar + 1
+                cuts.append(t)
+            bar += 1
+        return np.unique(np.round(cuts, 6))
+
+
 def _feature(feats: dict, path: str, default: float = 0.0) -> float:
     """``"stems.piano"`` -> ``feats["stems"]["piano"]`` (a number, or ``default``)."""
     node = feats
@@ -2812,13 +2862,17 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
     """
     comp = Compositor()
     comp.size = (width, height)
-    # no layers: section -> legacy single clips base; a layers: list is
-    # used as-is (first layer = canvas), so pure-generative scenes work
+    # no layers: section -> legacy single clips base; a layers: list is used as-is (an
+    # empty one: black), so pure-generative scenes work
     from core.video.track_fx import expand_groups
-    layers_cfg = expand_groups(video_cfg.get("layers") or [{"source": "clips"}])   # the background lane, spliced
+    layers = video_cfg.get("layers")
+    layers_cfg = expand_groups([{"source": "clips"}] if layers is None else layers)   # the background lane, spliced
     from core.video import sam_cutout                   # a clip's sam_cutout FX: its cutout (SAM2 once, cached)
     layers_cfg = [sam_cutout.resolve(spec, grid=grid, span=span) for spec in layers_cfg]   # span: the
     # song's seconds being rendered (None: all of it): SAM2 cuts out only what shows there
+    if base is None:                                    # no clip montage: the cuts are where blocks begin
+        base = BlockCuts(layers_cfg, grid)
+    comp.add(BlackCanvas(width, height))                # taken out below when the first layer covers it all
     windows: list = []
     tracks: dict = {}                                   # one mask-track reader per folder, shared
     for spec in layers_cfg:
@@ -2840,6 +2894,8 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             hush = BarWindow({"bars": spec["mute"]}, grid)  # a cued character stays in sync)
             op_fn = (lambda t, m=hush, f=op_fn: (1.0 - m(t)) * (f(t) if f is not None else 1.0))
         if src_name == "clips":
+            if not hasattr(base, "frame_at"):
+                raise ValueError("the scene has a clip montage (source: clips): it needs the clips folder (--clips)")
             comp.add(base, blend if len(comp) else "normal", op_fn)
             continue
         if src_name == "solid":
@@ -3050,8 +3106,12 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             continue
         raise ValueError(f"unknown layer source {src_name!r}")
     enabled = [spec for spec in layers_cfg if spec.get("enabled", True) is not False]
+    if enabled and not _needs_canvas(enabled[0], comp._layers[1][0]):
+        comp._layers.pop(0)                             # the first layer fills every frame: it is the base
+        comp.names.pop(0)
+    off = len(comp) - len(enabled)                      # 1: the black canvas lies under them
     for i, spec in enumerate(enabled):                  # a track's own FX (core/video/track_fx.py)
-        src, blend, opacity, matte = comp._layers[i]
+        src, blend, opacity, matte = comp._layers[i + off]
         if spec.get("fx") and not hasattr(src, "process"):
             from core.video.track_fx import with_fx
 
@@ -3059,31 +3119,31 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
                 return build_compositor(given, {"layers": layers}, notes, width, height,
                                         onset_loader=onset_loader, fps=fps, features_at=features_at,
                                         grid=grid, masks=masks, span=span)
-            comp._layers[i] = (with_fx(src, spec["fx"], build, base, bool(spec.get("spill", False))),
-                               blend, opacity, matte)
+            comp._layers[i + off] = (with_fx(src, spec["fx"], build, base, bool(spec.get("spill", False))),
+                                     blend, opacity, matte)
     for i, (window, spec) in enumerate(zip(windows, enabled)):   # post-ops are added without opacity:
-        src, blend, opacity, matte = comp._layers[i]                # their window and mix set it here
+        src, blend, opacity, matte = comp._layers[i + off]          # their window and mix set it here
         if not hasattr(src, "process"):
             continue
         mix = spec.get("mix")
         if mix is not None:                             # an FX's dry/wet: 0 the picture it got .. 1 its result
             wet = _music_knob("mix", mix, notes, features_at, onset_loader, grid,
                               cuts=getattr(base, "cut_times", None))
-            comp._layers[i] = (src, blend, (lambda t, w=window, m=wet:
-                                            (w(t) if w is not None else 1.0) * min(1.0, max(0.0, float(m(t))))),
-                               matte)
+            comp._layers[i + off] = (src, blend, (lambda t, w=window, m=wet:
+                                                  (w(t) if w is not None else 1.0) * min(1.0, max(0.0, float(m(t))))),
+                                     matte)
         elif window is not None:
-            comp._layers[i] = (src, blend, window, matte)
+            comp._layers[i + off] = (src, blend, window, matte)
     for i, spec in enumerate(enabled):
         if spec.get("mask"):
-            if i == 0:
+            if i + off == 0:
                 raise ValueError("the base layer cannot have a mask (there is nothing below it)")
-            src, blend, opacity, _ = comp._layers[i]
-            comp._layers[i] = (src, blend, opacity,
-                               LayerMatte(spec["mask"], width, height, masks, tracks))
+            src, blend, opacity, _ = comp._layers[i + off]
+            comp._layers[i + off] = (src, blend, opacity,
+                                     LayerMatte(spec["mask"], width, height, masks, tracks))
     for i, spec in enumerate(enabled):                  # the profile names layers as the scene does
         name = spec.get("source", "clips")
         if spec.get("file"):
             name += " " + Path(str(spec["file"])).stem
-        comp.names[i] = name
+        comp.names[i + off] = name
     return comp

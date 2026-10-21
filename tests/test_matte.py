@@ -92,5 +92,5 @@ def test_mistakes_are_named(track):
         LayerMatte({"track": folder, "where": "around"}, W, H)
     with pytest.raises(ValueError, match="not in"):
         LayerMatte({"track": folder, "objects": [99]}, W, H)
-    with pytest.raises(ValueError, match="base layer"):
-        build_compositor(None, {"layers": [{"source": "solid", "mask": {"track": folder}}]}, [], W, H)
+    first = build_compositor(None, {"layers": [{"source": "solid", "mask": {"track": folder}}]}, [], W, H)
+    assert first.names[0] == "BlackCanvas"                   # masked first: black outside the mask

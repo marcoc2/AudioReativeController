@@ -90,8 +90,8 @@ def test_layer_keeps_watching_outside_its_window():
     gate["open"] = True
     out = comp.frame_at(30 / 24)
     assert _col(out, 0) - _col(out, 39) >= 15   # the past was there the moment it opened
-    with pytest.raises(ValueError):
-        build_compositor(None, {"layers": [{"source": "slitscan"}]}, notes, 64, 40, fps=24)   # not a base
+    assert build_compositor(None, {"layers": [{"source": "slitscan"}]}, notes, 64, 40,
+                            fps=24).names[0] == "BlackCanvas"   # an FX first: over black
 
 
 def test_works_after_another_gpu_layer():

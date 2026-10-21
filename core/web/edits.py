@@ -650,6 +650,12 @@ class Edits:
             if lane not in FX_LANES:
                 out.append({"label": f"Put a Generator here (bar {bar})", "catalog": "gen", "call": "new_member",
                             "args": [lane, "$key", bar, to]})
+            if lane == "bg" and path is None and self._montage_at() is None:
+                if span and tuple(span) != (1, n):
+                    out.append({"label": f"Add a clip montage in the chosen bars {span[0]}-{span[1]} (a clip of a folder each bar)",
+                                "call": "add_montage", "args": [span[0], span[1]]})
+                out.append({"label": "Add a clip montage, all the song (a clip of a folder each bar)",
+                            "call": "add_montage", "args": []})
             fx_lane = lane if lane in FX_LANES else {"fg": "fgfx", "bg": "bgfx"}[lane]
             where = "the master" if fx_lane == "master" else f"the whole {TRACKS[fx_lane][0]}"
             owner = ["master"] if fx_lane == "master" else [TRACKS[fx_lane][0]]
@@ -691,12 +697,70 @@ class Edits:
         return out
 
     # -- the montage -------------------------------------------------------------------
+    def _montage_at(self) -> Optional[int]:
+        return next((i for i, s in enumerate(self.specs()) if s.get("source", "clips") == "clips"), None)
+
+    def add_montage(self, first: Optional[int] = None, last: Optional[int] = None) -> dict:
+        """A clip montage at the bottom of the BG: a clip of the project's clips folder in
+        each bar, over bars first..last (None: the whole song). An item like the others: a
+        scene starts without one."""
+        with self.lock:
+            if self._montage_at() is not None:
+                return {"error": "the scene has its montage already"}
+            if self.clips_dir() is None:
+                return {"error": "the montage needs the clips folder: choose it first", "needs": "clips_dir"}
+            n = len(self.bars()) - 1
+            spec = {"source": "clips"}
+            if first is not None and last is not None:
+                a, b = max(1, min(int(first), int(last))), min(n, max(int(first), int(last)))
+                if (a, b) != (1, n):
+                    spec["bars"] = [[a, b]]
+            self._push()
+            self.items.insert(0, [None, None, spec])
+            v = dict(self.video or {})
+            v.setdefault("clip_per_bar", True)          # a new clip each bar, drawn at random
+            v.setdefault("clip_order", "shuffle")
+            self.video = v
+            where = f"bars {spec['bars'][0][0]}-{spec['bars'][0][1]}" if "bars" in spec else "the whole song"
+            return self._answer(montage=True, select={"clips": True}, note=f"a clip montage at the BG's bottom, {where}")
+
+    def remove_montage(self) -> dict:
+        """The clip montage out of the scene (its pins with it): what it covered is black, or
+        the BG over it."""
+        with self.lock:
+            i = self._montage_at()
+            if i is None:
+                return {"error": "the scene has no montage"}
+            self._push()
+            del self.items[i]
+            return self._answer(montage=True, note="the montage is out: its bars are the BG's, or black")
+
+    def set_montage_bars(self, first: Optional[int] = None, last: Optional[int] = None) -> dict:
+        """The bars the montage plays: first..last, or (None) the whole song."""
+        with self.lock:
+            if self._montage_at() is None:
+                return {"error": "the scene has no montage"}
+            n = len(self.bars()) - 1
+            span = None
+            if first is not None and last is not None:
+                a, b = max(1, min(int(first), int(last))), min(n, max(int(first), int(last)))
+                span = None if (a, b) == (1, n) else [[a, b]]
+
+            def put(s):
+                out = {k: v for k, v in s.items() if k != "bars"}
+                if span:
+                    out["bars"] = span
+                return out
+            self._edit(["clips"], put)
+            return self._answer(montage=True, select={"clips": True},
+                                note=f"the montage plays bars {span[0][0]}-{span[0][1]}" if span else "the montage plays the whole song")
+
     def set_pins(self, first: int, last: int, value) -> dict:
         """Bars first..last pinned to ``value`` (a clip's name, "none": nothing), or (None)
         given back to the montage's choice."""
         with self.lock:
-            if not any(s.get("source", "clips") == "clips" for s in self.specs()):
-                self.items.insert(0, [None, None, {"source": "clips"}])
+            if self._montage_at() is None:
+                return {"error": "the scene has no montage: add one to the BG (its menu) to pin clips"}
 
             def put(s):
                 pins = {int(k): v for k, v in (s.get("pins") or {}).items()}
@@ -768,7 +832,7 @@ class Edits:
         """The clip picked in the browser in these bars: pinned when the montage has it (its
         folder) and plays it from its start; else a BG block over them."""
         paths = [str(p).lower() for p in (self.lib.paths if self.lib is not None else [])]
-        if str(resolve(clip)).lower() in paths and not start:
+        if str(resolve(clip)).lower() in paths and not start and self._montage_at() is not None:
             return self.set_pins(first, last, Path(clip).stem)
         return self.to_bg(clip, start, first, last)
 
@@ -793,6 +857,15 @@ class Edits:
                 out.append({"label": "Back to the montage's choice", "call": "set_pins", "args": [first, last, None]})
             out.append({"label": f"Play {bars} (live)", "page": "preview", "args": [first, last]})
             out.append({"label": f"Exact {bars} (the engine)", "page": "exact", "args": [first, last]})
+            out.append({"sep": True})
+            n = len(self.bars()) - 1
+            spec = self.specs()[self._montage_at()] if self._montage_at() is not None else {}
+            if (first, last) != (1, n):
+                out.append({"label": f"The montage plays only {bars}", "call": "set_montage_bars", "args": [first, last]})
+            if spec.get("bars"):
+                out.append({"label": "The montage plays all the song", "call": "set_montage_bars", "args": []})
+            out.append({"label": "Remove the montage (its bars: the BG, or black)", "call": "remove_montage", "args": [],
+                        "danger": True})
             out.append({"sep": True})
             out.append({"label": "Add FX to the master (over everything)", "catalog": "fx", "call": "add_fx",
                         "args": [["master"], "$key"]})

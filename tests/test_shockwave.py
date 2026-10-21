@@ -62,8 +62,7 @@ def test_layer_rings_on_notes_and_punches():
     assert np.array_equal(before, after)                 # the ring has died, the punch has faded
     with pytest.raises(ValueError):
         ShockwaveLayer({**spec, "center": "corner"}, notes, 160, 90, 24)
-    with pytest.raises(ValueError):
-        build_compositor(None, {"layers": [spec]}, notes, 160, 90, fps=24)   # a post-op is not a base
+    assert build_compositor(None, {"layers": [spec]}, notes, 160, 90, fps=24).names[0] == "BlackCanvas"   # an FX first: over black
 
 
 def test_scatter_turns_the_ring_to_sand_that_replays():

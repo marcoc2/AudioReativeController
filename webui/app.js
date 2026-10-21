@@ -783,7 +783,7 @@ const LANES = [
   { id: "fgfx", name: "FG FX", sub: "on the whole FG", kind: "track", c: "var(--lane-fx)", group: "FG" },
   { id: "bg", name: "BG", sub: "over the montage", kind: "track", c: "var(--lane-bg)", group: "BG" },
   { id: "bgfx", name: "BG FX", sub: "on the whole BG", kind: "track", c: "var(--lane-fx)", group: "BG" },
-  { id: "clips", name: "Clips", sub: "the montage, under the BG", kind: "clips", c: "var(--lane-clip)" },
+  { id: "clips", name: "Montage", sub: "the BG's bottom: a clip a bar", kind: "clips", c: "var(--lane-clip)" },
 ];
 const FX_LANES = ["bgfx", "fgfx", "master"];
 const SAME_KIND = [["bg", "fg"], ["bgfx", "fgfx"]];
@@ -807,7 +807,7 @@ function computeLayout() {
     let hh = 0, shown = 0;
     if (d.kind === "audio") hh = Math.max(34, Math.min(90, Math.round(rowH * 1.5)));
     else if (d.kind === "midi") hh = 8 + 9 * Math.max(1, (S ? S.tracks.length : 1));
-    else if (d.kind === "clips") { if (!has.clips && !montage.length) continue; hh = Math.max(26, rowH + 6); }
+    else if (d.kind === "clips") { if (!has.clips) continue; hh = Math.max(26, rowH + 6); }   // a scene may have no montage
     else {
       if (d.group && !has[d.group]) continue;
       const n = rowsOf[d.id] || 0;
@@ -845,7 +845,7 @@ function renderTimeline() {
       || (sel.type === "master" && l.id === "master") || ((sel.type === "clips" || sel.type === "montage") && l.id === "clips")));
     const head = h("div", { class: "head" + (l.kind === "midi" ? " midi" : "") + (chosen ? " chosen" : "") + (["track", "clips"].includes(l.kind) ? " pick" : ""),
       style: `height:${l.h}px; --c:${l.c}`, dataset: { lane: l.id }, title: l.kind === "track" ? `${l.name}: click for its settings and FX` : "" }, h("b", { text: l.name }));
-    const sub = l.kind === "audio" ? S.project.audio : l.sub;
+    const sub = l.kind === "audio" ? S.project.audio : l.id === "bg" && !has.clips ? "the background" : l.sub;
     if (l.kind === "midi") for (const tr of S.tracks) head.append(h("div", { class: "trk", text: tr.name, title: `${tr.name}: ${tr.times.length} notes` }));
     else if (sub && (roomy() || l.h >= 30)) head.append(h("small", { text: sub, title: sub }));
     return head;
@@ -1051,6 +1051,7 @@ function apply(st) {
   members = st.lanes; pins = st.pins || {}; undoN = st.undo; redoN = st.redo;
   rowsOf = st.rows || {}; groups = st.groups || {}; has = st.has || {}; board = st.board || {};
   if (st.montage) montage = st.montage;
+  else if (!has.clips) montage = [];          // the montage taken out of the scene
   if (st.montage_bars) montageBars = st.montage_bars;
   streamEdited();
   if ("dirty" in st) { dirty = st.dirty; savedAt = st.saved_at || ""; }
@@ -1058,10 +1059,12 @@ function apply(st) {
     const s2 = st.select;
     if (!s2 || s2.ref === null) sel = null;
     else if (s2.montage) sel = { type: "montage", first: s2.montage[0], last: s2.montage[1] };
+    else if (s2.clips) sel = { type: "clips" };
     else if (s2.lane) sel = s2.lane === "master" ? { type: "master" } : { type: "lane", group: s2.lane };
     else if (s2.ref) sel = { type: "member", id: idOf(s2.ref), ref: s2.ref, k: s2.k };
   }
   if (sel && sel.type === "member" && !memberById(sel.id)) sel = null;
+  if (sel && (sel.type === "clips" || sel.type === "montage") && !has.clips) sel = null;
   for (const m of members) if (m.live && m.kind !== "clip") shaderFor(m.key);
   renderTimeline(); renderInspector(); showSaveState(); showStatus();
 }
@@ -1382,12 +1385,30 @@ function runItem(it, key) {
   if (it.page === "preview") { previewBars(it.args[0], it.args[1]); return; }
   if (it.page === "exact") { exactBars(it.args[0], it.args[1]); return; }
   if (it.catalog === "gen" && key) { const c = catalogByKey.get(key); if (c) { picked = { type: "cat", key, kind: "gen", label: c.label }; showPicked(); } }
+  if (it.call === "add_montage") { addMontage(...it.args); return; }
   const args = it.args.map(a => a === "$key" ? key : a === "$from" ? (picked && picked.from) || 0 : a);
   edit(it.call, ...args).then(r => {                // a SAM2 cutout just added: its seeds first
     if (r && !r.error && it.call === "add_fx" && key === "sam_cutout" && Array.isArray(args[0]) && args[0].length > 1) {
       const mm = memberById(idOf(args[0])); if (mm) openSam([...args[0], "fx", mm.fx.length - 1], true);
     }
   });
+}
+// a clip montage at the BG's bottom (bars first..last, or the whole song); a project with no
+// clips folder chooses one first (it is probed, then the montage is drawn)
+async function addMontage(...span) {
+  let r = await edit("add_montage", ...span);
+  if (r && r.needs === "clips_dir" && await chooseClipsDir()) r = await edit("add_montage", ...span);
+  return r;
+}
+async function chooseClipsDir() {
+  let path = null;
+  if (inWebview) { const r = await ask("pick_file", "folder", false, "", ""); path = r && r.path; }
+  else { const v = await dialog("The clips folder", "The montage draws its clips from a folder (the project's clips folder): its path.", [{ label: "Use it", value: "ok", primary: true }, { label: "Cancel", value: null }], ""); path = v && v.value && v.text; }
+  if (!path) return false;
+  const r = await call("set_render", { clips_dir: path }).catch(e => ({ error: e.message }));
+  if (!r || r.error) { toast(r ? r.error : "no answer", true); return false; }
+  toast(`clips folder: ${r.clips_dir || path}`);
+  return true;
 }
 // items: {label, on, title, danger, disabled, sub: [...]} | {head} | {sep}
 function menuAt(x, y, items, parent = null) {
@@ -1459,7 +1480,7 @@ function dragGhost(l, e) {
   g.hidden = false; g.classList.toggle("put", ok); g.classList.toggle("no", !ok);
   Object.assign(g.style, { left: (bar - 1) * ppb + "px", width: (last - bar + 1) * ppb + "px", top: (l.kind === "track" ? rowTop(l, row) : l.top + 2) + "px", height: rowH - 2 + "px" });
   g.textContent = ok ? `${dragItem.label || dragItem.name} · bars ${bar}–${last}${n > 16 ? " (it asks how many)" : ""}`
-    : dragItem.type === "clip" ? "a clip goes on the BG, the FG or Clips" : dragItem.kind === "fx" ? "an FX goes on an FX track" : "a Generator goes on the BG or the FG";
+    : dragItem.type === "clip" ? "a clip goes on the BG, the FG or the montage" : dragItem.kind === "fx" ? "an FX goes on an FX track" : "a Generator goes on the BG or the FG";
 }
 function wireLaneDrop(el, l) {
   el.addEventListener("dragover", e => {
@@ -1600,7 +1621,7 @@ function renderInspector() {
         h("span", { class: "kbd", text: "Explorer" }), "drop clips on a lane, or a folder on the browser",
         h("span", { class: "kbd", text: "right click" }), "its menu: FX, hide bars, copy and paste, delete",
         h("span", { class: "kbd", text: "ruler" }), "click to go there, drag to choose bars",
-        h("span", { class: "kbd", text: "a lane's name" }), "its settings and FX (Clips: the montage's)",
+        h("span", { class: "kbd", text: "a lane's name" }), "its settings and FX (Montage: its own)",
         h("span", { class: "kbd", text: "Ctrl+wheel" }), "zoom · Shift+wheel: row height · Alt+wheel: along",
         h("span", { class: "kbd", text: "Space" }), "play · Shift+Space: render the chosen bars",
         h("span", { class: "kbd", text: "Delete" }), "the chosen block (a member's last: the member)",
@@ -1748,7 +1769,12 @@ function fxList(title, rows, owner, draggable) {
 function inspLane(box, group) {
   $("inspTitle").textContent = group;
   box.append(h("div", { class: "ptitle" }, h("h3", { text: group === "FG" ? "FG · the foreground" : "BG · the background" })),
-    h("div", { class: "about", text: group === "FG" ? "Drawn on its own and put over the BG; its FX work on it alone." : "Over the clip montage; its FX work on it and the montage." }));
+    h("div", { class: "about", text: group === "FG" ? "Drawn on its own and put over the BG; its FX work on it alone."
+      : has.clips ? "Its members over the clip montage (its bottom); its FX work on all of them." : "Its members, bar by bar; a bar with nothing in it is black. Its FX work on all of them." }));
+  if (group === "BG" && !has.clips) box.append(h("div", { class: "btnrow" },
+    loop ? h("button", { class: "btn sm", onclick: () => addMontage(loop[0], loop[1]) }, `Add a clip montage in bars ${loop[0]}–${loop[1]}`) : null,
+    h("button", { class: "btn sm", onclick: () => addMontage() }, "Add a clip montage, all the song")),
+    h("div", { class: "about", text: "A clip montage: a clip of a folder in each bar (its order, seed and triggers), at the BG's bottom. Optional: the BG takes Generators and clips without it." }));
   if (group === "FG") box.append(check("its FX may spill outside the figures (trails, glow, split edges)", !!(groups.FG || {}).spill, v => edit("set_layer", ["FG"], "spill", v)));
   const lane = group === "FG" ? "fgfx" : "bgfx";
   box.append(fxList(`FX on the whole ${group}, in order`, members.filter(m => m.lane === lane).map(m => ({ ref: m.ref, label: m.label, enabled: m.enabled, bars_text: m.bars_text })), [group], true));
@@ -1759,9 +1785,9 @@ function inspMaster(box) {
   box.append(fxList("Over everything, in order", members.filter(m => m.lane === "master").map(m => ({ ref: m.ref, label: (m.kind === "gen" ? "GEN " : m.kind === "clip" ? "CLIP " : "") + m.label, enabled: m.enabled, bars_text: m.bars_text })), ["master"], false));
 }
 async function inspMontageBars(box, first, last) {
-  $("inspTitle").textContent = "Clips";
+  $("inspTitle").textContent = "Montage";
   const bars = last > first ? `bars ${first}–${last}` : `bar ${first}`;
-  box.append(h("div", { class: "ptitle" }, h("h3", { text: `Clips · ${bars}` })));
+  box.append(h("div", { class: "ptitle" }, h("h3", { text: `Montage · ${bars}` })));
   const runs = montageRuns().filter(r => r.last >= first && r.first <= last);
   if (!runs.length) box.append(h("div", { class: "about", text: "The montage is not known yet (it comes when the clips are probed)." }));
   for (const r of runs.slice(0, 12)) {
@@ -1780,9 +1806,16 @@ async function inspMontageBars(box, first, last) {
     it.label.replace(/ - Delete$/, "").replace(/ (bars? [\d–-]+|\(the engine\)|\(live\))/g, "").replace(/ \(.*\)$/, "")));
 }
 async function inspMontage(box) {
-  $("inspTitle").textContent = "Clips";
+  $("inspTitle").textContent = "Montage";
+  const plays = montageBars.length ? montageBars.map(([a, z]) => a === z ? `${a}` : `${a}–${z}`).join(", ") : "all the song";
   box.append(h("div", { class: "ptitle" }, h("h3", { text: "The montage" }), h("div", { class: "src", text: "the scene's video: settings" })),
-    h("div", { class: "about", text: "The project's clips folder, cut by the bars and the triggers; it shows wherever the BG has nothing. Click a clip on its row (or drag across bars) to choose it." }));
+    h("div", { class: "about", text: "The BG's bottom: a clip of the project's clips folder in each bar, cut by the bars and the triggers; the BG's members go over it. Click a clip on its row (or drag across bars) to choose it." }),
+    h("div", { class: "about", text: `It plays: ${plays}. Outside its bars it is black, or the BG.` }),
+    h("div", { class: "btnrow" },
+      loop ? h("button", { class: "btn sm", onclick: () => edit("set_montage_bars", loop[0], loop[1]) }, `Only bars ${loop[0]}–${loop[1]}`) : null,
+      montageBars.length ? h("button", { class: "btn sm", onclick: () => edit("set_montage_bars") }, "All the song") : null,
+      h("span", { class: "spacer" }),
+      h("button", { class: "btn sm danger", title: "out of the scene, its pins with it (undo brings it back)", onclick: () => edit("remove_montage") }, "Remove the montage")));
   const v = await ask("video_settings");
   if (!v || !(sel && sel.type === "clips")) return;
   const put = (k, val) => edit("set_video", k, val);
@@ -2213,7 +2246,7 @@ async function drawRenderDialog() {
       field("Clip order", h("select", { onchange: e => put("order", e.target.value) }, r.choices.order.map(c => h("option", { value: c, selected: c === r.order, text: c })))),
       field("Seed", numField(r.seed ?? "", v => put("seed", Math.round(v)), { step: 1 })),
       field("Clip cache", numField(r.cache_size, v => put("cache_size", Math.round(v)), { min: 1, step: 1 })),
-      folderRow("clips_dir", "Clips folder", "folder", "the montage's clips (a scene with clips needs it)"),
+      folderRow("clips_dir", "Clips folder", "folder", "the montage's clips (a scene with a clip montage needs it)"),
       folderRow("masks", "Masks folder", "masks", needsMasks ? "a cast, a cutout by mask track or a mask: needs it" : "SAM2 mask tracks (for the cast and mask:)")),
     h("div", { class: "row" }, check("turn wide clips", r.turn_wide, v => put("turn_wide", v)), check("AI stems", r.stems, v => put("stems", v)), check("profile", r.profile, v => put("profile", v)),
       check("gravity override", r.gravity.enabled, v => put("gravity.enabled", v))),
@@ -2303,7 +2336,7 @@ function renderClipTab(list) {
     const it = { type: "clip", path: c.path, name: c.name, label: c.name.replace(/\.[^.]+$/, ""), url: c.url, from: 0 };
     const th = thumbs.get(c.url), len = clipLens[c.url];
     const chosen = clipChosen && clipChosen.path === c.path;
-    const row = h("div", { class: "bitem clip" + (chosen ? " picked" : ""), title: `${c.name}: click to play it; drag it onto the BG, the FG or Clips (it goes as long as it plays)`,
+    const row = h("div", { class: "bitem clip" + (chosen ? " picked" : ""), title: `${c.name}: click to play it; drag it onto the BG, the FG or the montage (it goes as long as it plays)`,
       onclick: e => { if (!e.target.closest("button")) chooseClip(c.path, 0); } },
       h("span", { class: "sw big", style: th ? `background-image:url(${th})` : "" }),
       h("span", { class: "nm2" }, h("span", { text: c.name }), len ? h("small", { text: `${fmt(len)} s` }) : null),
@@ -2335,12 +2368,12 @@ async function onDropped(e) {
   if (S && el && el.closest("#inner")) {
     const r = inner.getBoundingClientRect(), l = laneAtY(e.y - r.top), bar = xToBar(e.x - r.left);
     if (!kinds.clips.length) { toast("only video or image files go on the lanes", true); return; }
-    if (!l || !(l.id === "bg" || l.id === "fg" || l.kind === "clips")) { toast("a clip goes on the BG, the FG or Clips (the montage)", true); return; }
+    if (!l || !(l.id === "bg" || l.id === "fg" || l.kind === "clips")) { toast("a clip goes on the BG, the FG or the montage", true); return; }
     placeClips(l.kind === "clips" ? "clips" : l.id, bar, kinds.clips.map(p => ({ path: p, from: 0 })), l.kind === "track" ? rowAtY(l, e.y - r.top) : null);
     return;
   }
   if (kinds.folders.length) { tab = "clips"; await loadClipList(kinds.folders[0]); renderBrowser(); }
-  else if (kinds.clips.length) { tab = "clips"; renderBrowser(); chooseClip(kinds.clips[0], 0); toast(`${kinds.clips[0].split(/[\\/]/).pop()} chosen: drag it (its picture) onto the BG, the FG or Clips`); }
+  else if (kinds.clips.length) { tab = "clips"; renderBrowser(); chooseClip(kinds.clips[0], 0); toast(`${kinds.clips[0].split(/[\\/]/).pop()} chosen: drag it (its picture) onto the BG, the FG or the montage`); }
   else toast("drop video or image files, or a folder of them", true);
 }
 document.addEventListener("dragover", e => { if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) e.preventDefault(); });

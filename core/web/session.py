@@ -527,6 +527,11 @@ class Session(Edits, KnobEditor, Plugin, LayerText, ProjectEdits, Clips):
         if self.lib is None or self.grid is None:
             return None
         gen, cfg = self.montage_inputs()
+        if not any(isinstance(l, dict) and l.get("source", "clips") == "clips" for l in cfg.get("layers") or []):
+            with self.lock:                  # no montage in the scene: nothing to resolve
+                if gen == self.montage_gen:
+                    self.montage, self.segments = [], []
+            return []
         start = float(self.grid.start_offset or 0.0)
         segs, _, _ = resolve_song(self.lib, self.grid, self.notes, cfg, self.fps, max(0.0, start), self.dur)
         paths = list(self.lib.paths)
@@ -588,7 +593,8 @@ class Session(Edits, KnobEditor, Plugin, LayerText, ProjectEdits, Clips):
             if key in self.knobs:
                 return self.knobs[key]
             gen, notes, grid, dur = self.gen, self.notes, self.grid, self.dur
-            features_at, cuts = self.features_at, list(self.segments)
+            features_at = self.features_at
+        cuts = self.cut_times()
         if grid is None:
             return {"error": "the bars are not known yet"}
         try:
@@ -643,7 +649,20 @@ class Session(Edits, KnobEditor, Plugin, LayerText, ProjectEdits, Clips):
         self.redo.clear()
         self.dirty = True
 
+    def cut_times(self) -> list:
+        """The song's cuts as the render knows them: the montage's, or (no montage) where the
+        BG's blocks begin (core/video/layers.py BlockCuts)."""
+        from core.video.layers import BlockCuts
+        from core.video.track_fx import expand_groups
+        with self.lock:
+            specs, grid, segs, dur = self.specs(), self.grid, list(self.segments), self.dur
+        if any(s.get("source", "clips") == "clips" for s in specs) or grid is None:
+            return segs
+        return [float(t) for t in BlockCuts(expand_groups(specs), grid).cut_times(dur)]
+
     def _edited(self, montage: bool = False) -> dict:
+        if not any(s.get("source", "clips") == "clips" for s in self.specs()):
+            self.knobs = {k: v for k, v in self.knobs.items() if "cut" not in k}   # the blocks are the cuts
         if montage:
             self.montage = None
             self.montage_later()

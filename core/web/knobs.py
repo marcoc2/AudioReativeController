@@ -211,7 +211,8 @@ class KnobEditor:
         if mode != "knob":
             return out
         with self.lock:
-            notes, grid, features_at, cuts, dur = self.notes, self.grid, self.features_at, list(self.segments), self.dur
+            notes, grid, features_at, dur = self.notes, self.grid, self.features_at, self.dur
+        cuts = self.cut_times()
         if grid is None:
             return out
         t0 = 0.0 if t0 is None else max(0.0, float(t0))

@@ -63,8 +63,8 @@ def test_layer_drops_on_notes_with_the_colour_under_it():
     assert r > g > b and (r - b) > (200 - 60)                 # still orange, but more vivid
     with pytest.raises(ValueError):
         DropsLayer({**spec, "color": "plaid"}, notes, W, H, 30)
-    with pytest.raises(ValueError):
-        build_compositor(None, {"layers": [spec]}, notes, W, H, fps=30)   # a post-op is not a base
+    alone = build_compositor(None, {"layers": [spec]}, notes, W, H, fps=30)   # a post-op first: over black
+    assert alone.names[0] == "BlackCanvas" and len(alone) == 2
 
 
 def test_spiral_shows_an_arm_winding_out_with_gaps_between_its_turns():

@@ -406,6 +406,8 @@ class Api:
         if s.fps != old_fps:                          # the bars, the features and the montage at the new fps
             self._events.log("in", f"fps {old_fps} -> {s.fps}: the bars and the features again")
             self._loader.reload(["bars", "features"])
+        elif "clips.dir" in keys:                    # another clips folder: probed again
+            self._loader.reload(["clips"])
         elif any(k.startswith("clips.") for k in keys):
             s.montage_later()
         return self.render_settings()
@@ -514,6 +516,7 @@ class Api:
 SESSION_CALLS = ("spans", "relane", "add", "remove", "set_param", "set_layer", "pin", "move", "new_member",
                  "set_block", "delete_block", "toggle", "set_windows", "mute", "set_mutes", "add_fx", "reorder",
                  "move_fx", "copy_links", "copy_fx", "paste_links", "paste_fx", "menu", "montage_menu", "set_pins", "resize_run",
+                 "add_montage", "remove_montage", "set_montage_bars",
                  "to_bg", "put_in_montage", "video_settings", "set_video",
                  "plugin", "set_value", "set_text", "add_trigger", "rename_trigger", "drop_trigger", "set_trigger",
                  "add_gesture", "drop_item", "add_role", "set_role", "set_mask", "keypath_of",

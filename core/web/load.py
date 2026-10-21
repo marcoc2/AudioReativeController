@@ -153,6 +153,10 @@ class Loader:
                 self.s.montage_later()
             if "features" in steps:
                 self._later(gen, ["stems", "features"])
+            if "clips" in steps:                             # a clips folder chosen: probed, the montage
+                with self.s.lock:
+                    self.s.lib = None
+                self._later(gen, ["clips", "covers"])
         threading.Thread(target=run, daemon=True, name="arc-reload").start()
 
     def _open(self, gen: int, source) -> None:

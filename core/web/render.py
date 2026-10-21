@@ -164,7 +164,7 @@ class FinalRender:
         if s.audio is None or not s.audio.is_file():
             return "the project's song is missing"
         if any(sp.get("source", "clips") == "clips" for sp in s.specs()) and s.clips_dir() is None:
-            return "this scene uses clips (the montage): choose the project's clips folder first"
+            return "the scene has a clip montage: choose the clips folder, or remove the montage (its menu)"
         return None
 
     def start(self, first: Optional[int] = None, last: Optional[int] = None, busy: bool = False,

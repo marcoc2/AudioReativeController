@@ -408,3 +408,56 @@ def test_a_montage_clips_end_dragged_pins_the_bars(project):
     assert pins() == {**had, 3: "a", 4: "b", 5: "b", 6: "b"}
     assert "error" in s.resize_run(3, 6, 7, 6)
     assert "error" in s.resize_run(9, 9, 9, 10)
+
+
+def _empty(tmp_path, clips: bool = False) -> Session:
+    from core.scene_doc import NEW_SCENE
+    scene = tmp_path / "new.yaml"
+    scene.write_text(NEW_SCENE.format(name="new"), encoding="utf-8")
+    proj = {"audio": str(tmp_path / "missing.wav"), "midi": str(_midi(tmp_path / "song.mid")), "scene": str(scene),
+            "render": {"fps": 30, "resolution": "854x480"}}
+    if clips:
+        (tmp_path / "clips").mkdir()
+        proj["clips"] = {"dir": str(tmp_path / "clips")}
+    path = tmp_path / "proj.yaml"
+    path.write_text(yaml.safe_dump(proj), encoding="utf-8")
+    return _session(path)
+
+
+def test_a_new_scene_starts_empty_and_takes_a_generator_in_its_bars(tmp_path):
+    s = _empty(tmp_path)
+    st = s.state()
+    assert st["lanes"] == [] and not st["has"]["clips"] and not s.dirty     # no montage, nothing to group
+    s.new_member("bg", "chladni", 1, 5)
+    layers = s.video_cfg()["layers"]
+    assert [l["source"] for l in layers] == ["group", "group"]
+    assert layers[0]["layers"][0]["source"] == "chladni" and layers[0]["layers"][0]["bars"] == [[1, 5]]
+    assert "error" in s.set_pins(2, 2, "none")                  # no montage: nothing to pin
+
+
+def test_the_montage_is_an_item_added_and_taken_out(tmp_path):
+    s = _empty(tmp_path)
+    got = s.add_montage()
+    assert got["needs"] == "clips_dir"                          # it needs the clips folder
+    (tmp_path / "with").mkdir()
+    s = _empty(tmp_path / "with", clips=True)
+    st = s.add_montage(3, 6)
+    assert st["has"]["clips"] and st["select"] == {"clips": True}
+    assert s.specs()[0] == {"source": "clips", "bars": [[3, 6]]} and s.video["clip_per_bar"] is True
+    assert s.state()["montage_bars"] == [[3, 6]]
+    assert "error" in s.add_montage()                           # one montage
+    s.set_montage_bars()
+    assert s.specs()[0] == {"source": "clips"}                  # all the song
+    s.set_pins(2, 2, "none")
+    st = s.remove_montage()
+    assert not st["has"]["clips"] and all(x.get("source") == "group" for x in s.specs())
+    s.step(True)                                                # undo: it is back, its pin too
+    assert s.specs()[0] == {"source": "clips", "pins": {2: "none"}}
+
+
+def test_without_a_montage_the_cuts_are_where_the_bg_blocks_begin(tmp_path):
+    s = _empty(tmp_path)
+    s.new_member("bg", "chladni", 1, 4)
+    s.new_member("bg", "chladni", 5, 8)
+    db = s.bars()
+    assert s.cut_times() == [pytest.approx(db[4])]               # bar 5 begins

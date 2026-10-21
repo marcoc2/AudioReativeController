@@ -140,7 +140,7 @@ def prepare(args) -> Render:
                 print(f"gravity override on {name!r}: {spec['gravity']}")
 
     layers_cfg = video_cfg.get("layers")
-    uses_clips = not layers_cfg or any(
+    uses_clips = layers_cfg is None or any(
         (l or {}).get("source", "clips") == "clips" for l in layers_cfg)
     library = composer = None
     if uses_clips:
