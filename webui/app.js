@@ -1082,7 +1082,7 @@ function apply(st) {
   if (st.montage_bars) montageBars = st.montage_bars;
   streamEdited();
   if ("dirty" in st) { dirty = st.dirty; savedAt = st.saved_at || ""; }
-  if (st.select !== undefined) {
+  if (st.select !== undefined && !subStack.length) {     // the plugin waits for the area under it: it stays
     const s2 = st.select;
     if (!s2 || s2.ref === null) sel = null;
     else if (s2.montage) sel = { type: "montage", first: s2.montage[0], last: s2.montage[1] };
@@ -1129,6 +1129,7 @@ function showEdge(el, end) {
   ed.style.top = el.offsetTop + "px"; ed.style.height = el.offsetHeight + "px";
 }
 function select(s, redraw = true) {
+  if (subStack.length && JSON.stringify(s) !== JSON.stringify(sel)) { subBusy(); return; }
   sel = s;
   if (redraw) renderTimeline();
   else {                       // in the middle of a drag: the blocks stay the same elements
@@ -1242,7 +1243,7 @@ inner.addEventListener("pointerup", e => {
     const l = laneById(d.lane), pk = pickFor(l);
     if (pk && accepts(l, pk)) edit("new_member", d.lane, pk.type === "clip" ? pk.path : pk.key, d.first, d.last, d.row, pk.from || 0);
     else if (d.moved) { setLoop(d.first, d.last); toast(`bars ${d.first}–${d.last} chosen · to put something there, pick it in the browser first`); }
-    else { sel = null; seek(xToT(x)); loop = [bar, bar]; renderTimeline(); renderInspector(); }     // an empty place: that bar chosen
+    else { if (!subStack.length) sel = null; seek(xToT(x)); loop = [bar, bar]; renderTimeline(); renderInspector(); }     // an empty place: that bar chosen
   } else if (d.type === "runend") {
     showRunEdge(null);
     if (d.moved) edit("resize_run", d.run.first, d.run.last, d.first, d.last);
@@ -1253,7 +1254,7 @@ inner.addEventListener("pointerup", e => {
     loop = [first, last];
     select({ type: "montage", first, last });
   } else if (d.type === "span") {
-    if (!d.moved) { seek(xToT(x)); sel = null; renderTimeline(); renderInspector(); }
+    if (!d.moved) { seek(xToT(x)); if (!subStack.length) sel = null; renderTimeline(); renderInspector(); }
     else { seek(B[loop[0] - 1]); log("sys", `bars ${loop[0]}–${loop[1]} chosen`); renderInspector(); }
   }
   flushAfterDrag();
@@ -1414,10 +1415,8 @@ function runItem(it, key) {
   if (it.catalog === "gen" && key) { const c = catalogByKey.get(key); if (c) { picked = { type: "cat", key, kind: "gen", label: c.label }; showPicked(); } }
   if (it.call === "add_montage") { addMontage(...it.args); return; }
   const args = it.args.map(a => a === "$key" ? key : a === "$from" ? (picked && picked.from) || 0 : a);
-  edit(it.call, ...args).then(r => {                // a SAM2 cutout just added: its seeds first
-    if (r && !r.error && it.call === "add_fx" && key === "sam_cutout" && Array.isArray(args[0]) && args[0].length > 1) {
-      const mm = memberById(idOf(args[0])); if (mm) openSam([...args[0], "fx", mm.fx.length - 1], true);
-    }
+  edit(it.call, ...args).then(r => {                // a block's new FX: its seeds, or its parameters below
+    if (r && !r.error && it.call === "add_fx" && Array.isArray(args[0]) && args[0].length > 1) newOwnFx(args[0], key);
   });
 }
 // a clip montage at the BG's bottom (bars first..last, or the whole song); a project with no
@@ -1628,6 +1627,13 @@ function openPlugin(m) {
   if (knobsAt) knobsAt.scrollIntoView({ block: "start", behavior: "smooth" });
 }
 function renderInspector() {
+  renderInspectorBody();
+  const box = insp(), frozen = subStack.length > 0;
+  box.classList.toggle("frozen", frozen);
+  if (frozen) box.prepend(h("div", { class: "frozennote" }, h("span", { text: "Waiting for the link or FX below: Apply or Cancel it there" }), h("span", { class: "spacer" }),
+    h("button", { class: "lnkbtn", onclick: closeSubAll }, "Cancel it")));
+}
+function renderInspectorBody() {
   const box = insp(); box.replaceChildren();
   if (!sel && loop && S) {
     $("inspTitle").textContent = "Bars";
@@ -1656,16 +1662,14 @@ function renderInspector() {
         h("span", { class: "kbd", text: "Ctrl+S" }), "save the scene (Ctrl+Shift+S: save as)"));
     return;
   }
-  if (sel.type === "knob" && knobCtx) return inspKnob(box);
   if (sel.type === "entry") return inspEntry(box, sel.key);
-  if (sel.type === "knob") { sel = null; return renderInspector(); }
-  if (sel.type === "plugin") { $("inspTitle").textContent = "FX"; const ref = sel.ref; box.append(h("div", { class: "btnrow" }, h("button", { class: "btn sm", onclick: () => { sel = sel.back || null; renderInspector(); } }, "← back"))); pluginInto(box, ref).then(() => { const p0 = box.querySelector(".plugin"); }); return; }
+  if (sel.type === "knob" || sel.type === "plugin") { sel = null; return renderInspectorBody(); }
   if (sel.type === "montage") return inspMontageBars(box, sel.first, sel.last);
   if (sel.type === "clips") return inspMontage(box);
   if (sel.type === "lane") return inspLane(box, sel.group);
   if (sel.type === "master") return inspMaster(box);
   const m = memberById(sel.id);
-  if (!m) { sel = null; return renderInspector(); }
+  if (!m) { sel = null; return renderInspectorBody(); }
   inspMember(box, m);
 }
 function kindName(m) { return m.kind === "fx" || isFxLane(m.lane) ? "FX" : m.kind === "gen" ? "Generator" : m.lane === "fg" ? "Character" : "Clip"; }
@@ -1734,11 +1738,11 @@ function inspPlacement(box, m) {
   box.append(sect("In the frame"));
   for (const [key, def, about] of PLACES) {
     const v = p[key];
-    if (v && typeof v === "object") box.append(h("div", { class: "prm linked" }, h("div", { class: "top" }, h("label", { text: key }), h("output", { text: "follows the music" })),
+    if (v && typeof v === "object") box.append(h("div", { class: "prm linked" + (editingRow(m.ref, key) ? " editing" : ""), dataset: { param: key } }, h("div", { class: "top" }, h("label", { text: key }), h("output", { text: "follows the music" })),
       v.said ? h("div", { class: "about", text: v.said }) : null, h("div", { class: "about mono small", text: v.knob }),
       h("div", { class: "btnrow" }, h("button", { class: "lnkbtn", onclick: () => linkPlace(m, key, def) }, "Edit link…"),
         h("button", { class: "lnkbtn", onclick: () => edit("set_param", m.ref, key, String(knobBias(v.knob) ?? def)) }, "Fixed"))));
-    else box.append(h("div", { class: "prm" }, h("div", { class: "top" }, h("label", { text: key }), h("small", { class: "hint", text: about })),
+    else box.append(h("div", { class: "prm" + (editingRow(m.ref, key) ? " editing" : ""), dataset: { param: key } }, h("div", { class: "top" }, h("label", { text: key }), h("small", { class: "hint", text: about })),
       h("div", { class: "slide" }, h("input", { type: "range", min: key === "scale" ? 0.05 : -0.5, max: key === "scale" ? 2 : 1.5, step: 0.01, value: v ?? def, "aria-label": key, onchange: e => edit("set_layer", m.ref, key, +e.target.value) }),
         numField(v ?? def, val => edit("set_layer", m.ref, key, val), { step: 0.05, aria: key })),
       h("button", { class: "lnkbtn", onclick: () => linkPlace(m, key, v ?? def) }, "Follow the music…")));
@@ -1763,7 +1767,7 @@ function inspPlacement(box, m) {
 function knobBias(text) { const m = /bias:\s*(-?[\d.]+)/.exec(text || ""); return m ? +m[1] : null; }
 // x / y / scale linked to the music: the knob editor, as every knob
 function linkPlace(m, key, def) {
-  openKnob({ ref: m.ref, keypath: [key], mode: "knob", default: typeof def === "number" ? def : 0.5, title: `${m.label} · ${key}` });
+  openKnob({ ref: m.ref, keypath: [key], mode: "knob", default: typeof def === "number" ? def : 0.5, title: `${m.label} · ${key}`, param: key });
 }
 // an FX list: a block's own, a lane's, the master's. rows: [{ref, label, enabled, bars_text}]
 function fxList(title, rows, owner, draggable) {
@@ -1772,16 +1776,17 @@ function fxList(title, rows, owner, draggable) {
     h("button", { class: "lnkbtn", onclick: e => menuAt(e.clientX, e.clientY, catalogItems("fx", key => addFx(owner, key))) }, "Add FX…")));
   if (!rows.length) wrap.append(h("div", { class: "about", text: "none" }));
   rows.forEach((f, j) => {
-    const row = h("div", { class: "fxrow" + (f.enabled ? "" : " off"), draggable: draggable ? "true" : null, dataset: { j } },
+    const row = h("div", { class: "fxrow" + (f.enabled ? "" : " off") + (editingFx(f.ref) ? " editing" : ""), draggable: draggable ? "true" : null, dataset: { j } },
       draggable ? h("span", { class: "grip", title: "drag to reorder", "aria-hidden": "true" }, "⋮⋮") : null,
       h("input", { type: "checkbox", checked: f.enabled, "aria-label": `${f.label} on`, onchange: () => edit("toggle", f.ref) }),
       h("span", { class: "nm", text: `${j + 1}. ${f.label}`, title: f.label }),
       textField(f.bars_text, "all", v => edit("set_windows", f.ref, v), `${f.label}: bars`),
       f.sam ? h("button", { class: "ib", title: "its seeds: how SAM2 finds what to cut out", "aria-label": "SAM2 seeds", onclick: () => openSam(f.ref) }, "✂")
-        : h("button", { class: "ib", title: "its parameters", "aria-label": `${f.label}: its parameters`, onclick: () => { const mm = memberById(idOf(f.ref)); if (mm) openPlugin(mm); else { sel = { type: "plugin", ref: f.ref, back: sel }; renderInspector(); } } }, "⚙"),
+        : h("button", { class: "ib", title: "its parameters", "aria-label": `${f.label}: its parameters`, onclick: () => { const mm = memberById(idOf(f.ref)); if (mm) openPlugin(mm); else openSubPlugin(f.ref, f.label); } }, "⚙"),
       h("button", { class: "ib", title: "earlier", "aria-label": "Earlier", onclick: () => edit("reorder", f.ref, -1) }, "↑"),
       h("button", { class: "ib", title: "later", "aria-label": "Later", onclick: () => edit("reorder", f.ref, 1) }, "↓"),
       h("button", { class: "ib", title: "remove", "aria-label": "Remove", onclick: () => edit("remove", f.ref) }, "✕"));
+    if (row.classList.contains("editing")) setTimeout(() => centreInPanel(row), 0);
     if (draggable) {
       row.addEventListener("dragstart", e => { e.dataTransfer.setData("text/x-fx", String(j)); e.dataTransfer.effectAllowed = "move"; row.classList.add("dragging"); });
       row.addEventListener("dragend", () => row.classList.remove("dragging"));
@@ -1858,10 +1863,15 @@ async function inspMontage(box) {
 }
 async function addFx(owner, key) {
   const r = await edit("add_fx", owner, key);
-  if (r && !r.error && key === "sam_cutout" && owner.length > 1) {
-    const mm = memberById(idOf(owner)); if (mm) openSam([...owner, "fx", mm.fx.length - 1], true);
-  }
+  if (r && !r.error && owner.length > 1) newOwnFx(owner, key);
   return r;
+}
+// an FX just put on a block (not a lane's): SAM2's seeds, or its parameters under the plugin
+function newOwnFx(owner, key) {
+  const mm = memberById(idOf(owner)); if (!mm || !mm.fx.length) return;
+  const ref = [...owner, "fx", mm.fx.length - 1];
+  if (key === "sam_cutout") openSam(ref, true);
+  else openSubPlugin(ref, mm.fx[mm.fx.length - 1].label);
 }
 function kickTrack() {
   const t = S.tracks.find(x => /kick|bumbo/i.test(x.name)) || S.tracks[0];
@@ -1873,13 +1883,12 @@ function kickTrack() {
 // which: core/web/plugin.py), its sections (reactivity and triggers, gestures, the cast's
 // roles), mask:
 // ---------------------------------------------------------------------------
-let pluginReq = 0;
 async function pluginInto(box, ref, m = null) {
   const at = h("div", { class: "plugin", dataset: { sect: "knobs" } }, h("div", { class: "about", text: "…" }));
   box.append(at);
-  const n = ++pluginReq;
+  const n = {}; box.plugReq = n;                 // a newer drawing of this box wins
   const p = await ask("plugin", ref);
-  if (!p || n !== pluginReq) return false;
+  if (!p || box.plugReq !== n) return false;
   at.replaceChildren();
   if (!p.rows.length && !p.about) { at.append(h("div", { class: "about", text: "No parameters the catalog knows of." })); }
   at.append(h("div", { class: "phead2" }, h("span", { class: "chip", text: p.kind || "layer" }), p.category ? h("span", { class: "chip", text: p.category }) : null,
@@ -1897,11 +1906,12 @@ async function pluginInto(box, ref, m = null) {
 }
 const fnum = v => typeof v === "number" ? fmt(v) : v;
 function pluginRow(p, r, m) {
-  const ref = p.ref, wrap = h("div", { class: "prm" + (r.widget === "knob" && r.set ? " linked" : "") + (r.set ? " set" : ""), dataset: { param: r.name } });
+  const ref = p.ref, wrap = h("div", { class: "prm" + (r.widget === "knob" && r.set ? " linked" : "") + (r.set ? " set" : "") + (editingRow(ref, r.name) ? " editing" : ""), dataset: { param: r.name } });
+  if (wrap.classList.contains("editing")) setTimeout(() => centreInPanel(wrap), 0);
   const knobText = m && (m.params.find(x => x.name === r.name) || {}).knob;
   const out = h("output", { dataset: { out: r.name }, text: "" });
   wrap.append(h("div", { class: "top" }, h("label", { text: (r.follows ? "~ " : "") + r.name, title: r.about || "" }), out,
-    r.button ? h("button", { class: "lnkbtn", onclick: () => openKnob({ ref, keypath: r.keypath, mode: r.button.mode, default: typeof r.default === "number" ? r.default : 0, title: `${p.label} · ${r.name}`, fromText: r.button.from_text ? (r.value || r.default) : null }) }, r.button.label) : null,
+    r.button ? h("button", { class: "lnkbtn", onclick: () => openKnob({ ref, keypath: r.keypath, mode: r.button.mode, default: typeof r.default === "number" ? r.default : 0, title: `${p.label} · ${r.name}`, fromText: r.button.from_text ? (r.value || r.default) : null, param: r.name }) }, r.button.label) : null,
     r.set && !["gestures", "reactivity", "roles"].includes(r.widget) ? h("button", { class: "ib", title: "back to its default", "aria-label": `${r.name}: back to its default`, onclick: () => edit("set_value", ref, r.keypath, null) }, "↺") : null));
   const put = v => edit("set_value", ref, r.keypath, v);
   if (r.widget === "number") {
@@ -1936,10 +1946,10 @@ function gesturesBox(ref, r) {
   const box = h("div", { class: "subrows" });
   r.items.forEach((g, i) => box.append(h("div", { class: "subrow" },
     h("select", { "aria-label": "gesture", onchange: e => edit("set_value", ref, [...r.keypath, i, "gesture"], e.target.value) }, r.gestures.map(x => h("option", { value: x, selected: x === g.gesture, text: x }))),
-    h("button", { class: "lnkbtn", title: g.who, onclick: () => openKnob({ ref, keypath: [...r.keypath, i], mode: "trigger", title: `gesture ${i + 1} · who plays` }) }, g.who),
+    h("button", { class: "lnkbtn", title: g.who, onclick: () => openKnob({ ref, keypath: [...r.keypath, i], mode: "trigger", title: `gesture ${i + 1} · who plays`, param: r.name }) }, g.who),
     numField(g.envelope, v => edit("set_value", ref, [...r.keypath, i, "envelope"], Math.max(0.001, v)), { min: 0, step: 0.05, aria: "envelope" }),
     h("button", { class: "ib", "aria-label": "Remove", onclick: () => edit("drop_item", ref, r.keypath, i) }, "✕"))));
-  box.append(h("button", { class: "lnkbtn", onclick: async () => { const got = await edit("add_gesture", ref, r.keypath, r.gestures[0]); if (got && got.added != null) openKnob({ ref, keypath: [...r.keypath, got.added], mode: "trigger", title: "the new gesture · who plays" }); } }, "+ gesture"));
+  box.append(h("button", { class: "lnkbtn", onclick: async () => { const got = await edit("add_gesture", ref, r.keypath, r.gestures[0]); if (got && got.added != null) openKnob({ ref, keypath: [...r.keypath, got.added], mode: "trigger", title: "the new gesture · who plays", param: r.name }); } }, "+ gesture"));
   return box;
 }
 function reactivityBox(ref, r) {
@@ -1954,13 +1964,13 @@ function reactivityBox(ref, r) {
   box.prepend(h("div", { class: "about", text: "When the montage takes a new clip: at every bar (or every N), in what order, and what a clip shorter than its turn does (bounce, loop, hold)." }));
   const tkp = [...kp, "triggers"], names = r.triggers.map(t => t.name);
   box.append(h("div", { class: "fxhead" }, h("span", { class: "sect", text: "Triggers" }),
-    h("button", { class: "lnkbtn", onclick: async () => { const got = await edit("add_trigger", ref, tkp); if (got && got.added) openKnob({ ref, keypath: [...tkp, got.added], mode: "trigger", title: `${got.added} · who plays` }); } }, "+ trigger")),
+    h("button", { class: "lnkbtn", onclick: async () => { const got = await edit("add_trigger", ref, tkp); if (got && got.added) openKnob({ ref, keypath: [...tkp, got.added], mode: "trigger", title: `${got.added} · who plays`, param: r.name }); } }, "+ trigger")),
     h("div", { class: "about", text: "A trigger: who plays (a MIDI track and its notes, an audio file, a melody) and what each hit does to the montage: cut to a new clip, reverse it, and so on. Gravity pulls the clips' speed around each hit." }));
   for (const t of r.triggers) {
     const others = names.filter(n => n !== t.name), tp = (k, v) => edit("set_trigger", ref, tkp, t.name, k, v);
     box.append(h("div", { class: "trig" },
       h("div", { class: "row nowrap" }, textField(t.name, "name", v => edit("rename_trigger", ref, tkp, t.name, v), "trigger name"),
-        h("button", { class: "lnkbtn", onclick: () => openKnob({ ref, keypath: [...tkp, t.name], mode: "trigger", title: `${t.name} · who plays` }) }, `Who plays: ${t.who}`),
+        h("button", { class: "lnkbtn", onclick: () => openKnob({ ref, keypath: [...tkp, t.name], mode: "trigger", title: `${t.name} · who plays`, param: r.name }) }, `Who plays: ${t.who}`),
         h("button", { class: "ib", "aria-label": `Remove ${t.name}`, onclick: () => edit("drop_trigger", ref, tkp, t.name) }, "✕")),
       h("div", { class: "row" }, r.actions.map(a => check(a.replace("_", " "), t.actions.includes(a), v => tp("actions", v ? [...t.actions, a] : t.actions.filter(x => x !== a))))),
       h("div", { class: "fields" },
@@ -1985,7 +1995,7 @@ function rolesBox(ref, r) {
         field("Envelope (s)", numField(x.envelope ?? r.envelopes[x.act] ?? 0, v => sr("envelope", v), { min: 0, step: 0.05 })),
         field("Amount", numField(x.amount ?? 1, v => sr("amount", v), { step: 0.05 })),
         field("Colour", textField(x.color, "r, g, b · chord · pitch", v => sr("color", v)))),
-      h("button", { class: "lnkbtn", onclick: () => openKnob({ ref, keypath: [...r.keypath, i, "plays"], mode: "trigger", title: `role ${i + 1} · who plays it` }) }, `Plays: ${x.plays}`),
+      h("button", { class: "lnkbtn", onclick: () => openKnob({ ref, keypath: [...r.keypath, i, "plays"], mode: "trigger", title: `role ${i + 1} · who plays it`, param: r.name }) }, `Plays: ${x.plays}`),
       field("Its other keys (YAML)", textField(x.extra, "e.g. {shadow: 0.5, hold: 1}", v => sr("extra", v)))));
   });
   box.append(h("button", { class: "lnkbtn", onclick: () => edit("add_role", ref, r.keypath) }, "+ role"));
@@ -2006,8 +2016,8 @@ function maskBox(p) {
 
 // the layer's own YAML, edited as text (its comments kept while it is as the scene wrote it)
 async function layerTextInto(box, ref) {
-  const n = pluginReq, got = await ask("layer_text", ref);
-  if (!got || n !== pluginReq) return;
+  const n = box.plugReq, got = await ask("layer_text", ref);
+  if (!got || box.plugReq !== n) return;
   const ta = h("textarea", { class: "codeedit", spellcheck: "false", rows: Math.min(18, got.text.split("\n").length + 1), "aria-label": "The layer's YAML" }, got.text);
   const err = h("div", { class: "err" });
   box.append(sect("The layer, as the scene says (but its bars)"), ta, err,
@@ -2024,24 +2034,74 @@ async function layerTextInto(box, ref) {
 // forms, sent by Python), its YAML and its curve; Apply writes it (one undo step)
 // ---------------------------------------------------------------------------
 let knobCtx = null;
+
+// ---------------------------------------------------------------------------
+// The area under the plugin, beside the Arrange: what the plugin opens (a link's editor, a
+// block's own FX) works there while the plugin waits, frozen, the row it came from lit.
+// A stack: a link opened from that FX goes over it, Cancel goes back.
+// ---------------------------------------------------------------------------
+let subStack = [];             // [{type: "knob" | "plugin", ref, param, title}]
+const subTop = () => subStack[subStack.length - 1] || null;
+function pushSub(it) { subStack.push(it); renderSub(); renderInspector(); $("subBody").scrollTop = 0; }
+function popSub() {
+  const it = subStack.pop();
+  if (it && it.type === "knob") knobCtx = null;
+  renderSub(); renderInspector(); renderTimeline();
+}
+function closeSubAll() { subStack = []; knobCtx = null; renderSub(); renderInspector(); renderTimeline(); }
+// the lit row in the middle of its panel (only the panel scrolls, not the page)
+function centreInPanel(el) {
+  const box = el.isConnected && el.closest(".insp"); if (!box) return;
+  box.scrollTop += el.getBoundingClientRect().top - box.getBoundingClientRect().top - (box.clientHeight - el.offsetHeight) / 2;
+}
+function subBusy() {
+  toast("The link or FX below first: Apply it or Cancel it", true);
+  const p = document.querySelector(".subpanel"); if (p) { p.classList.remove("flash"); void p.offsetWidth; p.classList.add("flash"); }
+}
+// the inspector's row the bottom of the stack came from (a parameter, x / y / scale), and the FX row
+function editingRow(ref, param) { const b = subStack[0]; return !!b && b.type === "knob" && b.param != null && b.param === param && idOf(b.ref) === idOf(ref); }
+function editingFx(ref) { const b = subStack[0]; return !!b && b.type === "plugin" && idOf(b.ref) === idOf(ref); }
+function openSubPlugin(ref, label) {
+  if (subStack.some(x => x.type === "plugin" && idOf(x.ref) === idOf(ref))) return;
+  pushSub({ type: "plugin", ref, title: label || "FX" });
+}
+function renderSub() {
+  const box = $("subBody"); if (!box) return;
+  box.replaceChildren();
+  const top = subTop();
+  $("subTrail").textContent = subStack.length > 1 ? subStack.map(x => x.title).join(" › ") : "";
+  if (!top) {
+    $("subTitle").textContent = "Link · FX";
+    box.append(h("div", { class: "about", text: "A parameter's link (how the music moves it) and the FX on a block open here, under the plugin; the plugin waits for them, its row lit." }));
+    return;
+  }
+  if (top.type === "knob" && knobCtx) { inspKnob(box); return; }
+  $("subTitle").textContent = "FX";
+  box.append(h("div", { class: "ptitle" }, h("h3", { text: top.title }), h("div", { class: "src", text: "an FX of the block above" })),
+    h("div", { class: "btnrow" }, h("span", { class: "spacer" }), h("button", { class: "btn sm primary", onclick: popSub }, "Done")));
+  pluginInto(box, top.ref);
+}
+
 async function openKnob(o) {
   const data = await ask("knob_open", o.ref, o.keypath, o.mode || "knob", o.default || 0);
   if (!data) return;
   if (o.fromText && data.state.form === "constant") {            // a ..._from param: its feature first
     const st = await ask("knob_new", "feature", null); if (st) { st.source = o.fromText; data.state = st; }
   }
-  knobCtx = { ...o, data, state: data.state, link: data.link || "", anchor: "", back: sel };
-  sel = { type: "knob" };
-  renderInspector();
-  insp().scrollTop = 0;
+  openKnobCtx({ ...o, data, state: data.state, link: data.link || "", anchor: "" });
 }
-function closeKnob() { const back = knobCtx && knobCtx.back; knobCtx = null; sel = back && back.type !== "knob" ? back : null; renderTimeline(); renderInspector(); }
+function openKnobCtx(ctx) {
+  if (subStack.length && subTop().type === "knob") subStack.pop();    // one link at a time
+  knobCtx = ctx;
+  pushSub({ type: "knob", ref: ctx.ref, param: ctx.param || null, title: ctx.title });
+}
+function closeKnob() { if (subStack.length && subTop().type === "knob") popSub(); else { knobCtx = null; renderSub(); } }
 function inspKnob(box) {
   const k = knobCtx, d = k.data, F = d.schema.forms;
-  $("inspTitle").textContent = k.mode === "trigger" ? "Who plays" : k.mode === "score" ? "Chords from" : "Knob";
+  $("subTitle").textContent = k.mode === "trigger" ? "Who plays" : k.mode === "score" ? "Chords from" : "Link";
   box.append(h("div", { class: "ptitle" }, h("h3", { text: k.title || "a knob" }), h("div", { class: "src", text: d.shared ? `a signal: ${d.shared}` : "" })));
   if (d.signals.length || k.mode === "knob") {
-    const sigSel = h("select", { "aria-label": "Use a signal", onchange: e => { k.link = e.target.value; renderInspector(); } },
+    const sigSel = h("select", { "aria-label": "Use a signal", onchange: e => { k.link = e.target.value; renderSub(); } },
       h("option", { value: "", text: "its own" }), d.signals.map(s => h("option", { value: s.name, selected: s.name === k.link, text: `*${s.name} · ${s.yaml.slice(0, 40)}` })));
     box.append(h("div", { class: "fields" }, field("Use a signal", sigSel, "it follows that one, wherever it changes"),
       k.mode === "knob" ? field("Or name this one", d.shared && d.shared.startsWith("&")
@@ -2078,7 +2138,7 @@ function drawState(box, st, depth, onlySource, F, d) {
     for (const [key, label] of d.schema.choices) { const g = F[key].group; if (!groups.has(g)) groups.set(g, []); groups.get(g).push([key, label.split(" · ").slice(1).join(" · ")]); }
     box.append(field(depth ? "From (what moves the rate)" : "What in the music", h("select", { onchange: async e => {
       const nst = await ask("knob_new", e.target.value, st); if (!nst) return;
-      for (const key of Object.keys(st)) delete st[key]; Object.assign(st, nst); renderInspector(); } },
+      for (const key of Object.keys(st)) delete st[key]; Object.assign(st, nst); renderSub(); } },
       [...groups].map(([g, xs]) => h("optgroup", { label: g }, xs.map(([key, label]) => h("option", { value: key, selected: key === st.form, text: label })))))));
   }
   const grid = h("div", { class: "fields" });
@@ -2088,9 +2148,9 @@ function drawState(box, st, depth, onlySource, F, d) {
   const src = st.source;
   if (f.source === "trigger" && src) {
     const t = h("div", { class: "fields" });
-    t.append(field("Who plays", h("select", { onchange: e => { src.kind = e.target.value; renderInspector(); } }, d.schema.trigger_kinds.map(x => h("option", { value: x, selected: x === src.kind, text: x })))));
+    t.append(field("Who plays", h("select", { onchange: e => { src.kind = e.target.value; renderSub(); } }, d.schema.trigger_kinds.map(x => h("option", { value: x, selected: x === src.kind, text: x })))));
     if (src.kind === "track") t.append(field("Track", h("div", { class: "row nowrap" }, textField(src.track, "kick, snare", v => { src.track = v; checkKnob(); }, "track"),
-      h("select", { "aria-label": "Add a track", onchange: e => { if (e.target.value) { src.track = src.track ? `${src.track}, ${e.target.value}` : e.target.value; renderInspector(); } } }, h("option", { value: "", text: "+" }), d.sources.tracks.map(x => h("option", { value: x, text: x }))))));
+      h("select", { "aria-label": "Add a track", onchange: e => { if (e.target.value) { src.track = src.track ? `${src.track}, ${e.target.value}` : e.target.value; renderSub(); } } }, h("option", { value: "", text: "+" }), d.sources.tracks.map(x => h("option", { value: x, text: x }))))));
     if (src.kind === "audio") t.append(field("Audio", textField(src.audio, "stems/snare.wav", v => { src.audio = v; checkKnob(); })));
     if (src.kind === "melody" && !src.score && d.sources.score) src.score = d.sources.score;
     if (src.kind === "melody") t.append(field("Transcription", textField(src.score || d.sources.score, "its folder", v => { src.score = v; checkKnob(); })), field("Voice", textField(src.voice, "any", v => { src.voice = v; checkKnob(); })));
@@ -2115,8 +2175,8 @@ function drawState(box, st, depth, onlySource, F, d) {
   if (st.form === "rate") {
     if (st.from) {
       const sub = h("div", { class: "nested" }); box.append(sub); drawState(sub, st.from, depth + 1, false, F, d);
-      sub.append(h("button", { class: "lnkbtn", onclick: () => { st.from = null; renderInspector(); } }, "Steady instead"));
-    } else box.append(h("button", { class: "lnkbtn", onclick: async () => { st.from = await ask("knob_new", "hits", null); renderInspector(); } }, "Make the rate follow the music"));
+      sub.append(h("button", { class: "lnkbtn", onclick: () => { st.from = null; renderSub(); } }, "Steady instead"));
+    } else box.append(h("button", { class: "lnkbtn", onclick: async () => { st.from = await ask("knob_new", "hits", null); renderSub(); } }, "Make the rate follow the music"));
   }
 }
 const k_mode = () => knobCtx ? knobCtx.mode : "knob";
@@ -2179,7 +2239,7 @@ async function renderSignals(list) {
     const on = sigLight && sigLight.name === s.name;
     list.append(h("div", { class: "sig" + (on ? " picked" : ""), onclick: e => { if (e.target.closest("button")) return; sigLight = on ? null : { name: s.name, ids }; renderTimeline(); renderSignals(list); } },
       h("div", { class: "row nowrap" }, h("b", { text: `&${s.name}` }), h("span", { class: "chip", text: s.kind }), h("span", { class: "spacer" }),
-        s.kind !== "other" && s.def ? h("button", { class: "lnkbtn", onclick: async () => { const got = await ask("edit_signal", s.name); if (got) { knobCtx = { ref: got.ref, keypath: got.keypath, mode: got.mode, title: got.title, data: got, state: got.state, link: "", anchor: "", back: sel }; sel = { type: "knob" }; renderInspector(); } } }, "Edit") : null),
+        s.kind !== "other" && s.def ? h("button", { class: "lnkbtn", onclick: async () => { const got = await ask("edit_signal", s.name); if (got) openKnobCtx({ ref: got.ref, keypath: got.keypath, mode: got.mode, title: got.title, data: got, state: got.state, link: "", anchor: "" }); } }, "Edit") : null),
       h("div", { class: "mono small", text: s.yaml }),
       h("div", { class: "hint", text: (s.def ? `defined in ${s.def.label}` : "defined in the scene's settings") + (s.uses.length ? ` · followed by ${s.uses.map(u => u.label).join(", ")}` : " · nothing follows it yet") })));
   }
@@ -2759,6 +2819,7 @@ async function openProject(source) {
   const name = typeof source === "string" ? source : "the command line's project";
   log("out", `open ${name}`);
   loadGen++;
+  subStack = []; knobCtx = null; renderSub();
   S = null; members = []; montage = []; pins = {}; sel = null; loop = null; engine = null; peaks = null; audioBuf = null; audioUrl = null; stemWaves = [];
   blockCovers.clear(); coversAsked.clear(); entryKey = null; showEntryPanel();
   picked = null; pickedFx = null; rowsOf = {}; groups = {}; has = {}; board = {}; montageBars = []; lastNote = ""; showPicked();
@@ -2776,6 +2837,7 @@ async function openProject(source) {
   loadGen = r.gen; steps = r.load; renderSteps();
 }
 function onOpened(st) {
+  subStack = []; knobCtx = null; renderSub();
   S = st; B = st.song.bars;
   catalogByKey = new Map(st.catalog.map(c => [c.key, c]));
   pausedAt = 0;
@@ -3020,12 +3082,13 @@ document.addEventListener("keydown", e => {
   const mod = e.ctrlKey || e.metaKey, key = e.key.toLowerCase();
   if (mod && key === "s") { e.preventDefault(); if (e.shiftKey) saveAs(); else save(); return; }
   if (mod && key === "o") { e.preventDefault(); openFileDialog(); return; }
-  if (e.key === "Escape") { closeCtx(); if (!$("start").hidden && S) hideStart(); return; }
+  if (e.key === "Escape") { const open = document.querySelector(".ctx"); closeCtx(); if (!$("start").hidden && S) hideStart(); else if (!open && !typing && subStack.length) popSub(); return; }
   if (typing || !$("start").hidden) return;
   if (mod && key === "z") { e.preventDefault(); edit(e.shiftKey ? "redo" : "undo"); return; }
   if (mod && key === "y") { e.preventDefault(); edit("redo"); return; }
   if (e.key === " " && tag !== "button") { e.preventDefault(); if (e.shiftKey) startRender(); else setPlaying(!playing); }
   else if (e.key === "Home") seek(loop ? B[loop[0] - 1] : 0);
+  else if (subStack.length && (e.key === "Delete" || e.key === "Backspace" || (mod && key === "d"))) subBusy();
   else if ((e.key === "Delete" || e.key === "Backspace") && sel) { e.preventDefault(); deleteSelected(); }
   else if (mod && key === "d" && sel && sel.type === "member") { e.preventDefault(); const m = memberById(sel.id); if (m) duplicateSpan(m, sel.k); }
 });
