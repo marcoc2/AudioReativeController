@@ -76,6 +76,22 @@ class Api:
     def _attach(self, window) -> None:
         self._window = window
         self._events.window = window
+        window.events.loaded += self._watch_drops
+
+    def _watch_drops(self) -> None:
+        """Files dropped from the Explorer: WebView2 gives their full paths to a drop handler
+        on the Python side (pywebview's DOM events); the page is told where they came down."""
+        from webview.dom import DOMEventHandler
+
+        def dropped(e):
+            files = ((e or {}).get("dataTransfer") or {}).get("files") or []
+            paths = [f.get("pywebviewFullPath") for f in files if isinstance(f, dict) and f.get("pywebviewFullPath")]
+            if paths:
+                self._events.emit("dropped", {"paths": paths, "x": e.get("clientX"), "y": e.get("clientY")})
+        try:
+            self._window.dom.document.events.drop += DOMEventHandler(dropped, prevent_default=True)
+        except Exception as exc:
+            self._events.log("warn", f"files dropped from the Explorer will not be heard: {exc}")
 
     def _close(self) -> None:
         self._preview.stop()
@@ -133,6 +149,14 @@ class Api:
     @_guarded
     def load_state(self):
         return self._loader.view()
+
+    @_guarded
+    def paths_kind(self, paths: list):
+        """Which dropped paths are clips (video or image files) and which folders."""
+        from core import arrangement as arr
+        ps = [Path(str(p)) for p in paths or []]
+        return {"clips": [str(p) for p in ps if p.is_file() and p.suffix.lower() in arr.VIDEOS + arr.IMAGES],
+                "folders": [str(p) for p in ps if p.is_dir()]}
 
     @_guarded
     def pick_file(self, kind: str, save: bool = False, suggested: str = ""):
@@ -320,7 +344,8 @@ SESSION_CALLS = ("spans", "relane", "add", "remove", "set_param", "set_layer", "
                  "to_bg", "put_in_montage", "video_settings", "set_video",
                  "plugin", "set_value", "set_text", "add_trigger", "rename_trigger", "drop_trigger", "set_trigger",
                  "add_gesture", "drop_item", "add_role", "set_role", "set_mask", "keypath_of",
-                 "knob_open", "knob_new", "knob_check", "knob_apply", "signals", "edit_signal", "project_fields")
+                 "knob_open", "knob_new", "knob_check", "knob_apply", "signals", "edit_signal", "project_fields",
+                 "list_clips", "clip_info", "place_clips", "clip_frame", "sam_open", "sam_check", "sam_apply", "sam_for_clip")
 
 
 def _session_call(name):

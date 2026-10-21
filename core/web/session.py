@@ -23,6 +23,7 @@ from typing import Callable, Optional
 
 import yaml
 
+from core.web.clips import Clips
 from core.web.edits import Edits
 from core.web.knobs import KnobEditor
 from core.web.plugin import Plugin
@@ -84,7 +85,7 @@ def _name_from_comments(pairs: list, seq, first_lead=None) -> None:
                 base["name"] = name
 
 
-class Session(Edits, KnobEditor, Plugin, ProjectEdits):
+class Session(Edits, KnobEditor, Plugin, ProjectEdits, Clips):
     """The open project: its song and bars, its scene, the arrangement being edited."""
 
     def __init__(self, media, events):

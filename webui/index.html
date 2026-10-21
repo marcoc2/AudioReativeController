@@ -52,6 +52,7 @@
     <input class="search" id="search" type="search" placeholder="Filter…" aria-label="Filter the browser">
     <div class="blist" id="blist"></div>
     <div class="pickedbar" id="picked" hidden></div>
+    <div class="player" id="player" hidden></div>
     <div class="legend">
       <div><span class="badge live">live</span>drawn here, in WebGL2</div>
       <div><span class="badge engine">engine</span>numpy / torch / multipass: at the render</div>
@@ -159,6 +160,11 @@
 <div class="modal" id="renderDlg" hidden><div class="modalcard wide" role="dialog" aria-labelledby="renderTitle">
   <h3 id="renderTitle">Render the video</h3>
   <div id="renderBody" class="renderbody"></div>
+</div></div>
+
+<div class="modal" id="samDlg" hidden><div class="modalcard wide sam" role="dialog" aria-labelledby="samTitle">
+  <h3 id="samTitle">SAM2 cutout</h3>
+  <div id="samBody"></div>
 </div></div>
 
 <div class="modal" id="modal" hidden><div class="modalcard" role="dialog" aria-modal="true" aria-labelledby="modalTitle">

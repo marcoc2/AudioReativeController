@@ -106,6 +106,8 @@ const ON = {
   montage: segs => { montage = segs || []; later(() => { renderTimeline(); if (sel && sel.type === "montage") renderInspector(); }); },
   knobs: () => { knobs.clear(); if (sel && sel.type === "member") renderInspector(); },
   covers: got => { for (const [clip, cover] of Object.entries(got || {})) thumbs.set(clip, cover); scheduleThumbRedraw(); },
+  lengths: got => { Object.assign(clipLens, got || {}); scheduleThumbRedraw(); },
+  dropped: e => onDropped(e),
   song: e => { if (S && e.url && e.url !== audioUrl) loadAudio(e.url); },
   engine: e => onEngine(e),
   proxies: got => { Object.assign(proxyOf, got || {}); },
@@ -908,8 +910,9 @@ function showSaveState(text, bad = false) {
 // ---------------------------------------------------------------------------
 let drag = null, rsel = null;
 const inner = $("inner");
-function edgeOf(el, clientX) {
-  if (el.classList.contains("cued")) return null;
+let shiftHeld = false, hoverAt = null;     // Shift held: a block's ends resize it
+function edgeOf(el, clientX, shift = true) {
+  if (!shift || el.classList.contains("cued")) return null;
   const r = el.getBoundingClientRect(), e = Math.min(EDGE, r.width / 3);
   return clientX - r.left < e ? "first" : r.right - clientX < e ? "last" : null;
 }
@@ -943,7 +946,7 @@ inner.addEventListener("pointerdown", e => {
     if (m.kind === "clip") { const s = spansOf(m)[k]; if (s && (s.file || m.file)) pickClip(s.file || m.file, s.from || 0); }
     if (m.cued) return;
     const s = spansOf(m)[Math.max(0, k)];
-    drag = { type: "block", m, k, el: bEl, mode: edgeOf(bEl, e.clientX) || "move", x0: e.clientX, y0: y, f0: s.first, l0: s.last, first: s.first, last: s.last, lane: m.lane, row: m.row, moved: false };
+    drag = { type: "block", m, k, el: bEl, mode: edgeOf(bEl, e.clientX, e.shiftKey) || "move", x0: e.clientX, y0: y, f0: s.first, l0: s.last, first: s.first, last: s.last, lane: m.lane, row: m.row, moved: false };
     try { bEl.setPointerCapture(e.pointerId); } catch (err) { /* a pointer that is not down */ }
     return;
   }
@@ -956,7 +959,8 @@ inner.addEventListener("pointermove", e => {
   const [x, y] = innerXY(e);
   if (!drag) {
     const bEl = e.target.closest(".block");
-    const end = bEl ? edgeOf(bEl, e.clientX) : null;
+    hoverAt = bEl ? { el: bEl, x: e.clientX } : null;
+    const end = bEl ? edgeOf(bEl, e.clientX, e.shiftKey) : null;
     if (bEl) bEl.style.cursor = bEl.classList.contains("cued") ? "default" : end ? "ew-resize" : "grab";
     showEdge(bEl, end);
     return;
@@ -1144,7 +1148,11 @@ function runItem(it, key) {
   if (it.page === "plugin") { const m = members.find(x => idOf(x.ref) === idOf(it.args[0])); if (m) openPlugin(m); return; }
   if (it.page === "preview") { previewBars(it.args[0], it.args[1]); return; }
   const args = it.args.map(a => a === "$key" ? key : a === "$from" ? (picked && picked.from) || 0 : a);
-  edit(it.call, ...args);
+  edit(it.call, ...args).then(r => {                // a SAM2 cutout just added: its seeds first
+    if (r && !r.error && it.call === "add_fx" && key === "sam_cutout" && Array.isArray(args[0]) && args[0].length > 1) {
+      const mm = memberById(idOf(args[0])); if (mm) openSam([...args[0], "fx", mm.fx.length - 1], true);
+    }
+  });
 }
 // items: {label, on, title, danger, disabled, sub: [...]} | {head} | {sep}
 function menuAt(x, y, items, parent = null) {
@@ -1214,6 +1222,7 @@ function wireLaneDrop(el, l) {
   });
 }
 function putItem(it, laneId, bar, row = null) {
+  if (it.type === "clip") return placeClips(laneId === "clips" ? "clips" : laneId, bar, [{ path: it.path, from: it.from || 0 }], row);
   const last = Math.min(NB(), bar + 3);
   if (laneId === "clips") return edit("put_in_montage", bar, bar, it.path, it.from || 0);
   return edit("new_member", laneId, it.type === "clip" ? it.path : it.key, bar, last, row, it.from || 0);
@@ -1251,18 +1260,7 @@ function renderBrowser() {
   };
   const isPicked = it => picked && (picked.key || picked.path) === (it.key || it.path);
   if (tab === "signals") { list.append(h("div", { class: "about", text: "…" })); renderSignals(list); return; }
-  if (tab === "clips") {
-    if (!S.clips.length) { list.append(h("div", { class: "empty-note", text: "The project has no clips folder." })); return; }
-    for (const c of S.clips.filter(c => c.name.toLowerCase().includes(q))) {
-      const it = { type: "clip", path: c.path, name: c.name, label: c.name.replace(/\.[^.]+$/, ""), url: c.url, from: 0 };
-      const th = thumbs.get(c.url);
-      const row = h("div", { class: "bitem" + (isPicked(it) ? " picked" : ""), title: `${c.name}: click to pick, then drag across BG or FG; or drag it onto a lane (4 bars), onto Clips to pin a bar`, onclick: e => { if (!e.target.closest("button")) pick(it); } },
-        h("span", { class: "sw", style: th ? `background-image:url(${th})` : "" }), h("span", { class: "nm", text: c.name }),
-        h("button", { class: "add", title: "Put 4 bars of it in the BG at the playhead", "aria-label": `Add ${c.name}`, onclick: () => putItem(it, "bg", barAt(now())) }, "+"));
-      drag(row, it); list.append(row);
-    }
-    return;
-  }
+  if (tab === "clips") { renderClipTab(list); return; }
   const byCat = new Map();
   for (const c of S.catalog) if (c.kind === tab && `${c.label} ${c.cat} ${c.about}`.toLowerCase().includes(q)) {
     if (!byCat.has(c.cat)) byCat.set(c.cat, []); byCat.get(c.cat).push(c);
@@ -1327,7 +1325,9 @@ function renderInspector() {
     box.append(h("div", { class: "about", text: "Every edit goes to Python (core.arrangement) and comes back as the lanes." }),
       h("div", { class: "keys" },
         h("span", { class: "kbd", text: "click" }), "pick in the browser, then drag across a lane to put it",
-        h("span", { class: "kbd", text: "drag" }), "move a block, onto another row or the other lane; its ends resize it",
+        h("span", { class: "kbd", text: "drag" }), "move a block, onto another row or the other lane",
+        h("span", { class: "kbd", text: "Shift+drag" }), "an end of a block: resize it",
+        h("span", { class: "kbd", text: "Explorer" }), "drop clips on a lane, or a folder on the browser",
         h("span", { class: "kbd", text: "right click" }), "its menu: FX, hide bars, copy and paste, delete",
         h("span", { class: "kbd", text: "ruler" }), "click to go there, drag to choose bars",
         h("span", { class: "kbd", text: "a lane's name" }), "its settings and FX (Clips: the montage's)",
@@ -1340,7 +1340,7 @@ function renderInspector() {
   }
   if (sel.type === "knob" && knobCtx) return inspKnob(box);
   if (sel.type === "knob") { sel = null; return renderInspector(); }
-  if (sel.type === "plugin") { $("inspTitle").textContent = "FX"; box.append(h("div", { class: "btnrow" }, h("button", { class: "btn sm", onclick: () => { sel = sel.back || null; renderInspector(); } }, "← back"))); pluginInto(box, sel.ref); return; }
+  if (sel.type === "plugin") { $("inspTitle").textContent = "FX"; const ref = sel.ref; box.append(h("div", { class: "btnrow" }, h("button", { class: "btn sm", onclick: () => { sel = sel.back || null; renderInspector(); } }, "← back"))); pluginInto(box, ref).then(() => { const p0 = box.querySelector(".plugin"); }); return; }
   if (sel.type === "montage") return inspMontageBars(box, sel.first, sel.last);
   if (sel.type === "clips") return inspMontage(box);
   if (sel.type === "lane") return inspLane(box, sel.group);
@@ -1427,7 +1427,8 @@ function inspPlacement(box, m) {
     field("Fit", h("select", { onchange: e => edit("set_layer", m.ref, "fit", e.target.value) }, ["contain", "cover"].map(f => h("option", { value: f, selected: f === p.fit, text: f })))),
     field("", h("div", { class: "row" }, check("flip", p.flip, v => edit("set_layer", m.ref, "flip", v)), check("loop", p.loop, v => edit("set_layer", m.ref, "loop", v))))));
   if (p.sam != null) {
-    box.append(h("div", { class: "about", style: "color:var(--live)", text: "Cut out by SAM2 at the render (its seeds: the sam_cutout FX below)." }));
+    box.append(h("div", { class: "row" }, h("span", { class: "about", style: "color:var(--live)", text: "Cut out by SAM2 at the render." }),
+      h("button", { class: "lnkbtn", onclick: () => openSam([...m.ref, "fx", p.sam]) }, "Seeds…")));
   } else if (p.cutout) {
     box.append(h("div", { class: "row" }, h("span", { class: "chip", text: `cut out by ${p.cutout}` }),
       h("button", { class: "lnkbtn", onclick: () => edit("set_layer", m.ref, "cutout", null) }, "Whole frame")),
@@ -1435,7 +1436,7 @@ function inspPlacement(box, m) {
   } else {
     box.append(h("div", { class: "row" }, h("span", { class: "chip", text: "not cut out (whole frame)" }),
       p.mask_track ? h("button", { class: "lnkbtn", onclick: () => edit("set_layer", m.ref, "cutout", { track: p.mask_track, feather: 2 }) }, `Cut out (${p.mask_track.split(/[\\/]/).pop()})`) : null,
-      h("button", { class: "lnkbtn", onclick: () => edit("add_fx", m.ref, "sam_cutout") }, "Cut out by SAM2")));
+      h("button", { class: "lnkbtn", onclick: async () => { const r = await edit("add_fx", m.ref, "sam_cutout"); if (r && !r.error) { const mm = memberById(idOf(m.ref)); if (mm) openSam([...m.ref, "fx", mm.fx.length - 1], true); } } }, "Cut out by SAM2…")));
   }
   if (m.own_fx) box.append(check("its FX may spill outside the figure (trails, glow, split edges)", m.spill, v => edit("set_layer", m.ref, "spill", v)));
 }
@@ -1456,7 +1457,8 @@ function fxList(title, rows, owner, draggable) {
       h("input", { type: "checkbox", checked: f.enabled, "aria-label": `${f.label} on`, onchange: () => edit("toggle", f.ref) }),
       h("span", { class: "nm", text: `${j + 1}. ${f.label}`, title: f.label }),
       textField(f.bars_text, "all", v => edit("set_windows", f.ref, v), `${f.label}: bars`),
-      h("button", { class: "ib", title: "its parameters", "aria-label": `${f.label}: its parameters`, onclick: () => { const mm = memberById(idOf(f.ref)); if (mm) openPlugin(mm); else { sel = { type: "plugin", ref: f.ref, back: sel }; renderInspector(); } } }, "⚙"),
+      f.sam ? h("button", { class: "ib", title: "its seeds: how SAM2 finds what to cut out", "aria-label": "SAM2 seeds", onclick: () => openSam(f.ref) }, "✂")
+        : h("button", { class: "ib", title: "its parameters", "aria-label": `${f.label}: its parameters`, onclick: () => { const mm = memberById(idOf(f.ref)); if (mm) openPlugin(mm); else { sel = { type: "plugin", ref: f.ref, back: sel }; renderInspector(); } } }, "⚙"),
       h("button", { class: "ib", title: "earlier", "aria-label": "Earlier", onclick: () => edit("reorder", f.ref, -1) }, "↑"),
       h("button", { class: "ib", title: "later", "aria-label": "Later", onclick: () => edit("reorder", f.ref, 1) }, "↓"),
       h("button", { class: "ib", title: "remove", "aria-label": "Remove", onclick: () => edit("remove", f.ref) }, "✕"));
@@ -1894,6 +1896,237 @@ function showFinal(j) {
 }
 
 // ---------------------------------------------------------------------------
+// The clip browser: any folder (the last one remembered), covers and lengths from Python,
+// the chosen clip playing from its "from" (its sound on or off), dragged onto a lane as long
+// as it plays (a long one asks first); files dropped from the Explorer
+// ---------------------------------------------------------------------------
+let clipFolder = "", clipList = [], clipLens = {}, clipChosen = null, clipSound = false;
+async function loadClipList(folder) {
+  const got = await ask("list_clips", folder || clipFolder || "", $("search").value.trim());
+  if (!got) return;
+  clipFolder = got.folder || ""; clipList = got.clips || [];
+  if (got.error) toast(got.error, true);
+  if (tab === "clips") renderBrowser();
+}
+async function chooseClip(path, from = 0) {
+  const info = await ask("clip_info", path);
+  if (!info) return;
+  clipChosen = { ...info, from: Math.min(from, info.duration || 0) };
+  pickClip(info.path, clipChosen.from);
+  showPlayer();
+}
+function showPlayer() {
+  const box = $("player");
+  if (!clipChosen) { box.hidden = true; return; }
+  const c = clipChosen;
+  box.hidden = false;
+  const url = proxyOf[c.url] || c.url;
+  const v = h("video", { src: url, playsinline: true, loop: false, preload: "auto", draggable: "true", title: "drag it onto a lane: it goes there as long as it plays" });
+  v.muted = !clipSound;
+  v.addEventListener("loadedmetadata", () => { v.currentTime = c.from || 0; v.play().catch(() => { }); });
+  v.addEventListener("ended", () => { v.currentTime = c.from || 0; v.play().catch(() => { }); });
+  v.addEventListener("dragstart", e => { dragItem = { type: "clip", path: c.path, name: c.name, label: c.name, from: c.from || 0 }; e.dataTransfer.setData("text/plain", c.path); e.dataTransfer.effectAllowed = "copy"; });
+  v.addEventListener("dragend", () => { dragItem = null; });
+  const out = h("output", { class: "mono", text: `${fmt(c.from || 0)} s` });
+  const slider = h("input", { type: "range", min: 0, max: Math.max(0.01, c.duration || 0), step: 0.01, value: c.from || 0, "aria-label": "From (s)",
+    oninput: e => { c.from = +e.target.value; out.textContent = `${fmt(c.from)} s`; v.currentTime = c.from; },
+    onchange: () => { pickClip(c.path, c.from); } });
+  box.replaceChildren(
+    h("div", { class: "pscreen" }, v, c.proxy === "making" && !proxyOf[c.url] ? h("div", { class: "pnote", text: "making a proxy the page can play…" }) : null),
+    h("div", { class: "pinfo", text: `${c.name} · ${fmt(c.duration || 0)} s · ${c.mask ? `mask: ${c.mask}` : "no mask track"}` }),
+    h("div", { class: "row nowrap" }, h("span", { class: "tlabel", text: "from" }), slider, out),
+    h("div", { class: "row" },
+      check("sound", clipSound, on => { clipSound = on; v.muted = !on; }),
+      h("button", { class: "lnkbtn", title: "the SAM2 cutout FX on its member in the FG (its seeds)", onclick: async () => {
+        const got = await ask("sam_for_clip", c.path); if (!got) return; if (got.lanes) apply(got); openSam(got.fx, got.new); } }, "Cut it out (SAM2)"),
+      h("button", { class: "lnkbtn", onclick: () => { clipChosen = null; showPlayer(); } }, "✕")));
+}
+function renderClipTab(list) {
+  const q = $("search").value.trim().toLowerCase();
+  const folderIn = h("input", { value: clipFolder, placeholder: "a folder of clips", spellcheck: "false", "aria-label": "Clips folder",
+    onkeydown: e => { if (e.key === "Enter") loadClipList(e.target.value); } });
+  list.append(h("div", { class: "row nowrap folderrow" }, folderIn,
+    h("button", { class: "ib", title: "choose a folder (any drive)", onclick: async () => { const got = await ask("pick_file", "folder"); if (got && got.path) loadClipList(got.path); } }, "…")));
+  if (!clipList.length) { list.append(h("div", { class: "empty-note", text: clipFolder ? "No clips here (or drop a folder from the Explorer)." : "Choose a folder of clips (or drop one from the Explorer)." })); return; }
+  for (const c of clipList.filter(c => c.name.toLowerCase().includes(q)).slice(0, 400)) {
+    const it = { type: "clip", path: c.path, name: c.name, label: c.name.replace(/\.[^.]+$/, ""), url: c.url, from: 0 };
+    const th = thumbs.get(c.url), len = clipLens[c.url];
+    const chosen = clipChosen && clipChosen.path === c.path;
+    const row = h("div", { class: "bitem clip" + (chosen ? " picked" : ""), title: `${c.name}: click to play it; drag it onto the BG, the FG or Clips (it goes as long as it plays)`,
+      onclick: e => { if (!e.target.closest("button")) chooseClip(c.path, 0); } },
+      h("span", { class: "sw big", style: th ? `background-image:url(${th})` : "" }),
+      h("span", { class: "nm2" }, h("span", { text: c.name }), len ? h("small", { text: `${fmt(len)} s` }) : null),
+      h("button", { class: "add", title: "Put it in the BG at the playhead, as long as it plays", "aria-label": `Add ${c.name}`, onclick: () => putItem(it, "bg", barAt(now())) }, "+"));
+    row.draggable = true;
+    row.addEventListener("dragstart", e => { dragItem = it; e.dataTransfer.setData("text/plain", c.path); e.dataTransfer.effectAllowed = "copy"; });
+    row.addEventListener("dragend", () => { dragItem = null; document.querySelectorAll(".drop-ok").forEach(x => x.classList.remove("drop-ok")); });
+    list.append(row);
+  }
+}
+// clips put on a lane, one after another, each as long as it plays; a long one asks first
+async function placeClips(lane, first, todo, row = null) {
+  let got = await edit("place_clips", lane, first, todo, null, row);
+  while (got && got.asking) {
+    const a = got.asking;
+    const v = await dialog(`${a.name}: ${fmt(a.seconds)} s`, `It plays ${a.bars} bars${a.from ? ` from ${fmt(a.from)} s` : ""}. How many bars should it take in the ${a.lane === "clips" ? "montage" : a.lane.toUpperCase()}, from bar ${a.first}?`,
+      [{ label: "Put it", value: "n", primary: true }, { label: `The whole video (${a.whole} bars${a.to_end ? ", to the song's end" : ""})`, value: "whole" }, { label: "Cancel", value: null }], String(a.suggest));
+    if (!v || !v.value) { toast(`${a.name} not put${a.todo.length > 1 ? ` (nor the ${a.todo.length - 1} after it)` : ""}`); return; }
+    const n = v.value === "whole" ? "whole" : Math.max(1, parseInt(v.text, 10) || a.suggest);
+    got = await edit("place_clips", a.lane, a.first, a.todo, n, a.row);
+  }
+}
+// files from the Explorer: on a lane they go there (clips, one after another from the bar
+// under the mouse); on the browser a folder is listed, a clip is chosen
+async function onDropped(e) {
+  const kinds = await ask("paths_kind", e.paths);
+  if (!kinds) return;
+  const el = document.elementFromPoint(e.x, e.y);
+  if (S && el && el.closest("#inner")) {
+    const r = inner.getBoundingClientRect(), l = laneAtY(e.y - r.top), bar = xToBar(e.x - r.left);
+    if (!kinds.clips.length) { toast("only video or image files go on the lanes", true); return; }
+    if (!l || !(l.id === "bg" || l.id === "fg" || l.kind === "clips")) { toast("a clip goes on the BG, the FG or Clips (the montage)", true); return; }
+    placeClips(l.kind === "clips" ? "clips" : l.id, bar, kinds.clips.map(p => ({ path: p, from: 0 })), l.kind === "track" ? rowAtY(l, e.y - r.top) : null);
+    return;
+  }
+  if (kinds.folders.length) { tab = "clips"; await loadClipList(kinds.folders[0]); renderBrowser(); }
+  else if (kinds.clips.length) { tab = "clips"; renderBrowser(); chooseClip(kinds.clips[0], 0); toast(`${kinds.clips[0].split(/[\\/]/).pop()} chosen: drag it (its picture) onto the BG, the FG or Clips`); }
+  else toast("drop video or image files, or a folder of them", true);
+}
+document.addEventListener("dragover", e => { if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) e.preventDefault(); });
+document.addEventListener("drop", e => {
+  if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) {
+    e.preventDefault();
+    if (!inWebview) toast("files from the Explorer need the app window (the browser does not tell their paths)", true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The SAM2 cutout: how SAM2 finds what to cut out of a clip. By itself (auto, as always), or
+// seeds of one's own: boxes and points (+ keep, - leave out) per object, on a frame
+// ---------------------------------------------------------------------------
+const SAM_COLOURS = ["#e2665a", "#3fb6a8", "#f0a04b", "#6aa7d8", "#c27cf0", "#9fb36a", "#e3c15b", "#d78bb0"];
+let sam = null;
+async function openSam(path, isNew = false) {
+  const got = await ask("sam_open", path);
+  if (!got) return;
+  sam = { ...got, path, isNew, obj: 0, tool: "box", drag: null, img: null };
+  $("samDlg").hidden = false;
+  drawSamPanel();
+  samFrame();
+}
+function samForm() {
+  return { mode: sam.mode, at: sam.at, objects: sam.objects, max_objects: sam.max_objects, granularity: sam.granularity,
+    reseed: sam.reseed, keep: sam.keep, feather: sam.feather, kept: sam.kept };
+}
+let samCheckTimer = 0;
+function samChanged() {
+  clearTimeout(samCheckTimer);
+  samCheckTimer = setTimeout(async () => { const r = await ask("sam_check", sam.clip, samForm()); if (r && sam) $("samCache").textContent = r.cache; }, 200);
+  drawSamCanvas();
+}
+async function samFrame() {
+  const r = await ask("clip_frame", sam.clip, sam.at);
+  if (!r || !sam) return;
+  const img = new Image();
+  img.onload = () => { if (sam) { sam.img = img; drawSamCanvas(); } };
+  img.src = r.url;
+}
+function drawSamPanel() {
+  const box = $("samBody"), seeding = sam.mode === "seeds";
+  $("samTitle").textContent = `SAM2 cutout · ${sam.name}`;
+  const atOut = h("output", { class: "mono", text: `${fmt(sam.at)} s` });
+  const cv = h("canvas", { id: "samCanvas", width: 480, height: 480, class: "samcanvas" });
+  wireSamCanvas(cv);
+  box.replaceChildren(h("div", { class: "samgrid" },
+    h("div", { class: "samleft" }, cv,
+      h("div", { class: "row nowrap" }, h("span", { class: "tlabel", text: "frame" }),
+        h("input", { type: "range", min: 0, max: Math.max(0.01, sam.duration), step: 0.04, value: sam.at, "aria-label": "Frame (s)",
+          oninput: e => { sam.at = +e.target.value; atOut.textContent = `${fmt(sam.at)} s`; }, onchange: () => { samFrame(); samChanged(); } }), atOut),
+      h("div", { class: "hint", text: `its block starts ${fmt(sam.start)} s into the clip` })),
+    h("div", { class: "samright" },
+      h("div", { class: "row" },
+        h("label", { class: "toggle" }, h("input", { type: "radio", name: "sammode", checked: !seeding, onchange: () => { sam.mode = "auto"; if (sam.keep === "all" && sam.wasFigures) sam.keep = "figures"; drawSamPanel(); samChanged(); } }), "auto: SAM2 finds the objects (as always)"),
+        h("label", { class: "toggle" }, h("input", { type: "radio", name: "sammode", checked: seeding, onchange: () => { sam.mode = "seeds"; if (sam.keep === "figures") { sam.keep = "all"; sam.wasFigures = true; } drawSamPanel(); samChanged(); } }), "my seeds: boxes and points on a frame")),
+      seeding ? h("div", { class: "samseeds" },
+        h("div", { class: "row nowrap" },
+          h("select", { "aria-label": "Object", onchange: e => { sam.obj = +e.target.value; drawSamCanvas(); } }, sam.objects.map((o, k) => h("option", { value: k, selected: k === sam.obj, text: `object ${k + 1}` }))),
+          h("button", { class: "btn sm", onclick: () => { sam.objects.push({ box: null, points: [] }); sam.obj = sam.objects.length - 1; drawSamPanel(); samChanged(); } }, "New object"),
+          h("button", { class: "btn sm", onclick: () => { sam.objects[sam.obj] = { box: null, points: [] }; samChanged(); } }, "Clear it"),
+          h("button", { class: "btn sm", onclick: () => { sam.objects = [{ box: null, points: [] }]; sam.obj = 0; drawSamPanel(); samChanged(); } }, "Clear all")),
+        h("div", { class: "row" }, [["box", "box"], ["plus", "+ point (keep this)"], ["minus", "− point (leave this out)"]].map(([k, label]) =>
+          h("label", { class: "toggle" }, h("input", { type: "radio", name: "samtool", checked: sam.tool === k, onchange: () => { sam.tool = k; } }), label))),
+        h("div", { class: "hint", text: "on the picture: drag a box, or click a point; a right click takes the chosen object's nearest seed away" }))
+        : h("div", { class: "fields" },
+          field("Objects at most", numField(sam.max_objects, v => { sam.max_objects = Math.max(1, Math.round(v)); samChanged(); }, { min: 1, max: 16, step: 1 })),
+          field("What", h("select", { onchange: e => { sam.granularity = e.target.value; samChanged(); } }, [["whole", "whole (characters, things)"], ["parts", "parts (eyes, hands…)"]].map(([v, t]) => h("option", { value: v, selected: v === sam.granularity, text: t })))),
+          field("New objects every (s)", numField(sam.reseed, v => { sam.reseed = Math.max(0, v); samChanged(); }, { min: 0, step: 0.5 }), "0: only at the cuts")),
+      h("div", { class: "fields" },
+        field("Keep", h("select", { onchange: e => { sam.keep = e.target.value; samChanged(); } }, [["figures", "the figures (not a backdrop SAM2 took for an object)"], ["all", "every object"], ["drop1", "all but object 1"]].map(([v, t]) => h("option", { value: v, selected: v === sam.keep, text: t })))),
+        field("Soft edge (px)", numField(sam.feather, v => { sam.feather = Math.max(0, Math.round(v)); samChanged(); }, { min: 0, step: 1 }))),
+      h("div", { class: "about", id: "samCache", text: sam.cache }),
+      h("div", { class: "btnrow" }, h("button", { class: "btn primary", onclick: () => closeSam(true) }, "OK"), h("button", { class: "btn", onclick: () => closeSam(false) }, "Cancel")))));
+  drawSamCanvas();
+}
+function samRect(cv) {
+  if (!sam.img) return [0, 0, cv.width, cv.height];
+  const k = Math.min(cv.width / sam.img.naturalWidth, cv.height / sam.img.naturalHeight);
+  const w = sam.img.naturalWidth * k, hh = sam.img.naturalHeight * k;
+  return [(cv.width - w) / 2, (cv.height - hh) / 2, w, hh];
+}
+function drawSamCanvas() {
+  const cv = $("samCanvas");
+  if (!cv || !sam) return;
+  const g = cv.getContext("2d"), [x0, y0, w, hh] = samRect(cv);
+  g.fillStyle = "#0b0c0f"; g.fillRect(0, 0, cv.width, cv.height);
+  if (sam.img) g.drawImage(sam.img, x0, y0, w, hh);
+  const V = (u, v) => [x0 + u * w, y0 + v * hh];
+  if (sam.mode !== "seeds") { g.fillStyle = "rgba(10,11,14,.7)"; g.fillRect(6, 6, 300, 22); g.fillStyle = "#e9e5db"; g.font = "12px 'IBM Plex Sans', sans-serif"; g.fillText("SAM2 finds the objects by itself on each shot", 12, 21); return; }
+  sam.objects.forEach((o, k) => {
+    const c = SAM_COLOURS[k % SAM_COLOURS.length], mine = k === sam.obj;
+    if (o.box) { const [a, b] = V(o.box[0], o.box[1]), [z, y] = V(o.box[2], o.box[3]); g.strokeStyle = c; g.lineWidth = mine ? 3 : 1; g.strokeRect(a, b, z - a, y - b); g.fillStyle = c; g.font = "bold 13px monospace"; g.fillText(String(k + 1), a + 4, b + 14); }
+    for (const [u, v, keep] of o.points || []) { const [px, py] = V(u, v); g.beginPath(); g.arc(px, py, mine ? 6 : 4, 0, Math.PI * 2); g.fillStyle = keep ? "#3cdc5a" : "#e63c3c"; g.fill(); g.strokeStyle = c; g.lineWidth = 2; g.stroke(); }
+  });
+  if (sam.drag) { const [a, b] = V(...sam.drag[0]), [z, y] = V(...sam.drag[1]); g.strokeStyle = "#fff"; g.lineWidth = 1; g.strokeRect(a, b, z - a, y - b); }
+}
+function wireSamCanvas(cv) {
+  const uv = e => { const r = cv.getBoundingClientRect(), k = cv.width / r.width, [x0, y0, w, hh] = samRect(cv);
+    return [Math.min(1, Math.max(0, ((e.clientX - r.left) * k - x0) / w)), Math.min(1, Math.max(0, ((e.clientY - r.top) * k - y0) / hh))]; };
+  cv.addEventListener("contextmenu", e => {
+    e.preventDefault();
+    if (sam.mode !== "seeds") return;
+    const [u, v] = uv(e), o = sam.objects[sam.obj];
+    const near = (o.points || []).map((p, i) => [Math.abs(p[0] - u) + Math.abs(p[1] - v), i]).filter(n => n[0] <= 0.08).sort((a, b) => a[0] - b[0]);
+    if (near.length) o.points.splice(near[0][1], 1);
+    else if (o.box && o.box[0] <= u && u <= o.box[2] && o.box[1] <= v && v <= o.box[3]) o.box = null;
+    samChanged();
+  });
+  cv.addEventListener("pointerdown", e => {
+    if (e.button !== 0 || sam.mode !== "seeds") return;
+    const [u, v] = uv(e);
+    if (sam.tool === "box") { sam.drag = [[u, v], [u, v]]; try { cv.setPointerCapture(e.pointerId); } catch (err) { /* not down */ } }
+    else { sam.objects[sam.obj].points.push([+u.toFixed(4), +v.toFixed(4), sam.tool === "plus" ? 1 : 0]); samChanged(); }
+  });
+  cv.addEventListener("pointermove", e => { if (sam && sam.drag) { sam.drag[1] = uv(e); drawSamCanvas(); } });
+  cv.addEventListener("pointerup", e => {
+    if (!sam || !sam.drag) return;
+    const [a, b] = sam.drag[0], [u, v] = uv(e);
+    sam.drag = null;
+    if (Math.abs(u - a) > 0.01 && Math.abs(v - b) > 0.01)
+      sam.objects[sam.obj].box = [+Math.min(a, u).toFixed(4), +Math.min(b, v).toFixed(4), +Math.max(a, u).toFixed(4), +Math.max(b, v).toFixed(4)];
+    samChanged();
+  });
+}
+async function closeSam(ok) {
+  if (!sam) return;
+  const s = sam;
+  if (ok) {
+    const r = await edit("sam_apply", s.path, samForm());
+    if (!r || r.error) return;
+  } else if (s.isNew) await edit("remove", s.path);
+  sam = null; $("samDlg").hidden = true;
+}
+
+// ---------------------------------------------------------------------------
 // Meters: the MIDI tracks, and the chosen block's knobs
 // ---------------------------------------------------------------------------
 function buildMeters() {
@@ -2040,6 +2273,7 @@ function onOpened(st) {
   apply(st);
   if (st.montage) montage = st.montage;
   buildMeters(); renderBrowser(); renderTimeline(); showResolution();
+  loadClipList(st.clips_dir || "");
   if (st.song.audio_url) loadAudio(st.song.audio_url);
   if (st.project.converted) log("warn", "a flat scene: grouped into BG / FG / master; Save writes it so");
   if (st.load) { steps = st.load; renderSteps(); }
@@ -2146,7 +2380,7 @@ async function reloadScene() {
 // Wiring and start
 // ---------------------------------------------------------------------------
 document.querySelectorAll(".browser .tab").forEach(b => b.addEventListener("click", () => { tab = b.dataset.tab; renderBrowser(); }));
-$("search").addEventListener("input", renderBrowser);
+$("search").addEventListener("input", () => { if (tab === "clips") loadClipList(clipFolder); else renderBrowser(); });
 function showDock(which) {
   document.querySelectorAll(".dock .tab").forEach(b => b.setAttribute("aria-selected", b.dataset.dock === which));
   $("dockLog").hidden = which !== "log"; $("dockYaml").hidden = which !== "yaml"; $("dockProject").hidden = which !== "project";
@@ -2223,6 +2457,15 @@ document.addEventListener("keydown", e => {
   else if (mod && key === "d" && sel && sel.type === "member") { e.preventDefault(); const m = memberById(sel.id); if (m) duplicateSpan(m, sel.k); }
 });
 window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+for (const kind of ["keydown", "keyup"]) document.addEventListener(kind, e => {
+  if (e.key !== "Shift" || drag) return;
+  shiftHeld = kind === "keydown";
+  if (hoverAt && hoverAt.el.isConnected) {
+    const end = edgeOf(hoverAt.el, hoverAt.x, shiftHeld);
+    hoverAt.el.style.cursor = hoverAt.el.classList.contains("cued") ? "default" : end ? "ew-resize" : "grab";
+    showEdge(hoverAt.el, end);
+  }
+});
 
 let booted = false;
 async function boot() {
