@@ -38,7 +38,7 @@ class AudioFeatureExtractor:
     Advanced feature extractor with dynamic AI separation modes.
     """
     def __init__(self, file_path, fps=60, temporal_smoothing=0.7, frequency_smoothing=1.5, separation_mode="demucs",
-                 prebuilt_stems=None, skip_separation=False, max_seconds=None):
+                 prebuilt_stems=None, skip_separation=False, max_seconds=None, progress=None):
         self.file_path = Path(file_path)             # Absolute path to the audio file
         self.fps = fps                               # Frames per second for the output animation
         self.sample_rate = 0                         # Audio sample rate (e.g., 44100Hz)
@@ -69,17 +69,24 @@ class AudioFeatureExtractor:
         self.stem_service = StemService() if (StemService and not skip_separation) else None
         self.prebuilt_stems = prebuilt_stems or {}  # {name: file_path} — loaded additively after AI
         self.max_seconds = max_seconds               # Analyse only the first N seconds (None = whole file)
+        self.progress = progress                     # progress(stage, done, of, message): stage "features" or "stems"
 
         self.load_audio()
         self.precompute_features()
         self.update_num_bands(3) 
 
+    def _tell(self, stage, done, of, message=""):
+        if self.progress is not None:
+            self.progress(stage, done, of, message)
+
     def load_audio(self):
+        self._tell("features", 0, 4, "decoding the song")
         self.y, self.sample_rate = librosa.load(self.file_path, sr=None, duration=self.max_seconds)
         self.duration = librosa.get_duration(y=self.y, sr=self.sample_rate)
         self.hop_length = int(self.sample_rate / self.fps)
 
     def precompute_features(self):
+        self._tell("features", 1, 4, "the spectrum")
         self.stft_mag = np.abs(librosa.stft(self.y, n_fft=self.n_fft, hop_length=self.hop_length))
         self.spectrogram = librosa.amplitude_to_db(self.stft_mag, ref=np.max)
         spec_min, spec_max = self.spectrogram.min(), self.spectrogram.max()
@@ -88,12 +95,17 @@ class AudioFeatureExtractor:
         self.spectrogram = np.nan_to_num(self.spectrogram)
         if self.frequency_smoothing > 0:
             self.spectrogram = gaussian_filter1d(self.spectrogram, sigma=self.frequency_smoothing, axis=0)
+        self._tell("features", 2, 4, "waiting for the stems")
         self._separate_stems()
         if self.prebuilt_stems:
             self._load_prebuilt_stems()
+        heard = sum(1 for e in self.stems_energy.values() if e is not None and len(e) and float(np.max(e)) > 0)
+        self._tell("stems", 1, 1, f"{heard} with sound")
+        self._tell("features", 3, 4, "onsets, sub-bands, texture")
         self._calculate_percentiles()
         self._precompute_audio_features()
         self.times = librosa.frames_to_time(np.arange(self.spectrogram.shape[1]), sr=self.sample_rate, hop_length=self.hop_length)
+        self._tell("features", 4, 4, "done")
 
     SUBBAND_RANGES = {
         "sub_bass":   (20,    60),
@@ -157,7 +169,8 @@ class AudioFeatureExtractor:
     def _load_prebuilt_stems(self):
         """Load extra audio files into stems_energy. Called after normal separation."""
         n_frames = self.spectrogram.shape[1]
-        for name, path in self.prebuilt_stems.items():
+        for k, (name, path) in enumerate(self.prebuilt_stems.items()):
+            self._tell("stems", k, len(self.prebuilt_stems), f"the project's {name}")
             try:
                 sy, _ = librosa.load(path, sr=self.sample_rate, duration=self.max_seconds)
                 energy = librosa.feature.rms(y=sy, hop_length=self.hop_length)[0]
@@ -171,6 +184,7 @@ class AudioFeatureExtractor:
 
     def _separate_stems(self):
         if not self.stem_service:
+            self._tell("stems", 0, 1, "AI separation skipped")
             for s in self.stem_types: self.stems_energy[s] = np.zeros(self.spectrogram.shape[1])
             return
 
@@ -186,7 +200,9 @@ class AudioFeatureExtractor:
                     files = list(cache_folder.glob(f"*{s_type}*.flac"))
                     if files: found_stems[s_type] = str(files[0])
             if len(found_stems) < len(expected_stems):
-                stems = self.stem_service.separate(str(self.file_path), mode=self.separation_mode)
+                self._tell("stems", 0, 1, f"separating with {self.separation_mode} (minutes, on the GPU)")
+                stems = self.stem_service.separate(str(self.file_path), mode=self.separation_mode,
+                                                   progress_callback=lambda msg, frac: self._tell("stems", frac, 1, msg))
                 if stems:
                     old_path = Path(stems[0].file_path).parent
                     if cache_folder.exists(): shutil.rmtree(cache_folder)
@@ -199,7 +215,10 @@ class AudioFeatureExtractor:
                         files = list(cache_folder.glob(f"*{s_type}*.flac"))
                         if files: found_stems[s_type] = str(files[0])
 
-            for s_type, s_path in found_stems.items():
+            else:
+                self._tell("stems", 0, 1, "from the cache")
+            for k, (s_type, s_path) in enumerate(found_stems.items()):
+                self._tell("stems", k, max(1, len(found_stems)), f"reading {s_type}")
                 sy, _ = librosa.load(s_path, sr=self.sample_rate)
                 energy = librosa.feature.rms(y=sy, hop_length=self.hop_length)[0]
                 e_max = energy.max()

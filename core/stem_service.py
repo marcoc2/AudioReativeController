@@ -118,7 +118,22 @@ class StemService:
         if handler is None:
             raise ValueError(f"Unknown stem mode: {mode!r}")
         with _float32_default_dtype():
-            return handler(separator, audio_path, output_dir, progress_callback)
+            stems = handler(separator, audio_path, output_dir, progress_callback)
+        if progress_callback:
+            progress_callback(f"{len(stems)} stems separated", 1.0)
+        return stems
+
+    @staticmethod
+    def _run(sep, model: str, audio_path: str, output_dir: Path, cb):
+        """Load ``model`` and separate (audio-separator tells no progress: its steps are told)."""
+        sep.output_dir = str(output_dir)
+        sep.output_format = "flac"
+        if cb:
+            cb(f"loading {model}", 0.05)
+        sep.load_model(model_filename=model)
+        if cb:
+            cb("separating", 0.15)
+        return sep.separate(audio_path)
 
     @staticmethod
     def _resolve(fpath: str, output_dir: Path) -> Path:
@@ -133,10 +148,7 @@ class StemService:
         return "other"
 
     def _separate_vocals(self, sep, audio_path, output_dir, cb) -> List[StemInfo]:
-        sep.output_dir = str(output_dir)
-        sep.output_format = "flac"
-        sep.load_model(model_filename=self.ROFORMER_MODEL)
-        files = sep.separate(audio_path)
+        files = self._run(sep, self.ROFORMER_MODEL, audio_path, output_dir, cb)
         stems: List[StemInfo] = []
         for fp in files:
             fp = self._resolve(str(fp), output_dir)
@@ -145,17 +157,11 @@ class StemService:
         return stems
 
     def _separate_demucs_6s(self, sep, audio_path, output_dir, cb) -> List[StemInfo]:
-        sep.output_dir = str(output_dir)
-        sep.output_format = "flac"
-        sep.load_model(model_filename=self.DEMUCS_6S_MODEL)
-        files = sep.separate(audio_path)
+        files = self._run(sep, self.DEMUCS_6S_MODEL, audio_path, output_dir, cb)
         return self._wrap_6stems(files, output_dir, cb)
 
     def _separate_roformer_sw(self, sep, audio_path, output_dir, cb) -> List[StemInfo]:
-        sep.output_dir = str(output_dir)
-        sep.output_format = "flac"
-        sep.load_model(model_filename=self.ROFORMER_SW_MODEL)
-        files = sep.separate(audio_path)
+        files = self._run(sep, self.ROFORMER_SW_MODEL, audio_path, output_dir, cb)
         return self._wrap_6stems(files, output_dir, cb)
 
     def _wrap_6stems(self, files, output_dir, cb) -> List[StemInfo]:

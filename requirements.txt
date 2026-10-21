@@ -12,6 +12,7 @@ mido>=1.3
 PyYAML>=6.0
 ruamel.yaml>=0.18      # the GUI saves scenes round-trip (comments, anchors)
 dearpygui>=2.0
+pywebview>=6.0           # ARC Studio on the web view (arc_studio_web.py)
 sounddevice>=0.4
 moderngl>=5.10
 opencv-python>=4.8

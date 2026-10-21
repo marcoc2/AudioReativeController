@@ -247,6 +247,70 @@ def set_knob(doc: "SceneDoc", text: str, key_path: tuple, spec: Any, extra: Opti
 _MISSING = object()
 
 
+def same_layer(a: Any, b: Any) -> bool:
+    """The same layer, perhaps edited: its source, its file and its name say so."""
+    return (isinstance(a, dict) and isinstance(b, dict) and a.get("source", "clips") == b.get("source", "clips")
+            and a.get("file") == b.get("file") and a.get("name") == b.get("name"))
+
+
+def match_items(base: list, new: list) -> list:
+    """For each item of ``new``, the index of the ``base`` item it is, or None for a new one.
+    An equal item first; else the same layer edited (``same_layer``), the one that kept the
+    most of what it said, the nearest place on a tie (two unnamed layers of one source)."""
+    pnew = [plain(v) for v in new]
+    got: list = [None] * len(new)
+    used: set = set()
+
+    def nearest(i, js):
+        return min(js, key=lambda j: abs(j - i)) if js else None
+    for i, v in enumerate(pnew):
+        j = nearest(i, [j for j, b in enumerate(base) if j not in used and b == v])
+        if j is not None:
+            got[i] = j
+            used.add(j)
+    for i, v in enumerate(pnew):
+        if got[i] is not None:
+            continue
+        same = [j for j, b in enumerate(base) if j not in used and same_layer(b, v)]
+        if not same:
+            continue
+        kept = {j: sum(1 for k, x in v.items() if base[j].get(k, _MISSING) == x) for j in same}
+        best = max(kept.values())
+        j = nearest(i, [j for j in same if kept[j] == best])
+        got[i] = j
+        used.add(j)
+    return got
+
+
+def _patch_items(node: list, base: list, new: list, root: Any) -> list:
+    """A list of layers that grew, shrank or changed order: the items it still has keep
+    their place in the tree (an edited one is patched there, with its comments), the new
+    ones go in as they are."""
+    out = []
+    for v, j in zip(new, match_items(base, new)):
+        out.append(v if j is None else apply_diff(node[j], base[j], v, root))
+    if isinstance(node, CommentedSeq):
+        _keep_comments_with_layers(node, out)
+    else:
+        node[:] = out
+    return node
+
+
+def _move_lead(parent: Any, key: Any, seq: CommentedSeq, first: Any) -> None:
+    """The comment lines above a list's first item are kept by the key holding the list;
+    when that item moved down they go with it (above it, by place), when it went, so do they."""
+    ca = getattr(parent, "ca", None)
+    entry = ca.items.get(key) if ca is not None else None
+    if not entry or len(entry) < 4 or not entry[3]:
+        return
+    lead, entry[3] = entry[3], None
+    if seq.ca.comment and len(seq.ca.comment) > 1:
+        seq.ca.comment[1] = None
+    at = next((i for i, x in enumerate(seq) if x is first), None)
+    if at:
+        seq.ca.items[at] = [None, lead, None, None]
+
+
 def apply_diff(node: Any, base: Any, new: Any, root: Any = None) -> Any:
     """Patch ``node`` (the tree) with what changed from ``base`` (plain) to ``new``.
 
@@ -254,7 +318,8 @@ def apply_diff(node: Any, base: Any, new: Any, root: Any = None) -> Any:
     place (so its comments, anchor and style stay), else the new value. Where ``new`` is
     another signal than ``node`` (an anchor tied or untied there), the place takes it
     whole: a ``*name`` becomes the ``root`` tree's object of that name, so it stays an
-    alias, and untying a ``*name`` leaves the signal itself alone."""
+    alias, and untying a ``*name`` leaves the signal itself alone. A list of layers that
+    grew, shrank or was reordered keeps the layers it still has (``match_items``)."""
     a_node, a_new = _anchor_name(node), _anchor_name(new)
     if plain(new) == base and a_node == a_new:
         return node
@@ -272,9 +337,12 @@ def apply_diff(node: Any, base: Any, new: Any, root: Any = None) -> Any:
         for n, (k, v) in enumerate(new.items()):
             have = node.get(k, _MISSING)
             if k in base and have is not _MISSING:
+                first = have[0] if isinstance(have, CommentedSeq) and len(have) else None
                 r = apply_diff(have, base[k], v, root)
                 if r is not have:
                     node[k] = r
+                elif first is not None and (not len(have) or have[0] is not first):
+                    _move_lead(node, k, have, first)
             elif have is _MISSING and hasattr(node, "insert"):
                 # next to the key before it in ``new`` (bars_per_clip by clip_per_bar)
                 prev = [p for p in order[:n] if p in node]
@@ -283,14 +351,50 @@ def apply_diff(node: Any, base: Any, new: Any, root: Any = None) -> Any:
             elif have is _MISSING or plain(have) != plain(v):
                 node[k] = v
         return node
-    if (isinstance(new, list) and isinstance(base, list) and isinstance(node, list)
-            and len(new) == len(base) == len(node)):
-        for i, v in enumerate(new):
-            r = apply_diff(node[i], base[i], v, root)
-            if r is not node[i]:
-                node[i] = r
-        return node
+    if isinstance(new, list) and isinstance(base, list) and isinstance(node, list) and len(base) == len(node):
+        in_place = len(new) == len(base) and all(
+            not (isinstance(b, dict) and isinstance(v, dict)) or plain(v) == b or same_layer(b, v)
+            for b, v in zip(base, new))
+        if in_place:
+            for i, v in enumerate(new):
+                r = apply_diff(node[i], base[i], v, root)
+                if r is not node[i]:
+                    node[i] = r
+            return node
+        if base and new and all(isinstance(x, dict) for x in list(base) + list(new)):
+            return _patch_items(node, base, new, root)
     return new
+
+
+def tidy(node: Any, key: Any = None) -> None:
+    """Small parts written on one line: bars, blocks, cutouts, each FX of a list; the
+    signals (anchored parts) as they are."""
+    def one_line(v):
+        if _anchor_name(v):
+            return v
+        if isinstance(v, dict):
+            out = CommentedMap((k, one_line(x)) for k, x in v.items())
+        elif isinstance(v, list):
+            out = CommentedSeq(one_line(x) for x in v)
+        else:
+            return v
+        out.fa.set_flow_style()
+        return out
+    if isinstance(node, dict) and not _anchor_name(node):
+        for k in list(node.keys()):
+            v = node[k]
+            if k in ("bars", "cutout", "at", "pins") and isinstance(v, (dict, list)):
+                node[k] = one_line(v)
+            elif k in ("fx", "blocks") and isinstance(v, list):
+                seq = v if isinstance(v, CommentedSeq) else CommentedSeq(v)
+                for j, x in enumerate(seq):
+                    seq[j] = one_line(x) if isinstance(x, dict) else x
+                node[k] = seq
+            else:
+                tidy(v, k)
+    elif isinstance(node, list):
+        for x in node:
+            tidy(x)
 
 
 def _tail(node):
@@ -359,6 +463,28 @@ def _keep_comments_with_layers(seq: CommentedSeq, out: list) -> None:
             cont, key, slot = tail
             entry = cont.ca.items.setdefault(key, [None] * (4 if isinstance(cont, CommentedMap) else 2))
             entry[slot] = trailing[None]
+
+
+NEW_SCENE = """# {name}: a new scene. The clips layer is the base (and the cut schedule the cut knobs
+# read); add the layers on top in the editor.
+video:
+  clip_per_bar: true
+  clip_order: shuffle
+  layers:
+    - source: clips
+"""
+
+
+def new_scene_path(name: str, folder: str = "scenes") -> Path:
+    """scenes/<name>.yaml for a name typed in the GUI (letters, digits, - and _)."""
+    import re
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", str(name).strip()).strip("_")
+    if not stem:
+        raise ValueError("give the scene a name")
+    path = Path(folder) / f"{stem}.yaml"
+    if path.exists():
+        raise ValueError(f"{path.as_posix()} already exists")
+    return path
 
 
 class SceneDoc:
@@ -480,7 +606,10 @@ class SceneDoc:
             return
         if not (isinstance(seq, list) and len(seq) == len(out) and all(a is b for a, b in zip(seq, out))):
             if isinstance(seq, CommentedSeq):
+                first = seq[0] if len(seq) else None
                 _keep_comments_with_layers(seq, out)
+                if first is not None and (not len(seq) or seq[0] is not first):
+                    _move_lead(video, "layers", seq, first)
             else:
                 video["layers"] = CommentedSeq(out)
         self._dedupe_anchors()           # a signal edited in one layer and used in another

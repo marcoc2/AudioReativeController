@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ARC Studio</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+<div class="toolbar">
+  <span class="brand">ARC</span>
+  <div class="menuwrap">
+    <button class="btn projbtn" id="bProject" aria-haspopup="menu" aria-expanded="false" title="Switch project">
+      <span id="projName">No project</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4z"/></svg></button>
+  </div>
+  <div class="tgroup">
+    <button class="ibtn" id="bStart" title="To the start of the chosen bars (Home)" aria-label="To start"><svg viewBox="0 0 16 16"><path d="M3 2h2v12H3zM14 2v12L6 8z"/></svg></button>
+    <button class="ibtn" id="bPlay" title="Play / pause (Space)" aria-label="Play or pause"><svg viewBox="0 0 16 16" id="playIcon"><path d="M4 2l10 6-10 6z"/></svg></button>
+  </div>
+  <div class="lcd"><b id="lcdPos">1.1</b><span id="lcdTime">0:00.0</span></div>
+  <span class="chip loop" id="loopChip" hidden><span id="loopText"></span><button id="loopClear" title="Play the whole song" aria-label="Clear the chosen bars">✕</button></span>
+  <div class="tgroup"><span class="tlabel">Zoom</span><input type="range" id="zoom" min="12" max="120" value="34" aria-label="Timeline zoom"></div>
+  <span class="spacer"></span>
+  <button class="chip loadchip" id="loadChip" hidden title="Show the loading steps"><span class="dot busy" id="loadDot"></span><span id="loadText">loading</span></button>
+  <div class="tgroup">
+    <button class="btn" id="bUndo" title="Ctrl+Z">Undo</button>
+    <button class="btn" id="bRedo" title="Ctrl+Y">Redo</button>
+  </div>
+  <div class="tgroup savegroup">
+    <span class="savestate" id="saveState" aria-live="polite"></span>
+    <button class="btn" id="bSave" title="Ctrl+S: write the scene">Save</button>
+    <div class="menuwrap"><button class="btn icononly" id="bSaveMenu" aria-haspopup="menu" aria-expanded="false" aria-label="More: save as, reload" title="Save as…, Reload"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4z"/></svg></button></div>
+  </div>
+  <div class="tgroup">
+    <button class="btn primary" id="bRender" title="The engine renders the chosen bars (clip_generator.py, on the GPU)">Render bars</button>
+    <button class="btn danger" id="bStop" hidden>Stop</button>
+  </div>
+  <span class="chip"><span class="dot" id="engineDot"></span><span id="engineText">engine idle</span></span>
+  <div class="progress" id="prog" hidden><i id="progBar"></i></div>
+</div>
+
+<div class="work">
+  <section class="pane browser" aria-label="Browser">
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" data-tab="clips" aria-selected="false">Clips</button>
+      <button class="tab" role="tab" data-tab="gen" aria-selected="true">Generators</button>
+      <button class="tab" role="tab" data-tab="fx" aria-selected="false">FX</button>
+    </div>
+    <input class="search" id="search" type="search" placeholder="Filter…" aria-label="Filter the browser">
+    <div class="blist" id="blist"></div>
+    <div class="legend">
+      <div><span class="badge live">live</span>drawn here, in WebGL2</div>
+      <div><span class="badge engine">engine</span>numpy / torch / multipass: at the render</div>
+    </div>
+  </section>
+
+  <section class="pane stage" aria-label="Preview">
+    <div class="phead"><h2>Preview</h2>
+      <div class="seg" role="group" aria-label="What the preview shows">
+        <button id="viewLive" aria-pressed="true">Live</button>
+        <button id="viewEngine" aria-pressed="false" disabled title="Render some bars first">Engine render</button>
+      </div>
+      <span class="spacer"></span><span class="chip"><span class="dot"></span><span id="fpsText">live</span></span></div>
+    <div class="screen" id="screen">
+      <canvas id="gl" width="640" height="360"></canvas>
+      <video id="engineVideo" muted playsinline hidden></video>
+      <div class="ov bot" id="ovBot"></div>
+    </div>
+    <div class="meters" id="meters"></div>
+  </section>
+
+  <section class="pane inspector" aria-label="Plugin">
+    <div class="phead"><h2 id="inspTitle">Plugin</h2></div>
+    <div class="insp" id="insp"></div>
+  </section>
+</div>
+
+<section class="tl" aria-label="Arrange">
+  <div class="heads" id="heads"></div>
+  <div class="scroll" id="scroll"><div class="inner" id="inner"></div></div>
+</section>
+
+<section class="dock">
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" data-dock="log" aria-selected="true">Log <span class="errbadge" id="errBadge" hidden></span></button>
+    <button class="tab" role="tab" data-dock="yaml" aria-selected="false">YAML</button>
+    <span class="spacer"></span>
+    <div class="logfilter" id="logFilter" role="group" aria-label="Show in the log">
+      <button data-kind="all" aria-pressed="true">All</button>
+      <button data-kind="err" aria-pressed="false">Errors</button>
+      <button data-kind="warn" aria-pressed="false">Warnings</button>
+      <button data-kind="io" aria-pressed="false">Edits</button>
+      <button data-kind="sys" aria-pressed="false">Engine</button>
+    </div>
+  </div>
+  <div class="dockbody" id="dockLog"><div class="log" id="log"></div></div>
+  <div class="dockbody" id="dockYaml" hidden><pre class="yaml" id="yaml">Pick a block: its layer shows here. Save shows the whole scene.</pre></div>
+</section>
+
+<!-- the loading steps: over the work area, never blocking it -->
+<aside class="loadpanel" id="loadPanel" hidden aria-label="Loading the project">
+  <div class="lphead">
+    <div><div class="lptitle" id="lpTitle">Opening…</div><div class="lpsub" id="lpSub"></div></div>
+    <span class="spacer"></span>
+    <button class="btn" id="lpCancel">Cancel</button>
+    <button class="ibtn" id="lpClose" aria-label="Hide the loading steps" title="Hide (the toolbar keeps a chip)"><svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" fill="none"/></svg></button>
+  </div>
+  <ol class="steps" id="steps"></ol>
+</aside>
+
+<!-- the start: what was open last, the projects, open or make one -->
+<div class="start" id="start" hidden>
+  <div class="startcard" role="dialog" aria-labelledby="startTitle">
+    <div class="starthead">
+      <div><div class="brand big">ARC Studio</div><h1 id="startTitle">Open a project</h1></div>
+      <button class="ibtn" id="startClose" aria-label="Back to the open project" title="Back" hidden><svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" fill="none"/></svg></button>
+    </div>
+    <div class="startcols">
+      <div class="startcol"><h2>Recent</h2><div class="plist" id="recentList"></div></div>
+      <div class="startcol"><h2>In projects/</h2><div class="plist" id="projList"></div></div>
+    </div>
+    <div class="startactions">
+      <button class="btn" id="bOpenFile">Open…</button>
+      <button class="btn" id="bNewFromAudio">New from an audio file…</button>
+      <form class="pathform" id="pathForm" hidden>
+        <input id="pathInput" placeholder="a project's path, e.g. projects/song.yaml" aria-label="Project path" spellcheck="false">
+        <button class="btn primary" type="submit">Open</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="modal" hidden><div class="modalcard" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+  <h3 id="modalTitle"></h3><p id="modalText"></p>
+  <input id="modalInput" hidden spellcheck="false" aria-label="Value">
+  <div class="btnrow" id="modalBtns"></div>
+</div></div>
+<script src="/ui/app.js"></script>
+</body>
+</html>

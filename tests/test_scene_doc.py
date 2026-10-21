@@ -140,3 +140,86 @@ def test_plain_keeping_signals_writes_back_still_tied():
     doc.set_layers([tuple(it) for it in items])
     out = doc.dumps()
     assert "amount: &soft {hits: {track: kick}}" in out and "amount: *soft" in out
+
+
+GROUPED = """\
+video:
+  layers:
+    - source: clips
+    - source: group
+      name: BG
+      layers:
+        # the sky, slow
+        - {source: shadertoy, file: shaders/shadertoy/sky.glsl, bars: [1, 8], uniforms: {u_speed: 0.2}}
+        - source: footage            # the river
+          file: river.mp4
+          blocks: [{bars: [3, 6]}]
+        - {source: shadertoy, file: shaders/shadertoy/rain.glsl, bars: [9, 12]}
+"""
+
+
+def _layers_after(text, edit):
+    """The scene's text after ``edit`` changed the BG's members (plain dicts), patched."""
+    doc = SceneDoc.from_text(text)
+    nodes = doc.layers()
+    items = [(n, plain(n), plain(n)) for n in nodes]
+    edit(items[1][2]["layers"])
+    doc.set_layers(items)
+    return doc.dumps()
+
+
+def test_a_member_added_to_a_lane_leaves_the_others_as_they_were():
+    def add(members):
+        members.append({"source": "shadertoy", "file": "shaders/shadertoy/fog.glsl", "bars": [2, 3]})
+    out = _layers_after(GROUPED, add)
+    before = SceneDoc.from_text(GROUPED).dumps().splitlines()
+    for line in before[4:12]:
+        assert line in out.splitlines(), line
+    assert "fog.glsl" in out
+    assert yaml.safe_load(out)["video"]["layers"][1]["layers"][3]["bars"] == [2, 3]
+
+
+def test_a_member_removed_keeps_the_comments_of_the_ones_left():
+    out = _layers_after(GROUPED, lambda ms: ms.pop(0))
+    assert "# the sky, slow" not in out
+    assert "- source: footage            # the river" in out
+    assert "rain.glsl, bars: [9, 12]}" in out
+    assert len(yaml.safe_load(out)["video"]["layers"][1]["layers"]) == 2
+
+
+def test_reordered_members_take_their_comments_with_them():
+    out = _layers_after(GROUPED, lambda ms: ms.reverse())
+    lines = out.splitlines()
+    rain = next(i for i, ln in enumerate(lines) if "rain.glsl" in ln)
+    sky = next(i for i, ln in enumerate(lines) if "sky.glsl" in ln)
+    assert rain < sky
+    assert lines[sky - 1].strip() == "# the sky, slow"
+
+
+def test_of_two_unnamed_layers_of_one_source_the_edited_one_is_patched():
+    text = """\
+video:
+  layers:
+    - source: meters          # the first meters
+      title: kick
+    - source: meters          # the second meters
+      title: snare
+"""
+    doc = SceneDoc.from_text(text)
+    nodes = doc.layers()
+    base = [plain(n) for n in nodes]
+    new = [{"source": "meters", "title": "snare", "rows": 2}]          # the first one removed, the second edited
+    seq = doc.data["video"]["layers"]
+    from core.scene_doc import apply_diff
+    apply_diff(seq, base, new, doc.data)
+    out = doc.dumps()
+    assert "# the second meters" in out and "# the first meters" not in out
+    assert yaml.safe_load(out)["video"]["layers"] == new
+
+
+def test_match_items_prefers_what_kept_the_most():
+    from core.scene_doc import match_items
+    base = [{"source": "meters", "title": "a", "x": 1}, {"source": "meters", "title": "b", "x": 2}]
+    assert match_items(base, [{"source": "meters", "title": "b", "x": 3}]) == [1]
+    assert match_items(base, [base[1], base[0]]) == [1, 0]
+    assert match_items(base, [{"source": "shadertoy"}]) == [None]

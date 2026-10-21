@@ -396,38 +396,7 @@ def _cue_key(spec: dict) -> str:
     return f"{spec.get('file')}|{spec.get('cues')!r}"
 
 
-def _tidy(node, key=None) -> None:
-    """Small parts written on one line: bars, blocks, cutouts, each FX of a list; the
-    signals (anchored parts) as they are."""
-    from core.scene_doc import _anchor_name, flow
-    from ruamel.yaml.comments import CommentedMap, CommentedSeq
-
-    def one_line(v):
-        if _anchor_name(v):
-            return v
-        if isinstance(v, dict):
-            out = CommentedMap((k, one_line(x)) for k, x in v.items())
-        elif isinstance(v, list):
-            out = CommentedSeq(one_line(x) for x in v)
-        else:
-            return v
-        out.fa.set_flow_style()
-        return out
-    if isinstance(node, dict) and not _anchor_name(node):
-        for k in list(node.keys()):
-            v = node[k]
-            if k in ("bars", "cutout", "at", "pins") and isinstance(v, (dict, list)):
-                node[k] = one_line(v)
-            elif k in ("fx", "blocks") and isinstance(v, list):
-                seq = v if isinstance(v, CommentedSeq) else CommentedSeq(v)
-                for j, x in enumerate(seq):
-                    seq[j] = one_line(x) if isinstance(x, dict) else x
-                node[k] = seq
-            else:
-                _tidy(v, k)
-    elif isinstance(node, list):
-        for x in node:
-            _tidy(x)
+from core.scene_doc import tidy as _tidy   # noqa: E402  (bars, blocks, cutouts on one line)
 
 
 def btn_save() -> None:

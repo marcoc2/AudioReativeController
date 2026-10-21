@@ -3026,26 +3026,7 @@ def _pick_midi(s, a):
         dpg.set_value("midi_label", Path(p).name)
         _set_status(f"MIDI selecionado: {Path(p).name}")
 
-NEW_SCENE = """# {name}: a new scene. The clips layer is the base (and the cut schedule the cut knobs
-# read); add the layers on top in the editor.
-video:
-  clip_per_bar: true
-  clip_order: shuffle
-  layers:
-    - source: clips
-"""
-
-
-def _new_scene_path(name: str, folder: str = "scenes") -> Path:
-    """scenes/<name>.yaml for a name typed in the GUI (letters, digits, - and _)."""
-    import re
-    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", str(name).strip()).strip("_")
-    if not stem:
-        raise ValueError("give the scene a name")
-    path = Path(folder) / f"{stem}.yaml"
-    if path.exists():
-        raise ValueError(f"{path.as_posix()} already exists")
-    return path
+from core.scene_doc import NEW_SCENE, new_scene_path as _new_scene_path   # noqa: E402
 
 
 def btn_new_scene():

@@ -8,6 +8,7 @@ what speed. Feeds the ARC Studio output lane and future arrangement tools.
 from __future__ import annotations
 
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,7 +36,8 @@ class MetaClip:
 class MetaLibrary:
     """Clip lengths via ffprobe; same file ordering as ClipLibrary."""
 
-    def __init__(self, folder, fps: int, workers: int = 8):
+    def __init__(self, folder, fps: int, workers: int = 8, progress=None):
+        """``progress(done, of)`` is told as each clip is probed."""
         self.folder = Path(folder)
         if not self.folder.is_dir():
             raise NotADirectoryError(self.folder)
@@ -45,8 +47,18 @@ class MetaLibrary:
         )
         if not self.paths:
             raise ValueError(f"no video clips found in {self.folder}")
+        done = [0]
+        lock = threading.Lock()
+
+        def probe(path):
+            d = self._probe(path)
+            if progress is not None:
+                with lock:
+                    done[0] += 1
+                    progress(done[0], len(self.paths))
+            return d
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            durs = list(ex.map(self._probe, self.paths))
+            durs = list(ex.map(probe, self.paths))
         self._clips = [MetaClip(round(d * fps)) for d in durs]
 
     @staticmethod
