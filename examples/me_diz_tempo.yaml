@@ -1,0 +1,23 @@
+# Me diz, the time map (core/video/time_map.py) alone over the clips: each pixel shows the
+# picture from a moment back, as far back as the map says; here the map is the figures
+# (they lag up to half a bar behind the background, in sixteenth-note steps), and how far
+# back swells and ebbs on a two-bar triangle LFO. The strip at the bottom (source: meters)
+# shows the LFO. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: time_map
+      map: figures
+      depth: 1/2
+      step: 1/16
+      amount: &amount {lfo: tri, period: 2/1, gain: 0.8, bias: 0.2}
+    - source: meters
+      title: time map
+      subtitle: the figures lag behind the background, by the LFO
+      lanes:
+        - {label: drums, roll: {track: drums (midi), notes: [36, 38, 42, 46, 51]}}
+        - {label: "lfo tri (2 bars) -> how far back (x half a bar)", knob: *amount, range: [0, 1]}

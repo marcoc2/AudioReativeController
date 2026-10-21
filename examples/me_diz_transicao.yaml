@@ -1,0 +1,22 @@
+# Me diz, transitions on the cut (core/video/transition.py) alone over the clips: at every
+# clip cut the old shot freezes and the new one eats into it over a whole bar, in turn by
+# the figures (they arrive first), a sweep, a plasma and a radial. The strip at the bottom
+# (source: meters) marks the cuts in red and shows how far into the shot the picture is.
+# Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: transition
+      pattern: [figures, sweep, plasma, radial]
+      length: 1/1
+      soft: 0.3
+    - source: meters
+      title: transitions on the cut
+      subtitle: figures -> sweep -> plasma -> radial, one per cut, a bar long
+      lanes:
+        - {label: drums, roll: {track: drums (midi), notes: [36, 38, 42, 46, 51]}}
+        - {label: "shot phase (0 at the cut, 1 at the next)", knob: {cut: phase}, range: [0, 1]}

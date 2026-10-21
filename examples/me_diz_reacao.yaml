@@ -1,0 +1,27 @@
+# Me diz, reaction-diffusion (shaders/shadertoy/reacao_arc) alone over the clips: Gray-Scott
+# growing from the picture's edges, its feed and kill rates set by the chord's mode (minor:
+# coral and mazes, major: spots and worms), the kick seeding it, the chord colouring it.
+# The strip at the bottom (source: meters) shows the drivers. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/reacao_arc
+      uniforms:
+        u_f: &feed {chord: &score {score: input/me_diz/sheetsage, snap: beat}, part: mode, glide: 1.0, gain: 0.0077, bias: 0.029}
+        u_k: {chord: *score, part: mode, glide: 1.0, gain: 0.0079, bias: 0.057}
+        u_kick: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.2}
+        u_seed: 0.5
+        u_hue: {harmony: *score, glide: 0.8}
+        u_amount: 0.75
+    - source: meters
+      title: reaction-diffusion
+      subtitle: chord mode -> feed and kill · kick seeds
+      lanes:
+        - {label: chord, chords: *score}
+        - {label: "chord mode -> feed rate (kill follows)", knob: *feed, range: [0.029, 0.0367]}
+        - {label: kick -> seed, knob: *kick, range: [0, 1]}

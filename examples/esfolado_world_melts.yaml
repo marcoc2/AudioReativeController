@@ -1,0 +1,33 @@
+# Esfolado — "the world melts, the people stay": the curated comics, and behind the
+# characters the paper turns into the octagram tunnel (the kick pushes the flight, the
+# chord paints it; multiply keeps the drawing's lines); the characters themselves stay
+# as drawn, and only they take the snare's chromatic hit. Needs a mask track of the
+# plain render (the same clips, seed, fit, size, fps and start), made once:
+#
+#   python clip_generator.py --scene examples/esfolado_gotas_curadoria.yaml ... (drops off)
+#   python segment_video.py --video <that render>.mp4 --start-time 13.351 --sam2-weights <dir>
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --clips C:/Users/marco/Videos/ltx2/curadoria --clip-fit cover --seed 3 \
+#       --scene examples/esfolado_world_melts.yaml --start-time 13.351 --bars 4 \
+#       --resolution 854x480 --fps 30 --masks render_output/esfolado_gotas_follow_c6-9_base_segments \
+#       --output render_output/esfolado_world_melts_c6-9.mp4
+video:
+  clip_per_bar: true
+  clip_order: random
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/octagrams_arc.glsl
+      blend: multiply
+      uniforms:
+        u_shape: {bar: {step: 1, morph: 0.35}}
+        u_fly: {rate: 10.0, base: 4.0, from: {hits: {track: [kick, kick-2]}, envelope: 0.3}}
+        u_hue: {harmony: {score: input/esfolado/sheetsage, snap: auto}, glide: 0.8}
+        u_sat: 0.75
+      mask: {where: outside, grow: 3, feather: 3}
+    - source: rgb_split
+      amount: 14
+      trigger: {track: snare, envelope: 0.18}
+      mask: {where: inside, feather: 2}

@@ -1,0 +1,21 @@
+audio: F:\workspace\AudioReativeController\input\esfolado\coracao_esfolado.mp3
+midi: F:\workspace\AudioReativeController\input\esfolado\esfolado_reaper.mid
+scene: F:\workspace\AudioReativeController\examples\esfolado_elenco.yaml
+skip_separation: true
+midi_offset: 0.0
+stems:
+  voz: F:\workspace\AudioReativeController\input\esfolado\esfolado_voz.mp3
+  peppa: F:\workspace\AudioReativeController\input\esfolado\esfolado_peppa.mp3
+render:
+  bars: 0
+  fps: 30
+  resolution: 480x854
+  mode: clips
+  start_time: 0.0
+  stems: false
+  clip_fit: cover
+clips:
+  dir: F:\workspace\AudioReativeController\render_output\esfolado_fundo
+  order: random
+  seed: 5
+  full_song: true

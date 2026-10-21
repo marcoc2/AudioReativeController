@@ -1,0 +1,53 @@
+# Esfolado — the two clips the song took its sounds from, singing them back in sync.
+#
+# The voice stem is the singing of the ketchup and mustard bottles (MiniMax_H3_00039_),
+# a semitone up and chopped like a sampler; the cartoon stem is Peppa crying
+# (LTX23_multiframe_00775_). The cues come from the REAPER project where the song was
+# made: every item that plays a clip's sound shows that clip cut, stretched and sped the
+# same way, so the bottles' mouths say what the voice sings, and the hook repeats as the
+# same shot repeating. Peppa cries at bar 27 and again in the riser; then
+# the half of her clip the song does not use (she bursts in ketchup) plays on its own,
+# slowed so the burst (clip 5.0 s) lands on the clap at 93.33 s, and the bottles come
+# back singing at 94.8 s.
+#
+# Both clips are cut out by their own mask tracks (SAM2 on the clip itself):
+#
+#   python segment_video.py --video input/esfolado/MiniMax_H3_00039_.mp4 --start-time 0 \
+#       --output render_output/footage/MiniMax_H3_00039_segments --max-objects 4 --cuts detect \
+#       --sam2-weights <dir>          (3: ketchup, 2: mustard)
+#   python segment_video.py --video input/esfolado/LTX23_multiframe_00775_.mp4 --start-time 0 \
+#       --output render_output/footage/LTX23_multiframe_00775_segments --max-objects 4 --cuts detect \
+#       --sam2-weights <dir>          (2: Peppa, 3: George, 4: her open mouth)
+#   python clip_generator.py --file input/esfolado/esfolado_mix_15_10_2026-full.mp3 \
+#       --midi input/esfolado/esfolado_reaper.mid --clips C:/Users/marco/Videos/ltx2/curadoria \
+#       --clip-fit cover --seed 7 --scene examples/esfolado_dublagem.yaml \
+#       --start-time 88 --bars 5 --resolution 480x854 --fps 30 \
+#       --output render_output/esfolado_dublagem_88.mp4
+video:
+  clip_per_bar: true
+  clip_order: random
+  layers:
+    - source: clips
+    # Peppa crying, cut out over the montage (the stem's two pieces)
+    - source: footage
+      file: input/esfolado/LTX23_multiframe_00775_.mp4
+      cues: {reaper: C:/Audio/recordings/nao_ser/reggaetoner/reggaetoner.rpp}
+      fit: contain
+      scale: 1.3
+      at: [0.5, 0.55]
+      cutout: {track: render_output/footage/LTX23_multiframe_00775_segments, objects: [2, 3, 4], feather: 2}
+    # ... then the burst, the whole frame: from where the second cry ends (clip 4.02 s)
+    # slowed to 0.82 so clip 5.0 s falls on the clap, then on until the bottles sing
+    - source: footage
+      file: input/esfolado/LTX23_multiframe_00775_.mp4
+      cues: [[92.14, 4.02, 1.193, 0.822], [93.333, 5.0, 1.5]]
+      fit: cover
+    # the bottles: exactly as their singing is cut in the REAPER project (every item that
+    # plays their sound: the stems, the copies, the glues; stretch markers and rates
+    # followed). They show only while an item plays.
+    - source: footage
+      file: input/esfolado/MiniMax_H3_00039_.mp4
+      cues: {reaper: C:/Audio/recordings/nao_ser/reggaetoner/reggaetoner.rpp}
+      fit: contain
+      at: [0.5, 0.52]
+      cutout: {track: render_output/footage/MiniMax_H3_00039_segments, objects: [2, 3], feather: 2}

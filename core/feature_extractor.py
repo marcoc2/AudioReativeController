@@ -268,6 +268,9 @@ class AudioFeatureExtractor:
         current_features["onset"] = bool(self.onset_mask[idx])
         current_features["subbands"] = {n: float(self.subbands[n][idx]) for n in self.subband_names}
         current_features["texture"] = {n: float(self.texture[n][idx]) for n in self.texture_names}
+        current_features["nyquist"] = self.sample_rate / 2.0               # the spectrum spans 0 .. this (Hz)
+        i0 = int(max(0.0, time_sec) * self.sample_rate)
+        current_features["wave"] = self.y[i0:i0 + 512]                      # the waveform from here on (-1 .. 1)
         if use_smoothing and self.prev_features:
             smoothed, f = {}, self.temporal_smoothing
             prev_bands = self.prev_features["bands"]
@@ -280,7 +283,7 @@ class AudioFeatureExtractor:
             smoothed["mid"]   = _safe_mean(smoothed["bands"][b_point:m_point])
             smoothed["high"]  = _safe_mean(smoothed["bands"][m_point:])
             smoothed["pulse"], smoothed["frame_idx"] = 1.0 + (smoothed["bass"] ** 2) * 0.15, idx
-            for k in ("centroid", "chroma", "dominant_pitch", "flux", "onset", "subbands", "texture"):
+            for k in ("centroid", "chroma", "dominant_pitch", "flux", "onset", "subbands", "texture", "nyquist", "wave"):
                 smoothed[k] = current_features[k]
             self.prev_features = smoothed
             return smoothed

@@ -19,6 +19,11 @@ Determinism: all cube placement/rotation comes from ``seed`` via a single RNG.
 
 Renders offscreen at the output resolution and reads pixels back (an RTX-class
 GPU does the draw in well under a millisecond; readback dominates).
+
+Smooth edges: the cubes are drawn multisampled (``samples``, 8 by default; 0 or 1 off) and
+resolved into the frame that is read back; the faces' screens carry mipmaps and anisotropic
+filtering, so a face far off or seen edge-on does not shimmer; a clip is shrunk onto the
+face with an area filter.
 """
 from __future__ import annotations
 
@@ -147,7 +152,8 @@ class CubeField:
         import moderngl  # lazy — matches mandelbulb; layer skips if unavailable
         self.W, self.H = int(width), int(height)
         self.n_screens = max(1, int(n_screens))
-        self.ctx = moderngl.create_standalone_context()
+        from core.gpu import context
+        self.ctx = context()
         self._mgl = moderngl
 
         self.prog = self.ctx.program(vertex_shader=_VS, fragment_shader=_FS)
@@ -165,8 +171,17 @@ class CubeField:
         face_res = int(spec.get("face_resolution", 256))
         self.tex = self.ctx.texture_array((face_res, face_res, self.n_screens), 3)
         self.tex.repeat_x = self.tex.repeat_y = False
+        self.tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)   # far faces: no shimmer
+        try:
+            self.tex.anisotropy = 16.0                                      # faces seen edge-on
+        except Exception:
+            pass
 
         self.fbo = self.ctx.simple_framebuffer((self.W, self.H), components=3)
+        samples = min(max(0, int(spec.get("samples", 8))), int(getattr(self.ctx, "max_samples", 0) or 0))
+        self.samples = samples if samples > 1 else 0
+        self.ms_fbo = (self.ctx.simple_framebuffer((self.W, self.H), components=3, samples=self.samples)
+                       if self.samples else None)                           # drawn here, resolved into fbo
 
         # --- corridor geometry ---
         self.corridor = float(spec.get("corridor_depth", 22.0))
@@ -227,10 +242,11 @@ class CubeField:
     def _fit(self, frame: np.ndarray) -> np.ndarray:
         cf = np.ascontiguousarray(frame, dtype=np.uint8)
         if cf.shape[:2] != (self.tex.height, self.tex.width):
-            iy = (np.arange(self.tex.height) * cf.shape[0] // self.tex.height)
-            ix = (np.arange(self.tex.width) * cf.shape[1] // self.tex.width)
-            cf = np.ascontiguousarray(cf[iy][:, ix])
-        return cf
+            import cv2
+            shrink = cf.shape[0] > self.tex.height or cf.shape[1] > self.tex.width
+            cf = cv2.resize(cf, (self.tex.width, self.tex.height),
+                            interpolation=cv2.INTER_AREA if shrink else cv2.INTER_LINEAR)
+        return np.ascontiguousarray(cf)
 
     def _transforms(self, phase: float):
         """Per-cube depth/rotation at loop ``phase``, plus a far-to-near order.
@@ -281,6 +297,7 @@ class CubeField:
             self.id_prog["u_mvp"].write(self._mvp(i, depth, rot))
             self.id_prog["u_id"].value = float(i + 1)
             self.id_vao.render(mode=gl.TRIANGLES, vertices=36)
+        self.ctx.disable(gl.DEPTH_TEST)        # the context is shared: leave it as found
 
         buf = np.frombuffer(self.id_fbo.read(components=3), dtype=np.uint8)
         ids = buf.reshape(h, w, 3)[:, :, 0].astype(np.int64).ravel()
@@ -314,9 +331,11 @@ class CubeField:
         for i in range(self.n_screens):
             layers[i] = self._fit(frames[i % len(frames)])
         self.tex.write(layers.tobytes())
+        self.tex.build_mipmaps()
         self.tex.use(0)
 
-        self.fbo.use()
+        target = self.ms_fbo or self.fbo
+        target.use()
         self.ctx.clear(float(bg[0]), float(bg[1]), float(bg[2]))
         self.ctx.enable(gl.DEPTH_TEST)
 
@@ -327,13 +346,16 @@ class CubeField:
             if cube_layers is not None:
                 self.prog["u_layer_base"].value = float(cube_layers[i])
             self.vao.render(mode=gl.TRIANGLES, vertices=36)
+        self.ctx.disable(gl.DEPTH_TEST)
+        if self.ms_fbo is not None:
+            self.ctx.copy_framebuffer(self.fbo, self.ms_fbo)               # the samples, averaged
 
         buf = self.fbo.read(components=3)
         # GL framebuffer is bottom-left origin; flip to the system's top-left
         return np.frombuffer(buf, dtype=np.uint8).reshape(self.H, self.W, 3)[::-1].copy()
 
     def release(self) -> None:
-        for obj in (self.vao, self.id_vao, self.vbo, self.tex, self.fbo,
+        for obj in (self.vao, self.id_vao, self.vbo, self.tex, self.fbo, self.ms_fbo,
                     self.id_fbo, self.prog, self.id_prog):
             if obj is None:
                 continue
@@ -341,7 +363,3 @@ class CubeField:
                 obj.release()
             except Exception:
                 pass
-        try:
-            self.ctx.release()
-        except Exception:
-            pass

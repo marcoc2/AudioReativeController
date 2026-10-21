@@ -1,0 +1,48 @@
+# Esfolado — everything the mask track gives, in one scene: behind the characters the
+# paper turns into the octagram tunnel (kick pushes it, the chord paints it), and the
+# characters are the band. The biggest is the kick (jumps out of the paper) and the synth
+# voice (ghost trails while its notes are held); the second is the snare (jolts, and the
+# chromatic hit shakes every character) and the acid line (a ring out of its outline on
+# every note); the third is the hi-hat (a halo). At each cut the two of them stay over the
+# new shot, stuck like stickers, the second leaving on the next kick, the biggest on the
+# next snare. (No background tint here: the tunnel already takes the chord's colour.)
+#
+# The roles play in order: the trails and rings first, then the hits, and the stickers
+# last, on top of everything. Needs a mask track of the plain render, e.g.:
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --clips C:/Users/marco/Videos/ltx2/curadoria --clip-fit cover --seed 7 \
+#       --start-time 13.351 --bars 8 --resolution 854x480 --fps 30 \
+#       --scene <a scene with only "- source: clips"> --output render_output/esfolado_c6-13_s7_base.mp4
+#   python segment_video.py --video render_output/esfolado_c6-13_s7_base.mp4 --start-time 13.351 \
+#       --sam2-weights <dir>
+#   python clip_generator.py ... (the same) --scene examples/esfolado_completo.yaml \
+#       --masks render_output/esfolado_c6-13_s7_base_segments --output render_output/esfolado_completo_c6-13_s7.mp4
+video:
+  clip_per_bar: true
+  clip_order: random
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/octagrams_arc.glsl
+      blend: multiply
+      uniforms:
+        u_shape: {bar: {step: 1, morph: 0.35}}
+        u_fly: {rate: 10.0, base: 4.0, from: {hits: {track: [kick, kick-2]}, envelope: 0.3}}
+        u_hue: {harmony: {score: input/esfolado/sheetsage, snap: auto}, glide: 0.8}
+        u_sat: 0.75
+      mask: {where: outside, grow: 3, feather: 3}
+    - source: rgb_split
+      amount: 14
+      trigger: {track: snare, envelope: 0.18}
+      mask: {where: inside, feather: 2}
+    - source: cast
+      roles:
+        - {who: largest, plays: {track: synth-voice}, act: echo, trail: 3, every: 0.06, amount: 0.7}
+        - {who: second, plays: {track: acid}, act: rings, speed: 260, life: 1.1, width: 4}
+        - {who: largest, plays: {track: [kick, kick-2]}, act: punch, amount: 0.14}
+        - {who: second, plays: {track: snare}, act: shake, amount: 14}
+        - {who: third, plays: {track: ez-hihat}, act: glow, width: 10, color: [255, 235, 160]}
+        - {who: second, plays: {track: [kick, kick-2]}, act: carry, fade: 0.25}
+        - {who: largest, plays: {track: snare}, act: carry, fade: 0.25, shadow: 0.45}

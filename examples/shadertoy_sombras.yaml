@@ -1,0 +1,13 @@
+# O shader de duas passadas shaders/shadertoy/sombras_2d (Buffer A: mapa de sombras por luz;
+# Image: a cena 2D iluminada por 6 luzes) como fonte. Cada KICK-2 dá um tranco no relógio do
+# shader: as luzes que giram e pulsam andam mais rápido na batida.
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --scene examples/shadertoy_sombras.yaml --start-time 56.018 --bars 4 \
+#       --resolution 1280x720 --fps 30 --output render_output/shadertoy_sombras_c22-25.mp4
+video:
+  layers:
+    - source: shadertoy
+      file: shaders/shadertoy/sombras_2d
+      rush: {hits: {track: kick-2}, amount: 4.0, envelope: 0.35}

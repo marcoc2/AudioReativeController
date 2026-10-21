@@ -1,0 +1,27 @@
+# Me diz, motion blur (shadertoy subframes/shutter): the octagrams tunnel alone, full
+# frame, rendered eight times inside each frame over 80% of the frame's time and averaged,
+# so it smears as the kick throws the flight forward and sharpens as it slows. The strip
+# at the bottom (source: meters) shows the kick and the flight's speed. Commands: see
+# me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips                 # the cut schedule (the tunnel covers the picture)
+    - source: shadertoy
+      file: shaders/shadertoy/octagrams_arc.glsl
+      subframes: 8
+      shutter: 0.8
+      uniforms:
+        u_shape: {bar: {step: 1, morph: 0.35}}
+        u_fly: {rate: 24.0, base: 4.0, from: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}}
+        u_hue: {harmony: {score: input/me_diz/sheetsage, snap: beat}, glide: 0.8}
+        u_sat: 0.75
+    - source: meters
+      title: motion blur (8 subframes)
+      subtitle: the kick throws the flight forward -> it smears
+      lanes:
+        - {label: kick, roll: {track: drums (midi), notes: [36]}}
+        - {label: "kick -> flight speed (4 + 24 x this)", knob: *kick, range: [0, 1]}

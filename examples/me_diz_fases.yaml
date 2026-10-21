@@ -1,0 +1,29 @@
+# Me diz, phases (shaders/shadertoy/fases_arc.glsl) alone, full frame: a 3D fractal whose
+# level (how deep its folds go) steps up at each clip cut, swaying left and right on a
+# two-bar sine; the kick pulses it, the chord colours it, the camera turns a tenth round
+# each bar. The strip at the bottom (source: meters) shows the drivers. Commands: see
+# me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips                 # the cut schedule (the fractal covers the picture)
+    - source: shadertoy
+      file: shaders/shadertoy/fases_arc.glsl
+      uniforms:
+        u_level: &level {cut: count, morph: 0.6}
+        u_sway: &sway {lfo: sine, period: 2/1, gain: 2.0, bias: -1.0}
+        u_kick: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}
+        u_hue: {harmony: &score {score: input/me_diz/sheetsage, snap: beat}, glide: 0.8}
+        u_orbit: &orbit {bar: {step: 0.1, morph: 0.8}}
+    - source: meters
+      title: phases
+      subtitle: a new level at each cut · a sine sways it · kick pulses
+      lanes:
+        - {label: cut count -> level, knob: *level, range: window}
+        - {label: lfo sine (2 bars) -> sway, knob: *sway, range: [-1, 1]}
+        - {label: kick -> pulse, knob: *kick, range: [0, 1]}
+        - {label: bar -> orbit, knob: *orbit, range: window}
+        - {label: chord -> colour, chords: *score}

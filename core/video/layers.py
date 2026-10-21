@@ -19,13 +19,27 @@ Scene YAML:
 from __future__ import annotations
 
 from typing import Callable, List, Optional, Sequence
+import colorsys
 import math
 import collections
+import time
+from pathlib import Path
 from scipy.ndimage import affine_transform
 
 import numpy as np
 
+from core.video.matte import LayerMatte, apply_matte
+
 BLENDS = {"normal", "add", "screen", "multiply"}
+# every ``source:`` build_compositor knows (the GUI's layer menu reads this)
+LAYER_SOURCES = (
+    "clips", "solid", "cells", "veils", "flame", "eyes", "mouths", "ferrofluid", "chladni",
+    "orbiters", "particles", "feedback", "rgb_noise", "drops", "cast", "shadertoy", "sandlines",
+    "shockwave", "slitscan", "grain", "echoes", "rgb_split", "mandelbox", "mandelbulb",
+    "julia", "cubes", "chord_color", "transition", "flame_lens", "datamosh",
+    "time_map", "pixel_sort", "nebulabrot", "deep_zoom", "flythrough", "meters", "footage",
+    "group",
+)
 
 
 def draw_line_numpy(img: np.ndarray, x0: float, y0: float, x1: float, y1: float, color: tuple):
@@ -147,44 +161,185 @@ class SolidLayer:
 
 
 class Compositor:
-    """Bottom-up layer stack. First layer is the base canvas."""
+    """Bottom-up layer stack. First layer is the base canvas.
 
-    def __init__(self):
+    Set ``profile = {}`` to have ``frame_at`` add up, per layer, the seconds spent on its own
+    work, on blending its result in and on its mask; ``profile_report(frames)`` prints them.
+
+    Hybrid: blends and masks run on the GPU (core/video/gpu_compose.py) when there is one,
+    the frame moving between CPU and GPU only when a layer needs the other side; layers keep
+    taking and giving numpy frames. ``use_gpu``: None picks by itself, False keeps it all
+    in numpy (the reference the GPU passes are checked against).
+
+    A layer can also work on the GPU side, and then its picture never leaves it: with
+    ``on_gpu`` true, a source's ``frame_gpu(t, g)`` returns a texture (``g.texture()``,
+    rows in numpy's order) and a post-op's ``process_gpu(frame, t, g)`` takes the ``Frame``
+    below and returns a ``Frame`` (the same one when it leaves the picture alone).
+    """
+
+    def __init__(self, use_gpu: Optional[bool] = None):
         self._layers: List[tuple] = []
+        self.names: List[str] = []           # one per layer, for the profile
+        self.profile: Optional[dict] = None
+        self.use_gpu = use_gpu
+        self._g = None                        # GpuComposer, made at the first frame
+        self.size: Optional[tuple] = None     # (width, height) of the render, when known
 
     def add(self, source, blend: str = "normal",
-            opacity: Optional[Callable[[float], float]] = None) -> None:
+            opacity: Optional[Callable[[float], float]] = None, matte=None) -> None:
+        """``matte(t)`` (H×W×1, 0..1; see core/video/matte.py) keeps the layer's result only
+        where it is, the picture below showing elsewhere."""
         if blend not in BLENDS:
             raise ValueError(f"unknown blend {blend!r}; expected {sorted(BLENDS)}")
         if not self._layers and hasattr(source, "process"):
             raise ValueError("a post-op cannot be the base layer")
-        self._layers.append((source, blend, opacity))
+        if not self._layers and matte is not None:
+            raise ValueError("the base layer cannot have a mask (there is nothing below it)")
+        self._layers.append((source, blend, opacity, matte))
+        self.names.append(type(source).__name__)
 
     def __len__(self) -> int:
         return len(self._layers)
 
+    def _spent(self, k: int, part: str, since: float) -> float:
+        now = time.perf_counter()
+        row = self.profile.setdefault(k, {"work": 0.0, "blend": 0.0, "mask": 0.0})
+        row[part] += now - since
+        return now
+
+    def _gpu(self, shape):
+        """The GPU composer for frames of ``shape``, or None when the stack stays in numpy."""
+        if self.use_gpu is False or len(self._layers) < 2:
+            return None
+        W, H = self.size or (shape[1], shape[0])
+        if self._g is None or (self._g.W, self._g.H) != (W, H):
+            try:
+                from core.video.gpu_compose import GpuComposer
+                self._g = GpuComposer(W, H)
+            except Exception:
+                if self.use_gpu:                  # asked for explicitly: say why not
+                    raise
+                self.use_gpu = False
+                return None
+        return self._g
+
     def frame_at(self, t: float) -> np.ndarray:
         if not self._layers:
             raise RuntimeError("compositor has no layers")
-        src0, _, _ = self._layers[0]
-        out = src0.frame_at(t)
-        for src, blend, opacity in self._layers[1:]:
+        prof = self.profile is not None
+        clock = time.perf_counter() if prof else 0.0
+        base = self._layers[0][0].frame_at(t)
+        if prof:
+            clock = self._spent(0, "work", clock)
+        g = self._gpu(base.shape)
+        if g is not None:
+            return self._frame_at_gpu(g, base, t, clock)
+        out = base
+        for k, (src, blend, opacity, matte) in enumerate(self._layers[1:], 1):
+            below = out
+            op = 1.0 if opacity is None else float(opacity(t))
             if hasattr(src, "process"):
                 # post-op: transforms the composite built so far (a ``bars:`` window gates it)
-                op = 1.0 if opacity is None else float(opacity(t))
                 if op <= 0.0:
+                    if hasattr(src, "observe"):         # a post-op with memory keeps watching while gated
+                        src.observe(out, t)
+                    if prof:
+                        clock = self._spent(k, "work", clock)
                     continue
                 done = src.process(out, t)
+                if prof:
+                    clock = self._spent(k, "work", clock)
                 out = done if op >= 1.0 else blend_frames(out, done, "normal", op)
-                continue
-            op = 1.0 if opacity is None else float(opacity(t))
-            if op <= 0.0:
-                continue
-            # a source that paints itself with what lies below (``frame_at_over``) sees the composite so far
-            top = src.frame_at_over(out, t) if hasattr(src, "frame_at_over") else src.frame_at(t)
-            if top is not None:
-                out = blend_frames(out, top, blend, op)
+            else:
+                if op <= 0.0:
+                    continue
+                # a source that paints itself with what lies below (``frame_at_over``) sees the composite so far
+                top = src.frame_at_over(out, t) if hasattr(src, "frame_at_over") else src.frame_at(t)
+                if prof:
+                    clock = self._spent(k, "work", clock)
+                if top is not None:
+                    out = blend_frames(out, top, blend, op)
+            if prof:
+                clock = self._spent(k, "blend", clock)
+            if matte is not None and out is not below:
+                out = apply_matte(below, out, matte(t))
+                if prof:
+                    clock = self._spent(k, "mask", clock)
         return out
+
+    def _frame_at_gpu(self, g, base: np.ndarray, t: float, clock: float) -> np.ndarray:
+        from core.video.gpu_compose import Frame
+        prof = self.profile is not None
+        g.begin()
+        out = Frame(g, cpu=base)
+        for k, (src, blend, opacity, matte) in enumerate(self._layers[1:], 1):
+            below = out
+            op = 1.0 if opacity is None else float(opacity(t))
+            on_gpu = getattr(src, "on_gpu", False)
+            if hasattr(src, "process"):
+                if op <= 0.0:
+                    if hasattr(src, "observe"):         # a post-op with memory keeps watching while gated
+                        src.observe(out.cpu(), t)
+                    if prof:
+                        clock = self._spent(k, "work", clock)
+                    continue
+                if on_gpu:
+                    done = src.process_gpu(out, t, g)
+                    changed = done is not out
+                else:
+                    given = out.cpu()
+                    done = src.process(given, t)
+                    changed = done is not given         # a post-op at rest hands the frame back
+                    done = Frame(g, cpu=done)
+                if prof:
+                    clock = self._spent(k, "work", clock)
+                if changed:
+                    out = done if op >= 1.0 else Frame(g, tex=g.blend(below.tex(), done.tex(), "normal", op))
+            else:
+                if op <= 0.0:
+                    continue
+                if on_gpu:
+                    top = src.frame_gpu(t, g)
+                else:
+                    top = src.frame_at_over(out.cpu(), t) if hasattr(src, "frame_at_over") else src.frame_at(t)
+                    top = None if top is None else g.upload(top)
+                if prof:
+                    clock = self._spent(k, "work", clock)
+                if top is not None:
+                    out = Frame(g, tex=g.blend(below.tex(), top, blend, op))
+            if prof:
+                clock = self._spent(k, "blend", clock)
+            if matte is not None and out is not below:
+                m = g.matte(matte.selection(t), matte.grow, matte.feather, matte.where == "outside")
+                out = Frame(g, tex=g.apply(below.tex(), out.tex(), m))
+                if prof:
+                    clock = self._spent(k, "mask", clock)
+        moved = g.moving
+        result = out.cpu()
+        if prof:
+            self._spent(-1, "work", clock)              # waiting for the GPU and the last download
+            self.profile["moving"] = self.profile.get("moving", 0.0) + (g.moving - moved)
+        return result
+
+    def profile_report(self, frames: int) -> str:
+        """Mean milliseconds per frame, per layer, from ``profile``."""
+        lines = [f"  {'layer':32s} {'work':>8s} {'blend':>8s} {'mask':>8s} {'total':>8s}   (ms/frame)"]
+        grand = 0.0
+        for k, name in enumerate(self.names):
+            row = (self.profile or {}).get(k) or {"work": 0.0, "blend": 0.0, "mask": 0.0}
+            ms = [1000.0 * row[p] / max(1, frames) for p in ("work", "blend", "mask")]
+            grand += sum(ms)
+            lines.append(f"  {k}:{name:30s} {ms[0]:8.1f} {ms[1]:8.1f} {ms[2]:8.1f} {sum(ms):8.1f}")
+        if self.profile and -1 in self.profile:
+            ms = 1000.0 * self.profile[-1]["work"] / max(1, frames)
+            grand += ms
+            lines.append(f"  {'GPU finish + download':32s} {ms:8.1f}")
+        if self._g is not None:
+            lines.append(f"  (frames moved CPU<->GPU: {self._g.uploads / max(1, frames):.1f} up, "
+                         f"{self._g.downloads / max(1, frames):.1f} down per frame, "
+                         f"{1000.0 * self._g.moving / max(1, frames):.1f} ms)")
+        lines.append(f"  {'layers, all':32s} {'':8s} {'':8s} {'':8s} {grand:8.1f}")
+        return "\n".join(lines)
 
 
 def _layer_events(spec: dict, notes: Sequence, onset_loader=None, grid=None) -> list:
@@ -215,6 +370,8 @@ class BarWindow:
         bars: [[2, 21], [36, 51]]     # DAW bar numbers, inclusive
         fade_in: 1                    # bars the layer takes to come up (inside the window)
         fade_out: 2                   # bars it takes to go down (inside the window)
+        mute: [[9, 12]]               # bars it is hidden in (the opposite: any layer, e.g. a
+                                      # character cut by its REAPER cues, kept in sync)
 
     Works on every layer, post-ops included; the grid answers where the bars are,
     so meter changes are honoured.
@@ -627,6 +784,11 @@ class FlameLayer:
           paint: under           # colour every point with the layers below it (a video):
           paint_mix: 0.9         # the figure becomes a kaleidoscope of that picture
           paint_gain: 5          # undo a dimming solid below: the mandala shows the video at full colour
+          estimator: 0           # flam3's density estimation (GPU): blur up to this many pixels where
+          estimator_curve: 1.2   # the points are sparse, narrowing where dense (0: off; try 4)
+          weights:               # optional: an xform's weight follows the music (by index from 0; any knob,
+            0: {adsr: {track: organ}, gain: 3, bias: 0.2}     # see the shadertoy layer's uniforms), so
+            1: {hits: {track: kick}, envelope: 0.4, gain: 3, bias: 0.3}   # the arrangement reshapes it
 
     Loudness drives the light and the speed, swell the zoom, harmonic change makes
     the figure wander; the chord sets the palette and the pose.
@@ -638,13 +800,22 @@ class FlameLayer:
         self.fps = fps
         self.features_at = features_at
         genome = Genome.from_spec(spec.get("genome") or {"random": 5}).with_symmetry(int(spec.get("symmetry", 1)))
+        self._base_weights = [x.weight for x in genome.xforms]
+        wspec = spec.get("weights") or {}
+        bad = [k for k in wspec if not (0 <= int(k) < len(genome.xforms))]
+        if bad:
+            raise ValueError(f"flame: weights for xforms {bad}, but the genome has {len(genome.xforms)} (0..)")
+        self._weights = {int(k): _music_knob(f"weight {k}", how, notes, features_at, onset_loader, grid)
+                         for k, how in wspec.items()}
         self.sys = FlameSystem(width, height, genome, seed=int(spec.get("seed", 0)),
                                samples=float(spec.get("samples", 6.0)),
                                supersample=int(spec.get("supersample", 2)),
                                backend=str(spec.get("backend", "auto")),
                                exposure=float(spec.get("exposure", 3.0)),
                                white=float(spec.get("white", 40.0)), gamma=float(spec.get("gamma", 2.4)),
-                               centered=int(spec.get("symmetry", 1)) > 1)
+                               centered=int(spec.get("symmetry", 1)) > 1,
+                               estimator=float(spec.get("estimator", 0.0)),
+                               estimator_curve=float(spec.get("estimator_curve", 1.2)))
         self._spin = float(spec.get("spin", 0.02))
         self._pose_amount = float(spec.get("pose", 0.25))
         self._root = int(spec.get("root", 0)) % 12
@@ -714,6 +885,8 @@ class FlameLayer:
             root = root if hue_root is None else hue_root
             gap = ((VeilsLayer.hue_of_root(root) - self.hue + 0.5) % 1.0) - 0.5
             self.hue = (self.hue + gap * glide) % 1.0
+        for k, f in self._weights.items():                 # the arrangement reshapes the flame
+            self.sys.genome.xforms[k].weight = self._base_weights[k] * max(0.0, float(f(t)))
         return self.sys.render(dt, phase=self.phase, pose=self.pose, hue=self.hue, level=level,
                                zoom=math.exp(self.breath), bloom=self._bloom(t) if self._bloom else 0.0,
                                paint=self._under, paint_mix=self._paint_mix, paint_gain=self._paint_gain,
@@ -728,14 +901,18 @@ class EyesLayer:
           seed: 3
           supersample: 2
           depth: 0.9             # how far in front of the wall the gaze point floats (bigger = eyes look straighter)
-          hue: 0.55              # iris colour; a ``harmony:`` block lets the chord choose it,
+          hue: 0.55              # iris colour (0..1 round the wheel); a ``harmony:`` block lets the chord choose it,
           iris_hues: [0.08, 0.6] # ... mapped onto real iris colours: amber -> green -> blue
-          pupil_from: texture.loudness   # feature that dilates the pupils (0..1)
+          pupil_from: texture.loudness   # what dilates the pupils (0..1): a feature or any knob
           wander: 0.15           # how far the gaze drifts on its own (frame height units)
+          light: 1.0             # how lit the wall is
           hits:                  # gestures: saccade (gaze jumps) | dilate | blink
             - {track: snare, gesture: saccade}
             - {track: kick, gesture: dilate, envelope: 0.25}
             - {track: lead, gesture: blink, envelope: 0.20}
+
+    depth, hue, pupil_from, wander and light are knobs (``_knob``): a number, or something in the
+    music that moves them; rows, seed and supersample are fixed (the wall is laid out once).
     """
 
     GESTURES = ("saccade", "dilate", "blink")
@@ -746,12 +923,17 @@ class EyesLayer:
         self.fps = fps
         self.features_at = features_at
         self.sys = EyesSystem(width, height, rows=float(spec.get("rows", 5)), seed=int(spec.get("seed", 0)),
-                              supersample=int(spec.get("supersample", 2)), depth=float(spec.get("depth", 0.9)))
+                              supersample=int(spec.get("supersample", 2)))   # depth: a knob, each frame
         self.aspect = width / height
-        self._pupil_from = spec.get("pupil_from", "texture.loudness")
+        knob = lambda key, default: _music_knob(key, spec.get(key, default), notes, features_at,  # noqa: E731
+                                                onset_loader, grid)
+        self._pupil_from = knob("pupil_from", "texture.loudness")
         lo, hi = spec.get("iris_hues", (0.08, 0.6))
         self._iris_hues = (float(lo), float(hi))
-        self._wander = float(spec.get("wander", 0.15))
+        self._wander = knob("wander", 0.15)
+        self._depth = knob("depth", 0.9)
+        self._light = knob("light", 1.0)
+        self._hue = knob("hue", 0.55)
         self._rng = np.random.default_rng(int(spec.get("seed", 0)))
         hspec = spec.get("harmony")
         self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
@@ -769,7 +951,7 @@ class EyesLayer:
         self._gaze = np.zeros(2)
         self._smooth: dict = {}
         self._last_t: Optional[float] = None
-        self.hue = float(spec.get("hue", 0.55))
+        self.hue = None
 
     def _lowpass(self, name, value, dt, tau):
         prev = self._smooth.get(name, value)
@@ -780,8 +962,7 @@ class EyesLayer:
     def frame_at(self, t: float) -> np.ndarray:
         dt = 1.0 / self.fps if self._last_t is None else min(0.1, max(0.0, t - self._last_t))
         self._last_t = t
-        feats = (self.features_at(t) or {}) if self.features_at else {}
-        pupil = self._lowpass("pupil", _feature(feats, self._pupil_from, 0.3), dt, 0.15)
+        pupil = self._lowpass("pupil", float(self._pupil_from(t)), dt, 0.15)
         dilate = blink = 0.0
         for gesture, times, dur in self._gestures:
             i = int(np.searchsorted(times, t, side="right")) - 1
@@ -797,16 +978,203 @@ class EyesLayer:
             self._n_sacc = n_sacc
             self._target = self._rng.uniform(-1, 1, 2) * np.array([self.aspect * 0.8, 0.7])
         # slow drift around the target
-        drift = self._wander * np.array([math.sin(0.37 * t), math.sin(0.23 * t + 1.0)])
+        drift = float(self._wander(t)) * np.array([math.sin(0.37 * t), math.sin(0.23 * t + 1.0)])
         self._gaze += (self._target + drift - self._gaze) * (1 - math.exp(-dt / 0.06))
+        hue = float(self._hue(t))
+        if self.hue is None or not len(self._chords):
+            self.hue = hue
+        i = int(np.searchsorted(self._chord_times, t, side="right")) - 1 if len(self._chords) else -1
+        if i >= 0:                                                        # the chord chooses it
+            lo, hi = self._iris_hues
+            target_hue = lo + (hi - lo) * VeilsLayer.hue_of_root(self._chords[i].pitch)
+            self.hue += (target_hue - self.hue) * (1 - math.exp(-dt / 1.2))
+        self.sys.depth = float(self._depth(t))
+        return self.sys.render(t, gaze=tuple(self._gaze), saccade=n_sacc,
+                               pupil=min(1.0, 0.15 + 0.5 * pupil + 0.6 * dilate), blink=blink, hue=self.hue,
+                               light=float(self._light(t)))
+
+
+class MouthsLayer:
+    """A Voronoi wall of singing mouths (``core/mouths``, GPU), the companion of ``eyes``.
+
+        - source: mouths
+          rows: 5
+          seed: 3
+          supersample: 2
+          voice: stems_output/<hash>/demucs/<song>_(Vocals)_htdemucs_6s.flac
+                                 # the vocal stem: its level and F1 drop the jaw, its F2
+                                 # spreads the lips ("i") or rounds them ("u"); see core/voice
+          jaw_from: stems.vocals # without ``voice:``, what opens the mouths (0..1): a feature or any knob
+          tint: 0.0              # how bruised the lips are (0..1); a ``harmony:`` block lets the chord choose it
+          light: 1.0             # how lit the wall is
+          harmony: {score: input/song/sheetsage, snap: auto}   # the chord bruises the lips
+          hits:                  # gestures: clench (teeth bared) | tremble | gasp (jaw drops)
+            - {track: snare, gesture: clench, envelope: 0.2}
+            - {track: kick, gesture: tremble, envelope: 0.15}
+
+    jaw_from, tint and light are knobs (``_knob``): a number, or something in the music that
+    moves them; rows, seed and supersample are fixed (the wall is laid out once).
+    """
+
+    GESTURES = ("clench", "tremble", "gasp")
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int,
+                 fps: int, features_at=None, onset_loader=None, grid=None):
+        from core.mouths import MouthsSystem
+        self.fps = fps
+        self.features_at = features_at
+        self.sys = MouthsSystem(width, height, rows=float(spec.get("rows", 5)), seed=int(spec.get("seed", 0)),
+                                supersample=int(spec.get("supersample", 2)))
+        self._voice = None
+        if spec.get("voice"):
+            from core.voice import read_voice
+            self._voice = read_voice(spec["voice"])
+        knob = lambda key, default: _music_knob(key, spec.get(key, default), notes, features_at,  # noqa: E731
+                                                onset_loader, grid)
+        self._jaw_from = knob("jaw_from", "stems.vocals")
+        self._tint = knob("tint", 0.0)
+        self._light = knob("light", 1.0)
+        hspec = spec.get("harmony")
+        self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._chord_times = np.array([e.time for e in self._chords], dtype=float)
+        self._gestures = []
+        for g in spec.get("hits") or []:
+            if g.get("gesture") not in self.GESTURES:
+                raise ValueError(f"mouths: unknown gesture {g.get('gesture')!r} (use one of {self.GESTURES})")
+            self._gestures.append((g["gesture"], np.array(_layer_hits(g, notes, onset_loader, grid), dtype=float),
+                                   max(1e-3, float(g.get("envelope", 0.2)))))
+        self._smooth: dict = {}
+        self._last_t: Optional[float] = None
+        self.tint = None
+
+    def _lowpass(self, name, value, dt, tau):
+        prev = self._smooth.get(name, value)
+        prev += (value - prev) * (1 - math.exp(-dt / tau)) if dt > 0 else 0.0
+        self._smooth[name] = prev
+        return prev
+
+    def frame_at(self, t: float) -> np.ndarray:
+        dt = 1.0 / self.fps if self._last_t is None else min(0.1, max(0.0, t - self._last_t))
+        self._last_t = t
+        if self._voice is not None:
+            jaw, spread, _ = self._voice.at(t)
+        else:
+            jaw, spread = float(self._jaw_from(t)), 0.0
+        # the jaw drops fast and closes a little slower, as a real one does
+        tau = 0.025 if jaw > self._smooth.get("jaw", 0.0) else 0.05
+        jaw = self._lowpass("jaw", jaw, dt, tau)
+        spread = self._lowpass("spread", spread, dt, 0.06)
+        clench = tremble = gasp = 0.0
+        for gesture, times, dur in self._gestures:
+            i = int(np.searchsorted(times, t, side="right")) - 1
+            if i < 0:
+                continue
+            k = max(0.0, 1.0 - (t - times[i]) / dur)
+            if gesture == "clench":
+                clench = max(clench, k)
+            elif gesture == "tremble":
+                tremble = max(tremble, k)
+            else:
+                gasp = max(gasp, math.sin(math.pi * min(1.0, (t - times[i]) / dur)))
+        tint = float(self._tint(t))
+        if self.tint is None or not len(self._chords):
+            self.tint = tint
+        i = int(np.searchsorted(self._chord_times, t, side="right")) - 1 if len(self._chords) else -1
+        if i >= 0:                                                        # the chord chooses it
+            target = VeilsLayer.hue_of_root(self._chords[i].pitch)
+            self.tint += (target - self.tint) * (1 - math.exp(-dt / 1.2))
+        return self.sys.render(t, jaw=max(jaw, 0.9 * gasp), spread=spread * (1.0 - gasp), clench=clench,
+                               tremble=tremble, tint=self.tint, light=float(self._light(t)))
+
+
+class FerrofluidLayer:
+    """A pool of ferrofluid under magnets (``core/ferrofluid``, GPU): the music is the field.
+
+        - source: ferrofluid
+          supersample: 2
+          level_from: subbands.bass   # the steady pull of every magnet (0..1): the low end
+          base: 0.25                  # pull that is always there, so the pool never goes flat
+          magnets:                    # up to 4; each can answer to its own part of the song
+            - {track: kick, at: [0, 0.35], strength: 1.0, pulse: 1.0}
+            - {track: snare, at: [-1.0, 0.8], strength: 0.6, pulse: 0.8}
+            - {at: [1.1, 1.4], strength: 0.4}          # no trigger: only the steady pull
+          spring: {freq: 2.5, damping: 0.3}           # how a pulse rings: spikes shoot up and wobble back
+          harmony: {score: input/song/sheetsage, snap: auto}   # each chord turns the spike lattice
+          spin: 0.02                  # slow turn of the lattice (radians per second)
+          light_hue: 0.05             # tint of the side strip lights ...
+          light_sat: 0.0              # ... 0 keeps the studio white
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int,
+                 fps: int, features_at=None, onset_loader=None, grid=None):
+        from core.ferrofluid import MAX_MAGNETS, FerrofluidSystem
+        self.fps = fps
+        self.features_at = features_at
+        self.sys = FerrofluidSystem(width, height, supersample=int(spec.get("supersample", 2)),
+                                    spacing=float(spec.get("spacing", 0.11)))
+        self._level_from = spec.get("level_from", "subbands.bass")
+        self._base = float(spec.get("base", 0.25))
+        mspecs = spec.get("magnets") or [{"at": [0.0, 0.35]}]
+        if len(mspecs) > MAX_MAGNETS:
+            raise ValueError(f"ferrofluid: at most {MAX_MAGNETS} magnets")
+        self._magnets = []
+        for m in mspecs:
+            trig = {k: v for k, v in m.items() if k not in ("at", "strength", "pulse")}
+            hits = _layer_events(trig, notes, onset_loader, grid) if trig else []
+            self._magnets.append({
+                "at": tuple(float(c) for c in m.get("at", (0.0, 0.35))),
+                "strength": float(m.get("strength", 1.0)), "pulse": float(m.get("pulse", 1.0)),
+                "times": np.array([e.time for e in hits], dtype=float),
+                "vel": np.array([e.velocity / 127.0 for e in hits], dtype=float),
+                "x": 0.0, "v": 0.0, "n": 0})
+        spring = spec.get("spring") or {}
+        self._omega = 2 * math.pi * float(spring.get("freq", 2.5))
+        self._zeta = float(spring.get("damping", 0.3))
+        hspec = spec.get("harmony")
+        self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._chord_times = np.array([e.time for e in self._chords], dtype=float)
+        self._spin = float(spec.get("spin", 0.02))
+        self._hue = float(spec.get("light_hue", 0.05))
+        self._sat = float(spec.get("light_sat", 0.0))
+        self._angle = 0.0
+        self._level: Optional[float] = None
+        self._last_t: Optional[float] = None
+
+    def _ring(self, m: dict, t: float, dt: float) -> float:
+        """Kick the magnet's spring with every hit up to ``t`` and let it ring for ``dt``."""
+        n = int(np.searchsorted(m["times"], t, side="right"))
+        if n < m["n"] or self._last_t is None:           # first frame, or time went back: start fresh,
+            m["x"] = m["v"] = 0.0                         # hearing only the hits of this frame
+            m["n"] = int(np.searchsorted(m["times"], t - dt, side="right"))
+        if n >= m["n"]:
+            for i in range(m["n"], n):
+                m["v"] += m["pulse"] * m["vel"][i] * self._omega * 0.8
+        m["n"] = n
+        steps = max(1, int(math.ceil(dt * 240)))         # semi-implicit Euler, stable at 240 Hz
+        h = dt / steps
+        for _ in range(steps):
+            m["v"] += (-self._omega ** 2 * m["x"] - 2 * self._zeta * self._omega * m["v"]) * h
+            m["x"] += m["v"] * h
+        return m["x"]
+
+    def frame_at(self, t: float) -> np.ndarray:
+        dt = 1.0 / self.fps if self._last_t is None else min(0.1, max(0.0, t - self._last_t))
+        feats = (self.features_at(t) or {}) if self.features_at else {}
+        level = _feature(feats, self._level_from, 0.0)
+        self._level = level if self._level is None else self._level + (level - self._level) * (1 - math.exp(-dt / 0.12))
+        mags = []
+        for m in self._magnets:
+            pull = m["strength"] * (self._base + 2.0 * self._level) + max(-0.3, self._ring(m, t, dt))
+            mags.append((m["at"][0], m["at"][1], max(0.0, pull)))
+        target = 0.0
         if len(self._chords):
             i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
             if i >= 0:
-                lo, hi = self._iris_hues
-                target_hue = lo + (hi - lo) * VeilsLayer.hue_of_root(self._chords[i].pitch)
-                self.hue += (target_hue - self.hue) * (1 - math.exp(-dt / 1.2))
-        return self.sys.render(t, gaze=tuple(self._gaze), saccade=n_sacc,
-                               pupil=min(1.0, 0.15 + 0.5 * pupil + 0.6 * dilate), blink=blink, hue=self.hue)
+                target = VeilsLayer.hue_of_root(self._chords[i].pitch) * (math.pi / 3)   # the lattice repeats every 60 degrees
+        step = (target - self._angle + math.pi / 6) % (math.pi / 3) - math.pi / 6    # the short way round
+        self._angle += step * (1 - math.exp(-dt / 0.8))
+        self._last_t = t
+        return self.sys.render(t, magnets=mags, rotation=self._angle + self._spin * t, hue=self._hue, sat=self._sat)
 
 
 class OrbitersLayer:
@@ -1263,6 +1631,970 @@ class RgbNoiseLayer:
         return (out * 255.0 + 0.5).astype(np.uint8)
 
 
+class SlitScanLayer:
+    """Post-op: slit-scan (``core/slitscan``, GPU): each line of the frame is a different moment.
+
+        - source: slitscan
+          mode: down                # down | up | right | left | radial | center: where the oldest moment is
+          depth: 60                 # frames kept (the longest delay); 60 at 720p is ~170 MB of VRAM
+          delay: 4                  # delay (frames) at the far end that is always there
+          amount: 30                # extra delay at full ``amount_from``
+          amount_from: texture.loudness   # the louder, the deeper the smear
+          wave: {track: kick, envelope: 0.5, depth: 25}   # each hit sends a band of the past across
+          bars: [[6, 14]]           # optional window; the buffer keeps filling outside it
+
+    Put it after the layers it should bend; it bends everything composited so far.
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int, fps: int,
+                 features_at=None, onset_loader=None, grid=None):
+        from core.slitscan import SlitScan
+        self.fps = fps
+        self.features_at = features_at
+        self.scan = SlitScan(width, height, depth=int(spec.get("depth", 60)), mode=spec.get("mode", "down"))
+        self._delay = float(spec.get("delay", 4.0))
+        self._amount = float(spec.get("amount", 30.0))
+        self._amount_from = spec.get("amount_from", "texture.loudness")
+        wspec = spec.get("wave")
+        self._wave_times = np.array(_layer_hits(wspec, notes, onset_loader, grid), dtype=float) if wspec else np.zeros(0)
+        self._wave_dur = max(1e-3, float(wspec.get("envelope", 0.5))) if wspec else 1.0
+        self._wave_depth = float(wspec.get("depth", 25.0)) if wspec else 0.0
+        self._level: Optional[float] = None
+        self._last_t: Optional[float] = None
+
+    def observe(self, frame: np.ndarray, t: float) -> None:
+        self.scan.push(frame)
+        self._last_t = t
+
+    def process(self, frame: np.ndarray, t: float) -> np.ndarray:
+        dt = 1.0 / self.fps if self._last_t is None else min(0.1, max(0.0, t - self._last_t))
+        self._last_t = t
+        feats = (self.features_at(t) or {}) if self.features_at else {}
+        level = _feature(feats, self._amount_from, 0.0)
+        self._level = level if self._level is None else self._level + (level - self._level) * (1 - math.exp(-dt / 0.2))
+        front, depth = -1.0, 0.0
+        i = int(np.searchsorted(self._wave_times, t, side="right")) - 1
+        if i >= 0 and t - self._wave_times[i] < self._wave_dur:
+            age = (t - self._wave_times[i]) / self._wave_dur
+            front, depth = age, self._wave_depth * (1.0 - age)
+        return self.scan.render(frame, self._delay + self._amount * self._level, front, depth)
+
+
+class ShockwaveLayer:
+    """Post-op: shock waves through a drawing (``core/shockwave``, GPU), the sand's ``ring`` on any image.
+
+        - source: shockwave
+          invert: true              # the drawing inside out: ink -> white lines, fills -> dim negatives
+          fill: 0.3                 # how much of the (inverted) fills is left
+          ink: 1.0                  # how readily a dark stroke counts as a line (higher = more lines)
+          rings: {track: piano}     # each note sends a ring out (a chord: rings on top of each other)
+          center: middle            # middle | random (each ring from its own point)
+          speed: 3.2                # frame heights per second / 2 (the sand's numbers)
+          width: 0.12
+          push: 0.06                # how far the ring pushes the picture
+          life: 0.6                 # seconds a ring lasts
+          glow: 1.0                 # how hard the ring lights the lines
+          swell: 0.05               # how much a punch enlarges the picture
+          split: 0.0                # the ring tears red and blue apart (0 = off, 1 = as far as it pushes)
+          scatter: 0.0              # sand: the ring scatters the picture into grains (0 = a clean lens)
+          punch: {track: kick-2, envelope: 0.3}   # the picture swells and flashes on a hit
+          hue: 0.9                  # colour the rings give the lines; a ``harmony:`` block lets the chord pick it
+          sat: 0.75
+          seed: 0
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int, fps: int,
+                 features_at=None, onset_loader=None, grid=None):
+        from core.shockwave import MAX_RINGS, RING_LIFE, RING_PUSH, RING_SPEED, RING_WIDTH, Shockwave
+        self.fps = fps
+        self.aspect = width / height
+        self.wave = Shockwave(width, height, invert=bool(spec.get("invert", True)), fill=float(spec.get("fill", 0.3)),
+                              ink=float(spec.get("ink", 1.0)), width_=float(spec.get("width", RING_WIDTH)),
+                              push=float(spec.get("push", RING_PUSH)), glow=float(spec.get("glow", 1.0)),
+                              swell=float(spec.get("swell", 0.05)), split=float(spec.get("split", 0.0)),
+                              scatter=float(spec.get("scatter", 0.0)))
+        self._max = MAX_RINGS
+        self._speed = float(spec.get("speed", RING_SPEED))
+        self._life = max(1e-3, float(spec.get("life", RING_LIFE)))
+        center = spec.get("center", "middle")
+        if center not in ("middle", "random"):
+            raise ValueError(f"shockwave: unknown center {center!r} (use middle or random)")
+        rspec = spec.get("rings")
+        events = _layer_events(rspec, notes, onset_loader, grid) if rspec else []
+        self._times = np.array([e.time for e in events], dtype=float)
+        self._vel = np.array([e.velocity / 127.0 for e in events], dtype=float)
+        rng = np.random.default_rng(int(spec.get("seed", 0)))
+        pts = rng.uniform(-1, 1, (len(events), 2)) * np.array([self.aspect * 0.8, 0.8])
+        self._centers = pts if center == "random" else np.zeros((len(events), 2))
+        pspec = spec.get("punch")
+        self._punch = EnvelopeOpacity(_layer_hits(pspec, notes, onset_loader, grid),
+                                      float(pspec.get("envelope", 0.3))) if pspec else None
+        hspec = spec.get("harmony")
+        self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._chord_times = np.array([e.time for e in self._chords], dtype=float)
+        self.hue = float(spec.get("hue", 0.9))
+        self._sat = float(spec.get("sat", 0.75))
+        self._last_t: Optional[float] = None
+
+    def process(self, frame: np.ndarray, t: float) -> np.ndarray:
+        dt = 1.0 / self.fps if self._last_t is None else min(0.1, max(0.0, t - self._last_t))
+        self._last_t = t
+        hi = int(np.searchsorted(self._times, t, side="right"))
+        lo = int(np.searchsorted(self._times, t - self._life, side="right"))
+        rings = []
+        for i in range(max(lo, hi - self._max), hi):                 # the youngest rings, if there are too many
+            age = t - self._times[i]
+            k = 1.0 - age / self._life
+            rings.append((self._centers[i, 0], self._centers[i, 1], age * self._speed,
+                          k * (0.4 + 0.6 * self._vel[i])))
+        if len(self._chords):
+            i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
+            if i >= 0:
+                target = VeilsLayer.hue_of_root(self._chords[i].pitch)
+                step = (target - self.hue + 0.5) % 1.0 - 0.5             # round the colour wheel the short way
+                self.hue += step * (1 - math.exp(-dt / 1.2))
+        punch = float(self._punch(t)) if self._punch else 0.0
+        return self.wave.render(frame, rings, punch=punch, hue=self.hue, sat=self._sat,
+                                frame_index=int(round(t * self.fps)))
+
+
+class SandLinesLayer:
+    """Post-op: the white outlines of the picture become sand, and shock waves scatter it (``core/sandlines``, GPU).
+
+    The picture goes away: the drawing is inverted (its ink turns white), its contrast
+    stretched, and what is near white becomes white sand on black. Once a bar (the
+    first frame of the bar's clip) the sand is given the new drawing and travels to its
+    lines. Rings run out through the sand, colour it and throw it out and up; it flies,
+    falls, slides to a stop, and the humming plate brings it back to the lines.
+
+        - source: sandlines
+          white: 0.8                # how near white (after inverting and stretching) a pixel must be to be sand
+          grains: 200000
+          rings: {track: piano}     # each note sends a ring out
+          center: middle            # middle | random (each ring from its own point)
+          speed: 3.2                # how fast a ring runs (frame heights / 2 per second)
+          width: 0.12
+          life: 0.6                 # seconds a ring lasts
+          push: 1.2                 # the speed a ring throws the sand outwards with (frame heights / 2 per second)
+          lift: 2.5                 # ... and up into the air
+          gravity: 22               # how fast it falls back
+          friction: 3.0             # how soon it stops sliding on the plate
+          bounce: 0.3               # how much of its fall it bounces back
+          pull: 3.0                 # how strongly the plate brings it back to its lines (0: it stays scattered)
+          travel: 2.5               # the fastest it creeps back (frame heights / 2 per second)
+          cool: 0.8                 # seconds a heated grain takes to turn white again
+          jump: {track: kick-2}     # each hit makes the whole plate hop
+          jump_gain: 1.0
+          size: 1.5                 # a grain, in pixels at 720p
+          bright: 0.35              # how bright a grain is (lines are many grains)
+          glow: 0.25
+          hue: 0.9                  # the colour the rings give the sand; ``harmony:`` lets the chord pick it
+          sat: 0.75
+          harmony: {score: input/song/sheetsage, snap: auto}
+          cut: 40                   # without a rhythm grid: a picture change this big is a new drawing
+          seed: 0
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int, fps: int,
+                 features_at=None, onset_loader=None, grid=None):
+        from core.sandlines import MAX_RINGS, SandLines
+        from core.shockwave import RING_LIFE, RING_SPEED, RING_WIDTH
+        self.fps = fps
+        self.aspect = width / height
+        self.grid = grid
+        self.sand = SandLines(width, height, grains=int(spec.get("grains", 200_000)), seed=int(spec.get("seed", 0)),
+                              white=float(spec.get("white", 0.8)), push=float(spec.get("push", 1.2)),
+                              lift=float(spec.get("lift", 2.5)), width_=float(spec.get("width", RING_WIDTH)),
+                              ring_speed=float(spec.get("speed", RING_SPEED)),
+                              gravity=float(spec.get("gravity", 22.0)), friction=float(spec.get("friction", 3.0)),
+                              bounce=float(spec.get("bounce", 0.3)), pull=float(spec.get("pull", 3.0)),
+                              travel=float(spec.get("travel", 2.5)), cool=float(spec.get("cool", 0.8)),
+                              size=float(spec.get("size", 1.5)), bright=float(spec.get("bright", 0.35)),
+                              glow=float(spec.get("glow", 0.25)))
+        self._max = MAX_RINGS
+        self._speed = float(spec.get("speed", RING_SPEED))
+        self._life = max(1e-3, float(spec.get("life", RING_LIFE)))
+        center = spec.get("center", "middle")
+        if center not in ("middle", "random"):
+            raise ValueError(f"sandlines: unknown center {center!r} (use middle or random)")
+        rspec = spec.get("rings")
+        events = _layer_events(rspec, notes, onset_loader, grid) if rspec else []
+        self._times = np.array([e.time for e in events], dtype=float)
+        self._vel = np.array([e.velocity / 127.0 for e in events], dtype=float)
+        rng = np.random.default_rng(int(spec.get("seed", 0)))
+        pts = rng.uniform(-1, 1, (len(events), 2)) * np.array([self.aspect * 0.8, 0.8])
+        self._centers = pts if center == "random" else np.zeros((len(events), 2))
+        jspec = spec.get("jump")
+        jumps = _layer_events(jspec, notes, onset_loader, grid) if jspec else []
+        self._jump_times = np.array([e.time for e in jumps], dtype=float)
+        self._jump_vel = np.array([e.velocity / 127.0 for e in jumps], dtype=float)
+        self._jump_gain = float(spec.get("jump_gain", 1.0))
+        hspec = spec.get("harmony")
+        self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._chord_times = np.array([e.time for e in self._chords], dtype=float)
+        self.hue = float(spec.get("hue", 0.9))
+        self._sat = float(spec.get("sat", 0.75))
+        self._cut = float(spec.get("cut", 40))
+        self._bar: Optional[int] = None
+        self._prev: Optional[np.ndarray] = None
+        self._last_t: Optional[float] = None
+
+    def _bar_of(self, t: float) -> Optional[int]:
+        g = self.grid
+        if g is None:
+            return None
+        db = getattr(g, "downbeats", None)
+        if db is not None and len(db) > 0:
+            return max(0, int(np.searchsorted(db, t, side="right")) - 1)
+        return int((t - g.start_offset) // g.bar_duration)
+
+    def process(self, frame: np.ndarray, t: float) -> np.ndarray:
+        first = self._last_t is None
+        dt = 1.0 / self.fps if first else min(0.1, max(0.0, t - self._last_t))
+        lo = t - 1.0 / self.fps if first else self._last_t     # first frame: only its own hits
+        self._last_t = t
+        # a new drawing: the first frame of each bar (its clip's first frame), or a cut
+        bar = self._bar_of(t)
+        small = frame[::16, ::16].astype(np.int16)
+        if bar is not None:
+            new = bar != self._bar
+            self._bar = bar
+        else:
+            new = self._prev is None or np.abs(small - self._prev).mean() > self._cut
+        self._prev = small
+        if new:
+            self.sand.lines(frame, bar if bar is not None else int(round(t * self.fps)))
+        for i in range(int(np.searchsorted(self._jump_times, lo, side="right")),
+                       int(np.searchsorted(self._jump_times, t, side="right"))):
+            self.sand.jump(self._jump_gain * (0.4 + 0.6 * self._jump_vel[i]))
+        hi = int(np.searchsorted(self._times, t, side="right"))
+        low = int(np.searchsorted(self._times, t - self._life, side="right"))
+        rings = []
+        for i in range(max(low, hi - self._max), hi):
+            age = t - self._times[i]
+            rings.append((self._centers[i, 0], self._centers[i, 1], age * self._speed,
+                          (1.0 - age / self._life) * (0.4 + 0.6 * self._vel[i])))
+        if len(self._chords):
+            i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
+            if i >= 0:
+                target = VeilsLayer.hue_of_root(self._chords[i].pitch)
+                step = (target - self.hue + 0.5) % 1.0 - 0.5
+                self.hue += step * (1 - math.exp(-dt / 1.2))
+        return self.sand.render(dt, rings, hue=self.hue, sat=self._sat)
+
+
+def _chord_part(part: str, root: int, quality: str, tones: tuple, tone: int = 0) -> float:
+    """One number about a chord (see ``_music_knob``'s ``chord:``)."""
+    if part == "root":
+        return float(root)
+    if part == "tone":
+        return float(tones[tone % len(tones)])
+    if part == "size":
+        return float(len(tones))
+    steps = {(p - root) % 12 for p in tones}
+    if part == "mode":
+        return 1.0 if 4 in steps else 0.0 if 3 in steps else 0.5
+    # tension: nothing for a plain major or minor triad; dim/aug and sus add some, each
+    # note past the triad a quarter more
+    odd = 0.5 if (6 in steps or 8 in steps) else 0.25 if quality.startswith("sus") else 0.0
+    return float(min(1.0, odd + 0.25 * max(0, len(tones) - 3)))
+
+
+CHORD_PARTS = ("root", "tone", "size", "mode", "tension")
+CUT_PARTS = ("count", "since", "until", "phase")
+
+
+def _music_knob(name: str, how, notes: Sequence, features_at=None, onset_loader=None, grid=None,
+                cuts=None, track=None):
+    """See ``_knob``; any of the forms below also takes ``gain`` and ``bias``: bias + gain * value."""
+    f = _knob(name, how, notes, features_at, onset_loader, grid, cuts, track)
+    if isinstance(how, dict) and "feature" not in how and ("gain" in how or "bias" in how):
+        gain, bias = float(how.get("gain", 1.0)), float(how.get("bias", 0.0))
+        return lambda t: bias + gain * f(t)
+    return f
+
+
+def _knob(name: str, how, notes: Sequence, features_at=None, onset_loader=None, grid=None,
+          cuts=None, track=None):
+    """A value that follows the music, as ``t -> float`` (called once a frame, in time order):
+
+        0.5                                       a constant
+        subbands.bass                             an audio feature
+        {feature: texture.noisiness, gain: 1, bias: 0}   an audio feature, scaled: bias + gain * feature
+                                                  (every form below takes gain and bias too)
+        {hits: <trigger>, envelope: 0.25, amount: 1}   1 -> 0 after each hit
+        {count: <trigger>, per: bar}              hits so far in the current bar (0 at the bar's start)
+        {pitch: <trigger>, low: 36, high: 84, glide: 0.1}   the latest note's pitch, low..high -> 0..1
+        {rate: 2.0, base: 0.3, from: <any of these>}   keeps adding (base + rate * from) per second
+        {bar: {step: 1, offset: 0, morph: 0.35}}  goes up by ``step`` at each bar, over its first
+                                                  ``morph`` seconds (a shape per bar, melting into the next)
+        {harmony: {score: ..., snap: auto}, glide: 1.2}   the hue (0..1) of the chord's root, gliding
+                                                  the short way round the colour wheel
+        {since: <trigger>, nth: 0}                seconds since the latest hit (nth: 1 the one before, ...);
+                                                  1000 before there was one
+        {chord: {score: ..., snap: auto}, part: root, glide: 0}   the chord sounding now (held through
+                                                  no-chord stretches; the first one before it starts):
+                                                  root   its root, 0..11 (C = 0)
+                                                  tone   its ``tone``-th note (0 root, 1 third, 2 fifth, 3 the
+                                                         seventh..), 0..11; a smaller chord wraps round
+                                                  size   how many notes (3 a triad, 4 a seventh chord..)
+                                                  mode   1 a major third, 0 a minor one, 0.5 neither (sus, 5)
+                                                  tension  0 a plain triad, up to 1 (dim/aug, sus, added notes)
+                                                  glide: seconds to slide there (root and tones the short
+                                                  way round the 12); 0 jumps
+        {cut: count, morph: 0}                    the clip cuts (``cuts``: the composer's schedule, so a
+                                                  cut is known before it comes): count  cuts so far (0 in
+                                                  the first shot; ``morph`` seconds to step up) | since
+                                                  seconds since the last one | until  seconds to the next
+                                                  (1000 when there is none) | phase  0 -> 1 across the shot
+        {groove: <trigger>, division: 16, ago: 0} the bar's pattern of hits: bit k set when step k (from the
+                                                  bar's 1; ``division`` steps to a whole note, so 16 in 4/4,
+                                                  12 in 3/4, 20 in 5/4) has one; ago: 1 the bar before;
+                                                  part: steps  how many steps the bar has
+        {relative: subbands.bass, window: 6, attack: 0.05, release: 0.3}   an audio feature against its own
+                                                  recent average (1 = as usual lately, 2 = twice that), so a
+                                                  quiet verse still moves and a loud chorus does not saturate
+        {adsr: <trigger>, attack: 0.02, decay: 0.2, sustain: 0.6, release: 0.4, velocity: true}
+                                                  each note's envelope: up, down to ``sustain`` while the note
+                                                  is held, then away over ``release`` once it ends (the loudest
+                                                  of the notes sounding); velocity scales the peak
+        {before: <trigger>, window: 0.5}          0 -> 1 over the ``window`` seconds before each hit, then 0:
+                                                  something that starts ahead of the beat
+        {lfo: sine, period: 1/1, phase: 0, width: 0.5}   an oscillator, 0..1: sine | tri | saw | square |
+                                                  pulse (high for ``width`` of the period); the period in
+                                                  seconds or a note value on the song's grid, in step with it
+        {random_on: <trigger>, ease: 0.1, seed: 0}   a new random value (0..1) on each hit, slid to over
+                                                  ``ease`` seconds
+        {voice: <trigger>, k: 0, part: pitch, release: 0.3}   the k-th note sounding now, lowest first:
+                                                  pitch  its MIDI pitch (held after it ends) | level
+                                                  1 while it sounds (velocity: true scales it), fading
+                                                  over ``release`` after; 0 when there is no k-th note
+        {figure: largest, part: x, glide: 0.15}   a figure of the mask track (``track``: --masks or the
+                                                  layer's track:): largest | second | third, by its share
+                                                  of the frame now; x, y its centre (0..1 across, down),
+                                                  size its share; held while there is none
+    """
+    if isinstance(how, (int, float)):
+        return lambda t, v=float(how): v
+    if isinstance(how, str):
+        return lambda t: _feature((features_at(t) if features_at else None) or {}, how)
+    if isinstance(how, dict) and "feature" in how:
+        path, gain, bias = str(how["feature"]), float(how.get("gain", 1.0)), float(how.get("bias", 0.0))
+        return lambda t: bias + gain * _feature((features_at(t) if features_at else None) or {}, path)
+    if isinstance(how, dict) and "hits" in how:
+        env = EnvelopeOpacity(_layer_hits(how["hits"], notes, onset_loader, grid), float(how.get("envelope", 0.25)))
+        return lambda t, k=float(how.get("amount", 1.0)): k * env(t)
+    if isinstance(how, dict) and "count" in how:
+        if how.get("per", "bar") != "bar":
+            raise ValueError(f"uniform {name!r}: count per {how.get('per')!r} (only per: bar)")
+        if grid is None:
+            raise ValueError(f"uniform {name!r}: count per bar needs a rhythm grid (render with --midi)")
+        times = np.array(sorted(_layer_hits(how["count"], notes, onset_loader, grid)), dtype=float)
+        db = getattr(grid, "downbeats", None)
+
+        def count(t):
+            if db is not None and len(db):
+                i = int(np.searchsorted(db, t, side="right")) - 1
+                start = float(db[i]) if i >= 0 else -np.inf
+            else:
+                start = grid.start_offset + ((t - grid.start_offset) // grid.bar_duration) * grid.bar_duration
+            return float(np.searchsorted(times, t, side="right") - np.searchsorted(times, start, side="left"))
+        return count
+    if isinstance(how, dict) and "pitch" in how:
+        events = _layer_events(how["pitch"], notes, onset_loader, grid)
+        times = np.array([e.time for e in events], dtype=float)
+        low, high = float(how.get("low", 36)), float(how.get("high", 84))
+        pitches = np.clip((np.array([e.pitch for e in events], dtype=float) - low) / max(1.0, high - low), 0, 1)
+        glide = max(1e-3, float(how.get("glide", 0.1)))
+        state = {"v": None, "t": None}
+
+        def pitch(t):
+            i = int(np.searchsorted(times, t, side="right")) - 1
+            target = float(pitches[i]) if i >= 0 else 0.5
+            if state["v"] is None:
+                state["v"] = target
+            else:
+                state["v"] += (target - state["v"]) * (1 - np.exp(-max(0.0, t - state["t"]) / glide))
+            state["t"] = t
+            return state["v"]
+        return pitch
+    if isinstance(how, dict) and "rate" in how:
+        src = _music_knob(name, how.get("from", 1.0), notes, features_at, onset_loader, grid, cuts, track)
+        rate, base = float(how["rate"]), float(how.get("base", 0.0))
+        state = {"v": 0.0, "t": None}
+
+        def accumulate(t):
+            v = src(t)
+            if state["t"] is not None:
+                state["v"] += max(0.0, t - state["t"]) * (base + rate * v)
+            state["t"] = t
+            return state["v"]
+        return accumulate
+    if isinstance(how, dict) and "since" in how:
+        times = np.array(sorted(_layer_hits(how["since"], notes, onset_loader, grid)), dtype=float)
+        nth = int(how.get("nth", 0))
+
+        def since(t):
+            i = int(np.searchsorted(times, t, side="right")) - 1 - nth
+            return float(t - times[i]) if i >= 0 else 1000.0
+        return since
+    if isinstance(how, dict) and "bar" in how:
+        if grid is None:
+            raise ValueError(f"uniform {name!r}: bar needs a rhythm grid (render with --midi)")
+        cfg = how["bar"] or {}
+        step, offset = float(cfg.get("step", 1.0)), float(cfg.get("offset", 0.0))
+        morph = max(1e-3, float(cfg.get("morph", 0.35)))
+        db = getattr(grid, "downbeats", None)
+
+        def bar(t):
+            if db is not None and len(db):
+                i = int(np.searchsorted(db, t, side="right")) - 1
+                start = float(db[max(i, 0)])
+            else:
+                i = int((t - grid.start_offset) // grid.bar_duration)
+                start = grid.start_offset + i * grid.bar_duration
+            x = float(np.clip((t - start) / morph, 0.0, 1.0))
+            return offset + step * (i - 1 + x * x * (3 - 2 * x))
+        return bar
+    if isinstance(how, dict) and "harmony" in how:
+        chords = _layer_events(how["harmony"], notes, onset_loader, grid)
+        times = np.array([e.time for e in chords], dtype=float)
+        glide = max(1e-3, float(how.get("glide", 1.2)))
+        state = {"h": None, "t": None}
+
+        def hue(t):
+            i = int(np.searchsorted(times, t, side="right")) - 1
+            if i < 0:
+                return state["h"] if state["h"] is not None else float(how.get("start", 0.6))
+            target = VeilsLayer.hue_of_root(chords[i].pitch)
+            if state["h"] is None:
+                state["h"] = target
+            else:
+                gap = (target - state["h"] + 0.5) % 1.0 - 0.5
+                state["h"] = (state["h"] + gap * (1 - math.exp(-max(0.0, t - state["t"]) / glide))) % 1.0
+            state["t"] = t
+            return state["h"]
+        return hue
+    if isinstance(how, dict) and "chord" in how:
+        from core.score.sheetsage_reader import parse_chord
+        from core.video.composer import load_score
+        part, tone = how.get("part", "root"), int(how.get("tone", 0))
+        if part not in CHORD_PARTS:
+            raise ValueError(f"uniform {name!r}: chord part {part!r} (use {', '.join(CHORD_PARTS)})")
+        times, vals = [], []
+        for span in load_score(how["chord"], grid).chords:
+            root, quality, tones = parse_chord(span.label)
+            if root is not None:                       # a no-chord stretch keeps the last chord
+                times.append(span.start)
+                vals.append(_chord_part(part, root, quality, tones, tone))
+        if not vals:
+            raise ValueError(f"uniform {name!r}: the score has no chords")
+        times, vals = np.array(times), np.array(vals)
+        glide, wheel = float(how.get("glide", 0.0)), part in ("root", "tone")
+        state = {"v": None, "t": None}
+
+        def chord(t):
+            target = float(vals[max(0, int(np.searchsorted(times, t, side="right")) - 1)])
+            if glide <= 0 or state["v"] is None:
+                state["v"] = target
+            else:
+                gap = ((target - state["v"] + 6.0) % 12.0 - 6.0) if wheel else target - state["v"]
+                state["v"] += gap * (1 - math.exp(-max(0.0, t - state["t"]) / glide))
+                if wheel:
+                    state["v"] %= 12.0
+            state["t"] = t
+            return state["v"]
+        return chord
+    if isinstance(how, dict) and "cut" in how:
+        part = how["cut"]
+        if part not in CUT_PARTS:
+            raise ValueError(f"uniform {name!r}: cut {part!r} (use {', '.join(CUT_PARTS)})")
+        if cuts is None:
+            raise ValueError(f"uniform {name!r}: cut needs the clips (a scene with - source: clips)")
+        morph = float(how.get("morph", 0.0))
+        known = {"to": -np.inf, "times": np.zeros(0)}
+
+        def cut(t):
+            if t + 600.0 > known["to"]:               # the schedule, a good stretch ahead
+                known["to"] = t + 3600.0
+                known["times"] = np.asarray(cuts(known["to"]), dtype=float)
+            ts = known["times"]
+            i = int(np.searchsorted(ts, t, side="right"))     # cuts so far
+            last = float(ts[i - 1]) if i > 0 else None
+            nxt = float(ts[i]) if i < len(ts) else None
+            if part == "since":
+                return t - last if last is not None else 1000.0
+            if part == "until":
+                return nxt - t if nxt is not None else 1000.0
+            if part == "phase":
+                return (t - last) / (nxt - last) if last is not None and nxt is not None else 0.0
+            if morph > 0 and last is not None:
+                x = min(1.0, (t - last) / morph)
+                return i - 1 + x * x * (3 - 2 * x)
+            return float(i)
+        return cut
+    if isinstance(how, dict) and "groove" in how:
+        if grid is None:
+            raise ValueError(f"uniform {name!r}: groove needs a rhythm grid (render with --midi)")
+        division, back = int(how.get("division", 16)), -int(how.get("ago", 0))
+        steps_only = how.get("part", "pattern") == "steps"
+        times = np.array(sorted(_layer_hits(how["groove"], notes, onset_loader, grid)), dtype=float)
+
+        def groove(t):
+            i = grid.bar_index(t) + back
+            start, end = grid.bar_start(i), grid.bar_start(i + 1)
+            n = max(1, int(round(grid.beats_in_bar(i) * division / 4)))
+            if steps_only:
+                return float(n)
+            step = (end - start) / n
+            hits = times[(times >= start - step / 2) & (times < end - step / 2)]
+            bits = 0
+            for k in np.round((hits - start) / step).astype(int):
+                bits |= 1 << int(min(max(k, 0), n - 1))
+            return float(bits)
+        return groove
+    if isinstance(how, dict) and "relative" in how:
+        path = str(how["relative"])
+        window = max(1e-3, float(how.get("window", 6.0)))
+        attack, release = max(1e-3, float(how.get("attack", 0.05))), max(1e-3, float(how.get("release", 0.3)))
+        state = {"avg": None, "env": 0.0, "t": None}
+
+        def relative(t):
+            v = max(0.0, float(_feature((features_at(t) if features_at else None) or {}, path)))
+            if state["avg"] is None:
+                state["avg"], state["env"] = v, v
+            else:
+                dt = max(0.0, t - state["t"])
+                tau = attack if v > state["env"] else release
+                state["env"] += (v - state["env"]) * (1 - math.exp(-dt / tau))
+                state["avg"] += (v - state["avg"]) * (1 - math.exp(-dt / window))
+            state["t"] = t
+            return state["env"] / max(state["avg"], 1e-4)
+        return relative
+    if isinstance(how, dict) and "adsr" in how:
+        events = _layer_events(how["adsr"], notes, onset_loader, grid)
+        a, d = max(1e-3, float(how.get("attack", 0.02))), max(1e-3, float(how.get("decay", 0.2)))
+        sus, r = float(how.get("sustain", 0.6)), max(1e-3, float(how.get("release", 0.4)))
+        use_vel = bool(how.get("velocity", True))
+        starts = np.array([e.time for e in events], dtype=float)
+        ends = np.array([e.time + max(float(getattr(e, "duration", 0.0) or 0.0), 1e-3) for e in events])
+        peaks = np.array([(e.velocity / 127.0 if use_vel else 1.0) for e in events], dtype=float)
+        longest = float((ends - starts).max()) if len(events) else 0.0
+
+        def level(x, held):
+            """The envelope ``x`` seconds into a note held for ``held`` seconds."""
+            def on(y):
+                return y / a if y < a else sus + (1 - sus) * math.exp(-(y - a) / d)
+            if x < held:
+                return on(x)
+            return on(held) * math.exp(-(x - held) / r * 3.0)
+
+        def adsr(t):
+            hi = int(np.searchsorted(starts, t, side="right"))
+            lo = int(np.searchsorted(starts, t - longest - 4.0 * r, side="left"))
+            best = 0.0
+            for k in range(lo, hi):
+                x = t - starts[k]
+                if x - (ends[k] - starts[k]) > 4.0 * r:
+                    continue
+                best = max(best, peaks[k] * level(x, ends[k] - starts[k]))
+            return best
+        return adsr
+    if isinstance(how, dict) and "before" in how:
+        times = np.array(sorted(_layer_hits(how["before"], notes, onset_loader, grid)), dtype=float)
+        window = max(1e-3, float(how.get("window", 0.5)))
+
+        def before(t):
+            i = int(np.searchsorted(times, t, side="right"))
+            if i >= len(times):
+                return 0.0
+            x = (times[i] - t) / window
+            return float(1.0 - x) if x < 1.0 else 0.0
+        return before
+    if isinstance(how, dict) and "lfo" in how:
+        from core.video.cast import _Role
+        shape = how["lfo"]
+        if shape not in ("sine", "tri", "saw", "square", "pulse"):
+            raise ValueError(f"uniform {name!r}: lfo {shape!r} (sine, tri, saw, square or pulse)")
+        period = _Role._period(how.get("period", "1/1" if grid is not None else 2.0), grid, 0)
+        origin = float(grid.start_offset) if grid is not None and isinstance(how.get("period", "1/1"), str) else 0.0
+        phase0, width = float(how.get("phase", 0.0)), float(how.get("width", 0.5))
+
+        def lfo(t):
+            x = ((t - origin) / period + phase0) % 1.0
+            if shape == "sine":
+                return 0.5 - 0.5 * math.cos(2 * math.pi * x)
+            if shape == "tri":
+                return 1.0 - abs(2.0 * x - 1.0)
+            if shape == "saw":
+                return x
+            return 1.0 if x < (0.5 if shape == "square" else width) else 0.0
+        return lfo
+    if isinstance(how, dict) and "random_on" in how:
+        times = np.array(sorted(_layer_hits(how["random_on"], notes, onset_loader, grid)), dtype=float)
+        values = np.random.default_rng(int(how.get("seed", 0))).uniform(0, 1, len(times) + 1)
+        ease = max(0.0, float(how.get("ease", 0.1)))
+
+        def random_on(t):
+            i = int(np.searchsorted(times, t, side="right"))
+            if i == 0 or ease <= 0:
+                return float(values[i])
+            x = min(1.0, (t - times[i - 1]) / ease)
+            x = x * x * (3 - 2 * x)
+            return float(values[i - 1] + (values[i] - values[i - 1]) * x)
+        return random_on
+    if isinstance(how, dict) and "voice" in how:
+        events = _layer_events(how["voice"], notes, onset_loader, grid)
+        k, part = int(how.get("k", 0)), how.get("part", "pitch")
+        if part not in ("pitch", "level"):
+            raise ValueError(f"uniform {name!r}: voice part {part!r} (pitch or level)")
+        release = max(1e-3, float(how.get("release", 0.3)))
+        use_vel = bool(how.get("velocity", False))
+        starts = np.array([e.time for e in events], dtype=float)
+        ends = np.array([e.time + max(float(getattr(e, "duration", 0.0) or 0.0), 0.05) for e in events])
+        longest = float((ends - starts).max()) if len(events) else 0.0
+        state = {"pitch": 60.0}
+
+        def voice(t):
+            lo = int(np.searchsorted(starts, t - longest - release, side="left"))
+            hi = int(np.searchsorted(starts, t, side="right"))
+            live = []
+            for j in range(lo, hi):
+                if t < ends[j] + release:
+                    lev = 1.0 if t < ends[j] else 1.0 - (t - ends[j]) / release
+                    if use_vel:
+                        lev *= events[j].velocity / 127.0
+                    live.append((events[j].pitch, lev))
+            live.sort()
+            if k < len(live):
+                state["pitch"] = float(live[k][0])
+                return state["pitch"] if part == "pitch" else float(live[k][1])
+            return state["pitch"] if part == "pitch" else 0.0
+        return voice
+    if isinstance(how, dict) and "figure" in how:
+        if track is None:
+            raise ValueError(f"uniform {name!r}: figure needs a mask track (track: <folder>) or the render's --masks")
+        rank = {"largest": 0, "second": 1, "third": 2}.get(how["figure"])
+        part = {"x": "cx", "y": "cy", "size": "share"}.get(how.get("part", "x"))
+        if rank is None or part is None:
+            raise ValueError(f"uniform {name!r}: figure largest|second|third, part x|y|size")
+        glide = max(0.0, float(how.get("glide", 0.15)))
+        state = {"v": None, "t": None}
+
+        def figure(t):
+            tr = track()
+            i = tr.frame_at(t)
+            ids = tr.in_view(i) if i is not None else []
+            target = tr.stat(i, ids[rank])[part] if len(ids) > rank else state["v"]
+            if target is None:
+                target = 0.5 if part != "share" else 0.0
+            if state["v"] is None or glide <= 0:
+                state["v"] = target
+            else:
+                state["v"] += (target - state["v"]) * (1 - math.exp(-max(0.0, t - state["t"]) / glide))
+            state["t"] = t
+            return float(state["v"])
+        return figure
+    raise ValueError(f"uniform {name!r}: use a number, a feature path, or {{feature|hits|count|pitch|rate|bar|"
+                     f"harmony|since|chord|cut|groove|relative|adsr|before|lfo|random_on|voice|figure: ...}}")
+
+
+class ShadertoyLayer:
+    """A shader from shadertoy.com, run as it is (``core/shadertoy``, GPU); the music drives its clock and knobs.
+
+        - source: shadertoy
+          file: shaders/shadertoy/some_shader.glsl   # or a folder: image.glsl, buffer_a.glsl .., common.glsl
+          channel0: frame           # what the Image pass reads (overrides the file's ``// iChannel0:`` line):
+                                    # frame: the picture below (the layer is then a post-op) | previous: its
+                                    # own last output | buffer_a .. buffer_d | sound: the music as Shadertoy's
+                                    # sound input (spectrum + waveform) | mask: the figures of the mask track
+                                    # (--masks, or track:), white on black | mask_distance: the signed distance
+                                    # to their outline, 0.5 on it, +1/255 per pixel inside (at 720p) | a path
+                                    # to an image | none
+          supersample: 1
+          speed: 1.0                # how fast the shader's clock (iTime) runs
+          start: 0.0                # the clock at the first frame (default: the song's time there)
+          rush: {hits: {track: kick}, amount: 3.0, envelope: 0.3}   # the clock rushes on each hit
+          subframes: 1              # > 1: motion blur, the frame averaged over that many renders
+          shutter: 0.5              #      spread over this share of the frame's time (0..1)
+          uniforms:                 # float knobs of the shader's own (declared for it if it does not)
+            u_bass: subbands.bass   # an audio feature
+            u_kick: {hits: {track: kick}, envelope: 0.25}           # a pulse on each hit, 1 -> 0
+            u_amount: 0.5           # a constant
+            u_count: {count: {track: kick}, per: bar}               # hits so far in this bar (0 at its start)
+            u_note: {pitch: {track: bass}, low: 36, high: 60, glide: 0.1}   # the last note's pitch, 0..1
+            u_spin: {rate: 2.0, base: 0.3, from: {hits: {track: bass}, envelope: 0.2}}
+                                    # an angle that keeps turning: base + rate * (a knob as above) per second
+            u_third: {chord: {score: input/song/sheetsage}, part: tone, tone: 1, glide: 0.5}
+                                    # the chord's third, 0..11 (also root, size, mode, tension)
+            u_cut: {cut: until}     # seconds to the next clip cut (also count, since, phase)
+
+    When any pass reads ``frame`` it is a post-op (the picture under it goes in);
+    otherwise a source, blended like any other.
+    """
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int, fps: int,
+                 features_at=None, onset_loader=None, grid=None, cuts=None, default_track=None, tracks=None):
+        from core.shadertoy import BUFFERS, Shadertoy, load
+        if not spec.get("file"):
+            raise ValueError("shadertoy: needs file: (a .glsl or a folder in shaders/shadertoy/)")
+        shader = load(spec["file"])
+        self.meta = shader["meta"]
+        self.fps = fps
+        self.features_at = features_at
+        channels = shader["channels"]
+        image = dict(channels.get("image", {}))
+        for i in range(4):
+            if f"channel{i}" in spec:
+                image[i] = spec[f"channel{i}"]
+        channels["image"] = image
+
+        def resolve(src):
+            if src in (None, "none"):
+                return None
+            if src in ("frame", "previous", "sound", "mask", "mask_distance") or str(src).startswith("buffer_"):
+                return src
+            from PIL import Image
+            return np.asarray(Image.open(src).convert("RGB"))
+        channels = {p: {i: resolve(src) for i, src in chans.items() if resolve(src) is not None}
+                    for p, chans in channels.items()}
+        tracks = tracks if tracks is not None else {}
+        folder = spec.get("track") or default_track
+
+        def track():
+            if not folder:
+                raise ValueError("shadertoy: needs a mask track (track: <folder>) or the render's --masks")
+            if folder not in tracks:
+                from core.segment.mask_track import MaskTrack
+                tracks[folder] = MaskTrack(folder)
+            return tracks[folder]
+        self._track = track
+        self._knobs = {name: _music_knob(name, how, notes, features_at, onset_loader, grid, cuts,
+                                         track if folder else None)
+                       for name, how in (spec.get("uniforms") or {}).items()}
+        self.toy = Shadertoy(shader["image"], width, height, supersample=int(spec.get("supersample", 1)),
+                             extra=tuple(self._knobs), buffers={b: shader.get(b) for b in BUFFERS},
+                             common=shader.get("common", ""), channels=channels)
+        self._speed = float(spec.get("speed", 1.0))
+        self._start = spec.get("start")
+        self.subframes = max(1, int(spec.get("subframes", 1)))
+        self.shutter = float(np.clip(float(spec.get("shutter", 0.5)), 0.0, 1.0))
+        rspec = spec.get("rush")
+        self._rush = EnvelopeOpacity(_layer_hits(rspec["hits"], notes, onset_loader, grid),
+                                     float(rspec.get("envelope", 0.3))) if rspec else None
+        self._rush_amount = float(rspec.get("amount", 3.0)) if rspec else 0.0
+        self._clock = 0.0
+        self._clock_before = None
+        self._last_t = None
+        self._hears = self.toy.reads("sound")
+        self._sees = "mask_distance" if self.toy.reads("mask_distance") else "mask" if self.toy.reads("mask") else None
+        self.track = None
+        if self._sees:
+            if not folder:
+                raise ValueError("shadertoy: a mask channel needs a mask track (track: <folder>) or the render's --masks")
+            self.track = track()
+        self.W, self.H = width, height
+
+    def _mask(self, t: float) -> np.ndarray:
+        """The figures at ``t`` for a mask channel: white on black, or the signed distance to
+        their outline (128 on it, a level per pixel at 720p, brighter inside)."""
+        import cv2
+        lab = self.track.labels_at(t)
+        if lab is None:
+            return np.zeros((self.H, self.W), np.uint8)
+        inside = cv2.resize((lab > 0).astype(np.uint8), (self.W, self.H), interpolation=cv2.INTER_NEAREST)
+        if self._sees == "mask":
+            return inside * np.uint8(255)
+        per = 720.0 / self.H                                  # levels per pixel of this frame
+        d_in = cv2.distanceTransform(inside, cv2.DIST_L2, 5)
+        d_out = cv2.distanceTransform(1 - inside, cv2.DIST_L2, 5)
+        return np.clip(128.0 + (d_in - d_out) * per, 0, 255).astype(np.uint8)
+
+    def _draw(self, below, t: float, target=None):
+        dt = 1.0 / self.fps if self._last_t is None else max(0.0, t - self._last_t)
+        if self._last_t is None:
+            self._clock = t * self._speed if self._start is None else float(self._start)   # where the song is
+        else:
+            rush = self._rush_amount * self._rush(t) if self._rush else 0.0
+            self._clock += dt * (self._speed + rush)
+        self._last_t = t
+        sound = None
+        if self._hears:                                      # Shadertoy's sound input, from our music
+            from core.shadertoy import sound_texture
+            feats = (self.features_at(t) if self.features_at else None) or {}
+            sound = sound_texture(feats.get("spectrum"), float(feats.get("nyquist", 22050.0)), feats.get("wave"))
+        mask = self._mask(t) if self._sees else None
+        if self.subframes > 1:
+            # the shutter open over the last ``shutter`` of the frame: renders at times in step,
+            # the knobs asked in time order, the pictures averaged
+            acc = None
+            rate = (self._clock - self._clock_before) / dt if self._clock_before is not None and dt > 0 else self._speed
+            for j in range(self.subframes):
+                back = self.shutter * dt * (1.0 - (j + 1) / self.subframes)
+                img = self.toy.render(self._clock - rate * back, dt / self.subframes, frame=below, sound=sound,
+                                      mask=mask, **{k: f(t - back) for k, f in self._knobs.items()})
+                acc = img.astype(np.float32) if acc is None else acc + img
+            self._clock_before = self._clock
+            return np.clip(acc / self.subframes + 0.5, 0, 255).astype(np.uint8)
+        self._clock_before = self._clock
+        return self.toy.render(self._clock, dt, frame=below, sound=sound, target=target, mask=mask,
+                               **{k: f(t) for k, f in self._knobs.items()})
+
+    @property
+    def is_post(self) -> bool:
+        return self.toy.reads("frame")
+
+
+class _ShadertoySource:
+    def __init__(self, layer: ShadertoyLayer):
+        self.layer = layer
+        # its picture can stay on the GPU (not when it reads its own last output, nor when it
+        # averages subframes: those are added up on the CPU)
+        self.on_gpu = not layer.toy.reads("previous") and layer.subframes == 1
+
+    def frame_at(self, t: float) -> np.ndarray:
+        return self.layer._draw(None, t)
+
+    def frame_gpu(self, t: float, g):
+        return self.layer._draw(None, t, target=g.texture())
+
+
+class _ShadertoyPost:
+    def __init__(self, layer: ShadertoyLayer):
+        self.layer = layer
+        self.on_gpu = not layer.toy.reads("previous") and layer.subframes == 1
+
+    def process(self, frame: np.ndarray, t: float) -> np.ndarray:
+        return self.layer._draw(frame, t)
+
+    def process_gpu(self, frame, t: float, g):
+        from core.video.gpu_compose import Frame
+        return Frame(g, tex=self.layer._draw(frame.tex(), t, target=g.texture()))
+
+
+def drop_spot(frame: np.ndarray, rng, at: str = "random"):
+    """Where a drop falls: the centre, or a random point off the lines (into a region)."""
+    H, W = frame.shape[:2]
+    if at == "center":
+        return W / 2, H / 2
+    for _ in range(8):
+        x, y = rng.uniform(0.05, 0.95) * W, rng.uniform(0.05, 0.95) * H
+        if frame[int(y), int(x)].mean() > 70:
+            break
+    return x, y
+
+
+def drop_colour(frame: np.ndarray, x: float, y: float, mode: str, boost: float = 1.8,
+                chord_hue: Optional[float] = None):
+    """A drop's colour (rgb 0..1): ``under`` the colour where it fell made vivid, ``complement``
+    the opposite hue, ``chord`` the hue of the chord playing (``chord_hue``; red when none)."""
+    if mode == "chord":
+        return colorsys.hsv_to_rgb(chord_hue or 0.0, 0.85, 1.0)
+    x0, y0 = int(x), int(y)
+    patch = frame[max(0, y0 - 2):y0 + 3, max(0, x0 - 2):x0 + 3].reshape(-1, 3).mean(axis=0) / 255.0
+    h, sat, v = colorsys.rgb_to_hsv(*patch)
+    if mode == "complement":
+        h = (h + 0.5) % 1.0
+    return colorsys.hsv_to_rgb(h, min(1.0, sat * boost + 0.15), min(1.0, max(v, 0.5) * 1.15))
+
+
+class DropsLayer:
+    """Post-op: drops of colour that spread until they meet the lines (``core/drops``, GPU).
+
+        - source: drops
+          hits: {track: snare}      # each note lets a drop fall
+          at: random                # random (a point off the lines) | center
+          color: under              # under: the colour where it fell, made vivid (``boost``)
+                                    # complement: the opposite of it | chord: the chord's colour
+          boost: 1.8                # how much more saturated than the picture the drop is
+          speed: 6                  # how fast the paint creeps (pixels per frame at 720p)
+          grow: 2.0                 # seconds a drop keeps spreading
+          life: 4.0                 # seconds before a stain has dried away ...
+          fade: 1.0                 # ... fading over the last this many
+          radius: 6                 # the drop's size when it lands (pixels at 720p; velocity scales it)
+          opacity: 0.9
+          stain: 0.0                # 0: the colour replaces the fill; 1: it tints it, keeping its shading
+          rim: 0.35                 # the darker wet edge, like watercolour
+          rough: 0.35               # how ragged the spreading front is (0: a clean octagon)
+          cut: 40                   # a picture change this big (mean 0..255) is a cut: old stains dry
+          ink: 1.0                  # how readily a dark stroke counts as a wall
+          wall: 0.5                 # lower: thin lines stop the paint; higher: it leaks through them
+          shape: blob               # blob | spiral: the stain shows as an arm winding out from the drop
+          pitch: 30                 # spiral: pixels between its turns (at 720p)
+          turns: 2.0                # spiral: turns a second (how fast it winds out)
+          arm: 0.55                 # spiral: the painted share of each turn (1: a solid snail shell)
+          whirl: 1.5                # spiral: how fast it spins when it lands (turns a second; it slows as it dries)
+          twirl: 1.5                # spiral: how far the drawing around it is twisted, like a whirlpool (radians; 0: not)
+          spin: random              # spiral: cw | ccw | random (each drop its own way)
+          harmony: {score: input/song/sheetsage, snap: auto}   # for color: chord
+          seed: 0
+    """
+
+    COLORS = ("under", "complement", "chord")
+
+    def __init__(self, spec: dict, notes: Sequence, width: int, height: int, fps: int,
+                 features_at=None, onset_loader=None, grid=None):
+        from core.drops import Drops
+        self.fps = fps
+        self.W, self.H = width, height
+        scale = height / 720.0
+        self.drops = Drops(width, height, speed=max(1, round(float(spec.get("speed", 6)) * scale)),
+                           grow=float(spec.get("grow", 2.0)), life=float(spec.get("life", 4.0)),
+                           fade=float(spec.get("fade", 1.0)), ink=float(spec.get("ink", 1.0)),
+                           wall=float(spec.get("wall", 0.5)), opacity=float(spec.get("opacity", 0.9)),
+                           rim=float(spec.get("rim", 0.35)), stain=float(spec.get("stain", 0.0)),
+                           rough=float(spec.get("rough", 0.35)), shape=spec.get("shape", "blob"),
+                           pitch=float(spec.get("pitch", 30)) * scale, turns=float(spec.get("turns", 2.0)),
+                           arm=float(spec.get("arm", 0.55)), whirl=float(spec.get("whirl", 1.5)),
+                           twirl=float(spec.get("twirl", 1.5)))
+        self._spin = spec.get("spin", "random")
+        if self._spin not in ("cw", "ccw", "random"):
+            raise ValueError(f"drops: unknown spin {self._spin!r} (use cw, ccw or random)")
+        self._radius = float(spec.get("radius", 6.0)) * scale
+        self._at = spec.get("at", "random")
+        if self._at not in ("random", "center"):
+            raise ValueError(f"drops: unknown at {self._at!r} (use random or center)")
+        self._color = spec.get("color", "under")
+        if self._color not in self.COLORS:
+            raise ValueError(f"drops: unknown color {self._color!r} (use one of {self.COLORS})")
+        self._boost = float(spec.get("boost", 1.8))
+        hspec = spec.get("hits")
+        events = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._times = np.array([e.time for e in events], dtype=float)
+        self._vel = np.array([e.velocity / 127.0 for e in events], dtype=float)
+        hspec = spec.get("harmony")
+        self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
+        self._chord_times = np.array([e.time for e in self._chords], dtype=float)
+        self._rng = np.random.default_rng(int(spec.get("seed", 0)))
+        self._cut = float(spec.get("cut", 40))
+        self._prev: Optional[np.ndarray] = None
+        self._last_t: Optional[float] = None
+
+    def _where(self, frame: np.ndarray):
+        return drop_spot(frame, self._rng, self._at)
+
+    def _colour(self, frame: np.ndarray, x: float, y: float, t: float):
+        hue = None
+        if self._color == "chord":
+            i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
+            hue = VeilsLayer.hue_of_root(self._chords[i].pitch) if i >= 0 else 0.0
+        return drop_colour(frame, x, y, self._color, self._boost, hue)
+
+    def process(self, frame: np.ndarray, t: float) -> np.ndarray:
+        lo = t - 1.0 / self.fps if self._last_t is None else self._last_t   # first frame: only its own hits
+        self._last_t = t
+        small = frame[::16, ::16].astype(np.int16)
+        if self._prev is not None and np.abs(small - self._prev).mean() > self._cut:
+            self.drops.cut(t)                                # the clip changed: the old stains dry
+        self._prev = small
+        for i in range(int(np.searchsorted(self._times, lo, side="right")),
+                       int(np.searchsorted(self._times, t, side="right"))):
+            x, y = self._where(frame)
+            spin = {"cw": 1.0, "ccw": -1.0}.get(self._spin) or float(self._rng.choice((-1.0, 1.0)))
+            self.drops.drop(x, y, self._colour(frame, x, y, t), self._radius * (0.5 + self._vel[i]), t=t, spin=spin)
+        return self.drops.render(frame, t)
+
+
 class EchoesLayer:
     """Post-op: dynamically blends previous frames to create temporal echoes
 
@@ -1369,6 +2701,7 @@ class CubesLayer:
           n_cubes: 40                     # cubes in the periodic corridor
           faces_with_clips: 3             # 0..6 faces showing the clip screen
           face_resolution: 256            # per-face texture size (RAM/CPU)
+          samples: 8                      # smooth cube edges (MSAA samples; 0 off)
           crop_faces: true                # center-crop 16:9 clips to fill (no bars)
           one_clip_per_face: false        # false: same screen on all faces;
                                           # true: an independent clip per face-index
@@ -1458,28 +2791,52 @@ class CubesLayer:
 
 def build_compositor(base, video_cfg: dict, notes: Sequence,
                      width: int, height: int, onset_loader=None,
-                     fps: int = 24, features_at=None, grid=None) -> "Compositor":
+                     fps: int = 24, features_at=None, grid=None,
+                     masks: Optional[str] = None, span=None) -> "Compositor":
     """Compose ``base`` (ClipComposer) with the scene's extra layers.
 
     Layers with ``source: clips`` map to the base; unknown sources raise.
     Without a ``layers:`` section, the result is just the base (legacy).
+    A layer with ``enabled: false`` is skipped (kept in the scene, left out of the picture).
+    A source's ``opacity:`` is a number or a music knob (0..1).
+    An FX (a post-op) with ``mix:`` (a number or a music knob, 0..1) shows that much of its
+    result over the picture it was given: its dry/wet.
+    A source layer with ``fx:`` (a list of FX layers) puts its own picture through them
+    before it joins the stack; a ``group`` is a lane of the Arrange window, its layers and
+    then its FX (core/video/track_fx.py).
+    A layer with ``mask:`` shows only inside or outside the objects of a mask track
+    (core/video/matte.py); ``masks`` is the track used when its ``mask:`` names none.
     Layer triggers accept MIDI ``notes`` or ``audio`` onset sources.
     """
     comp = Compositor()
+    comp.size = (width, height)
     # no layers: section -> legacy single clips base; a layers: list is
     # used as-is (first layer = canvas), so pure-generative scenes work
-    layers_cfg = video_cfg.get("layers") or [{"source": "clips"}]
+    from core.video.track_fx import expand_groups
+    layers_cfg = expand_groups(video_cfg.get("layers") or [{"source": "clips"}])   # the background lane, spliced
+    from core.video import sam_cutout                   # a clip's sam_cutout FX: its cutout (SAM2 once, cached)
+    layers_cfg = [sam_cutout.resolve(spec, grid=grid, span=span) for spec in layers_cfg]   # span: the
+    # song's seconds being rendered (None: all of it): SAM2 cuts out only what shows there
     windows: list = []
+    tracks: dict = {}                                   # one mask-track reader per folder, shared
     for spec in layers_cfg:
+        if spec.get("enabled", True) is False:         # switched off, kept in the scene
+            continue
         src_name = spec.get("source", "clips")
         blend = spec.get("blend", "normal")
         static_op = spec.get("opacity")
         op_fn = (lambda t, v=float(static_op): v) if isinstance(static_op, (int, float)) else None
+        if isinstance(static_op, dict):                 # a music knob: how much of it shows, 0..1
+            knob = _music_knob("opacity", static_op, notes, features_at, onset_loader, grid,
+                               cuts=getattr(base, "cut_times", None))
+            op_fn = lambda t, f=knob: min(1.0, max(0.0, float(f(t))))
         window = BarWindow(spec, grid) if "bars" in spec else None
         windows.append(window)
         if window is not None:
-            op_fn = (lambda t, w=window, v=float(static_op) if isinstance(static_op, (int, float)) else 1.0:
-                     w(t) * v)
+            op_fn = (lambda t, w=window, f=op_fn: w(t) * (f(t) if f is not None else 1.0))
+        if spec.get("mute"):                            # bars it is hidden in (it goes on underneath:
+            hush = BarWindow({"bars": spec["mute"]}, grid)  # a cued character stays in sync)
+            op_fn = (lambda t, m=hush, f=op_fn: (1.0 - m(t)) * (f(t) if f is not None else 1.0))
         if src_name == "clips":
             comp.add(base, blend if len(comp) else "normal", op_fn)
             continue
@@ -1516,6 +2873,18 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
                                onset_loader=onset_loader, grid=grid),
                      blend if len(comp) else "normal", op_fn)
             continue
+        if src_name == "mouths":
+            comp.add(MouthsLayer(spec, notes, width, height, fps,
+                                 features_at=features_at,
+                                 onset_loader=onset_loader, grid=grid),
+                     blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "ferrofluid":
+            comp.add(FerrofluidLayer(spec, notes, width, height, fps,
+                                     features_at=features_at,
+                                     onset_loader=onset_loader, grid=grid),
+                     blend if len(comp) else "normal", op_fn)
+            continue
         if src_name == "chladni":
             comp.add(ChladniLayer(spec, notes, width, height, fps,
                                   features_at=features_at,
@@ -1542,6 +2911,101 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             continue
         if src_name == "rgb_noise":
             comp.add(RgbNoiseLayer(spec, notes, fps, features_at=features_at,
+                                   onset_loader=onset_loader, grid=grid), "normal", None)
+            continue
+        if src_name == "drops":
+            comp.add(DropsLayer(spec, notes, width, height, fps, features_at=features_at,
+                                onset_loader=onset_loader, grid=grid), "normal", None)
+            continue
+        if src_name == "shadertoy":
+            toy = ShadertoyLayer(spec, notes, width, height, fps, features_at=features_at,
+                                 onset_loader=onset_loader, grid=grid, cuts=getattr(base, "cut_times", None),
+                                 default_track=masks, tracks=tracks)
+            if toy.is_post:
+                comp.add(_ShadertoyPost(toy), "normal", None)
+            else:
+                comp.add(_ShadertoySource(toy), blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "sandlines":
+            comp.add(SandLinesLayer(spec, notes, width, height, fps, features_at=features_at,
+                                    onset_loader=onset_loader, grid=grid), "normal", None)
+            continue
+        if src_name == "shockwave":
+            comp.add(ShockwaveLayer(spec, notes, width, height, fps, features_at=features_at,
+                                    onset_loader=onset_loader, grid=grid), "normal", None)
+            continue
+        if src_name == "cast":
+            from core.video.cast import CastLayer
+            comp.add(CastLayer(spec, notes, width, height, fps, onset_loader=onset_loader,
+                               grid=grid, default_track=masks, tracks=tracks), "normal", None)
+            continue
+        if src_name == "transition":
+            from core.video.transition import Transition
+            comp.add(Transition(spec, width, height, fps, grid=grid, cuts=getattr(base, "cut_times", None),
+                                default_track=masks, tracks=tracks), "normal", None)
+            continue
+        if src_name == "footage":
+            from core.video.footage import Footage
+            comp.add(Footage(spec, width, height, tracks=tracks, notes=notes, features_at=features_at,
+                             onset_loader=onset_loader, grid=grid), blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "group":                       # a lane drawn on its own (core/video/track_fx.py)
+            from core.video.track_fx import Group
+
+            def build(layers, given):
+                return build_compositor(given, {"layers": layers}, notes, width, height,
+                                        onset_loader=onset_loader, fps=fps, features_at=features_at,
+                                        grid=grid, masks=masks, span=span)
+            comp.add(Group(spec, build, width, height, base), blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "flythrough":
+            from core.video.flythrough import FlythroughLayer
+            comp.add(FlythroughLayer(spec, notes, width, height, fps, features_at=features_at,
+                                     onset_loader=onset_loader, grid=grid, cuts=getattr(base, "cut_times", None)),
+                     blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "deep_zoom":
+            from core.video.deep_zoom import DeepZoomLayer
+            comp.add(DeepZoomLayer(spec, notes, width, height, fps, features_at=features_at,
+                                   onset_loader=onset_loader, grid=grid), blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "nebulabrot":
+            from core.video.nebulabrot import NebulabrotLayer
+            comp.add(NebulabrotLayer(spec, notes, width, height, fps, features_at=features_at,
+                                     onset_loader=onset_loader, grid=grid), blend if len(comp) else "normal", op_fn)
+            continue
+        if src_name == "time_map":
+            from core.video.time_map import TimeMap
+            comp.add(TimeMap(spec, notes, width, height, fps, features_at=features_at, onset_loader=onset_loader,
+                             grid=grid, default_track=masks, tracks=tracks), "normal", None)
+            continue
+        if src_name == "pixel_sort":
+            from core.video.pixel_sort import PixelSort
+            comp.add(PixelSort(spec, notes, fps, features_at=features_at, onset_loader=onset_loader, grid=grid,
+                               cuts=getattr(base, "cut_times", None)), "normal", None)
+            continue
+        if src_name == "datamosh":
+            from core.video.datamosh import Datamosh
+            comp.add(Datamosh(spec, notes, width, height, fps, onset_loader=onset_loader, grid=grid,
+                              cuts=getattr(base, "cut_times", None)), "normal", None)
+            continue
+        if src_name == "flame_lens":
+            from core.video.flame_lens import FlameLens
+            comp.add(FlameLens(spec, notes, width, height, fps, features_at=features_at,
+                               onset_loader=onset_loader, grid=grid), "normal", None)
+            continue
+        if src_name == "meters":
+            from core.video.meters import Meters
+            comp.add(Meters(spec, notes, width, height, fps, features_at=features_at, onset_loader=onset_loader,
+                            grid=grid, cuts=getattr(base, "cut_times", None)), "normal", None)
+            continue
+        if src_name == "chord_color":
+            from core.video.chord_color import ChordColor
+            comp.add(ChordColor(spec, notes, fps, features_at=features_at, onset_loader=onset_loader,
+                                grid=grid), "normal", None)
+            continue
+        if src_name == "slitscan":
+            comp.add(SlitScanLayer(spec, notes, width, height, fps, features_at=features_at,
                                    onset_loader=onset_loader, grid=grid), "normal", None)
             continue
         if src_name == "grain":
@@ -1583,8 +3047,41 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
                      blend if len(comp) else "normal", op_fn)
             continue
         raise ValueError(f"unknown layer source {src_name!r}")
-    for i, window in enumerate(windows):               # post-ops are added without opacity: gate them here
-        src, blend, opacity = comp._layers[i]
-        if window is not None and hasattr(src, "process"):
-            comp._layers[i] = (src, blend, window)
+    enabled = [spec for spec in layers_cfg if spec.get("enabled", True) is not False]
+    for i, spec in enumerate(enabled):                  # a track's own FX (core/video/track_fx.py)
+        src, blend, opacity, matte = comp._layers[i]
+        if spec.get("fx") and not hasattr(src, "process"):
+            from core.video.track_fx import with_fx
+
+            def build(layers, given):
+                return build_compositor(given, {"layers": layers}, notes, width, height,
+                                        onset_loader=onset_loader, fps=fps, features_at=features_at,
+                                        grid=grid, masks=masks, span=span)
+            comp._layers[i] = (with_fx(src, spec["fx"], build, base, bool(spec.get("spill", False))),
+                               blend, opacity, matte)
+    for i, (window, spec) in enumerate(zip(windows, enabled)):   # post-ops are added without opacity:
+        src, blend, opacity, matte = comp._layers[i]                # their window and mix set it here
+        if not hasattr(src, "process"):
+            continue
+        mix = spec.get("mix")
+        if mix is not None:                             # an FX's dry/wet: 0 the picture it got .. 1 its result
+            wet = _music_knob("mix", mix, notes, features_at, onset_loader, grid,
+                              cuts=getattr(base, "cut_times", None))
+            comp._layers[i] = (src, blend, (lambda t, w=window, m=wet:
+                                            (w(t) if w is not None else 1.0) * min(1.0, max(0.0, float(m(t))))),
+                               matte)
+        elif window is not None:
+            comp._layers[i] = (src, blend, window, matte)
+    for i, spec in enumerate(enabled):
+        if spec.get("mask"):
+            if i == 0:
+                raise ValueError("the base layer cannot have a mask (there is nothing below it)")
+            src, blend, opacity, _ = comp._layers[i]
+            comp._layers[i] = (src, blend, opacity,
+                               LayerMatte(spec["mask"], width, height, masks, tracks))
+    for i, spec in enumerate(enabled):                  # the profile names layers as the scene does
+        name = spec.get("source", "clips")
+        if spec.get("file"):
+            name += " " + Path(str(spec["file"])).stem
+        comp.names[i] = name
     return comp

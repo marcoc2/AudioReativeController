@@ -1,0 +1,29 @@
+# Me diz, reaction-diffusion inside the figures (shaders/shadertoy/reacao_arc, mask: inside):
+# Gray-Scott in its "worms" regime grows only over the figures, seeded from their edges,
+# each organ note feeding a burst of it; the chord colours it. The background stays the
+# plain clip. The strip at the bottom (source: meters) shows the organ and the seeding.
+# Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/reacao_arc
+      uniforms:
+        u_f: 0.0545
+        u_k: 0.062
+        u_kick: &organ {hits: {track: organ}, envelope: 0.4}
+        u_seed: 0.5
+        u_hue: {harmony: &score {score: input/me_diz/sheetsage, snap: beat}, glide: 0.8}
+        u_amount: 0.65
+      mask: {where: inside, feather: 2}
+    - source: meters
+      title: reaction-diffusion in the figures
+      subtitle: grows over the figures only · organ notes seed it
+      lanes:
+        - {label: organ, roll: {track: organ}}
+        - {label: organ note -> seed, knob: *organ, range: [0, 1]}
+        - {label: chord -> colour, chords: *score}

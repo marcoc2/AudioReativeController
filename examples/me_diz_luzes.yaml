@@ -1,0 +1,41 @@
+# Me diz, the organ's notes as lights in the kaleidoscope (shaders/shadertoy/kifs_acorde_arc.glsl,
+# u_p0..3/u_l0..3) alone, full frame: each sounding organ note (voice: the k-th, low to
+# high) is a coloured light inside the fractal, its pitch setting the colour and where it
+# hangs, its level how bright, dying 0.6 s after the note ends; the chord still shapes the
+# folds. The strip at the bottom (source: meters) shows the organ and the lights' levels.
+# Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips                 # the cut schedule (the fractal covers the picture)
+    - source: shadertoy
+      file: shaders/shadertoy/kifs_acorde_arc.glsl
+      uniforms:
+        u_mode: {chord: &score {score: input/me_diz/sheetsage, snap: beat}, part: mode, glide: 0.4}
+        u_root: {chord: *score, part: root, glide: 0.6}
+        u_third: {chord: *score, part: tone, tone: 1}
+        u_fifth: {chord: *score, part: tone, tone: 2}
+        u_kick: {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}
+        u_snare: {hits: {track: drums (midi), notes: [38]}, envelope: 0.25}
+        u_orbit: {bar: {step: 0.125, morph: 0.6}}
+        u_glow: 0.3
+        u_p0: {voice: {track: organ}, k: 0, part: pitch}
+        u_l0: &l0 {voice: {track: organ}, k: 0, part: level, release: 0.6}
+        u_p1: {voice: {track: organ}, k: 1, part: pitch}
+        u_l1: &l1 {voice: {track: organ}, k: 1, part: level, release: 0.6}
+        u_p2: {voice: {track: organ}, k: 2, part: pitch}
+        u_l2: &l2 {voice: {track: organ}, k: 2, part: level, release: 0.6}
+        u_p3: {voice: {track: organ}, k: 3, part: pitch}
+        u_l3: &l3 {voice: {track: organ}, k: 3, part: level, release: 0.6}
+    - source: meters
+      title: organ notes as lights
+      subtitle: each sounding organ note is a light in the fractal
+      lanes:
+        - {label: organ, roll: {track: organ}}
+        - {label: lowest note -> light 1, knob: *l0, range: [0, 1]}
+        - {label: second note -> light 2, knob: *l1, range: [0, 1]}
+        - {label: third note -> light 3, knob: *l2, range: [0, 1]}
+        - {label: fourth note -> light 4, knob: *l3, range: [0, 1]}

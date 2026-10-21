@@ -2,7 +2,8 @@
 
 Musical events mutate the transport (reverse, next_clip, restart, ...);
 ``advance()`` moves the playhead by one output frame, ping-ponging at the
-clip edges so playback never runs out of frames mid-bar.
+clip edges so playback never runs out of frames mid-bar (or, with ``loop``,
+starting the clip over).
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ class ClipTransport:
         self.pos = 0.0        # fractional frame position within the clip
         self.direction = 1    # +1 forward, -1 reverse
         self.speed = 1.0      # clip frames per output frame
+        self.loop = False     # at a clip's edge: start it over, instead of bouncing
 
     # ------------------------------------------------------------------
     # actions (triggerable from MIDI events)
@@ -48,6 +50,11 @@ class ClipTransport:
             return
         last = float(clip_len - 1)
         self.pos += self.direction * self.speed * steps
+        if self.loop:
+            self.pos %= float(clip_len)       # past the end: from the start (backwards: from the end)
+            if self.pos > last:               # between the last frame and the wrap
+                self.pos = 0.0 if self.direction > 0 else last
+            return
         while self.pos < 0.0 or self.pos > last:
             if self.pos < 0.0:
                 self.pos = -self.pos

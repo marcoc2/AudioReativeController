@@ -1,0 +1,21 @@
+# Esfolado — "collage across the cut": when the clip changes, the two biggest characters of
+# the shot that ended stay, stuck over the new one like stickers, frozen as last seen.
+# The biggest leaves on the next snare, the second on the next kick (a hit right on the
+# cut doesn't count), each dissolving quickly. Needs a mask track of the plain render
+# (see examples/esfolado_world_melts.yaml for how it is made):
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --clips C:/Users/marco/Videos/ltx2/curadoria --clip-fit cover --seed 3 \
+#       --scene examples/esfolado_colagem.yaml --start-time 13.351 --bars 4 \
+#       --resolution 854x480 --fps 30 --masks render_output/esfolado_gotas_follow_c6-9_base_segments \
+#       --output render_output/esfolado_colagem_c6-9.mp4
+video:
+  clip_per_bar: true
+  clip_order: random
+  layers:
+    - source: clips
+    - source: cast
+      roles:
+        - {who: second, plays: {track: [kick, kick-2]}, act: carry, fade: 0.25}
+        - {who: largest, plays: {track: snare}, act: carry, fade: 0.25, shadow: 0.45}

@@ -1,0 +1,37 @@
+# Me diz, the flame made smooth: me_diz_chama with flam3's density estimation (estimator: 4):
+# where the points are sparse each pixel is blurred wider, where they are dense it keeps its
+# detail, so half the samples give a smoother mandala than the grainy one. Alone, full
+# frame; the strip at the bottom (source: meters) shows the three weights. Commands: see
+# me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: flame
+      genome: {random: 32}
+      symmetry: 6
+      samples: 4
+      estimator: 4
+      supersample: 2
+      white: 60
+      exposure: 2.0
+      paint: under
+      paint_mix: 0.9
+      spin: 0.05
+      pose: 0.35
+      harmony: {score: input/me_diz/sheetsage, snap: beat, bloom: 1.5}
+      weights:
+        0: &w0 {adsr: {track: organ}, attack: 0.2, release: 0.8, velocity: false, gain: 3.0, bias: 0.15}
+        1: &w1 {hits: {track: drums (midi), notes: [36]}, envelope: 0.4, gain: 3.0, bias: 0.2}
+        2: &w2 {hits: {track: drums (midi), notes: [38]}, envelope: 0.4, gain: 3.0, bias: 0.2}
+    - source: meters
+      title: flame, density estimation
+      subtitle: as the flame demo, half the samples, smoothed (estimator 4)
+      lanes:
+        - {label: organ, roll: {track: organ}}
+        - {label: organ adsr -> xform 1 weight, knob: *w0, range: [0, 3.2]}
+        - {label: kick -> xform 2 weight, knob: *w1, range: [0, 3.2]}
+        - {label: snare -> xform 3 weight, knob: *w2, range: [0, 3.2]}

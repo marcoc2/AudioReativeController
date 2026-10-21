@@ -1,0 +1,51 @@
+# Carrossel — the esfolado_completo effects, orchestrated for a waltz (3/4, 140 BPM, B major).
+# The song has two voices doubled — the melody (piano right hand = harmonica) and the waltz
+# accompaniment (piano left hand = organ) — and the drums (one track, GM notes, split over
+# channels 1 and 10: always pick them by track + notes).
+#
+#   background   the octagram tunnel: the kick pushes it, the chord (SheetSage2) paints it
+#   the biggest  kick: jumps out of the paper · melody: ghost trails while its notes sound
+#   the second   snare: jolts (and the chromatic hit on every character) · accompaniment:
+#                each oom-pah-pah note sends a ring out of its outline (bass notes thick)
+#   the third    the hi-hats: a halo
+#   the cuts     a new clip every two bars (the phrases); at each cut the second stays over
+#                the new shot until the next snare, the biggest for a whole bar, until the
+#                next kick
+#
+#   python clip_generator.py --file input/carrossel/carrossel_28_09_2025.mp3 \
+#       --midi input/carrossel/carrossel.mid --midi-offset 0.003 \
+#       --clips C:/Users/marco/Videos/ltx2/curadoria --clip-fit cover --seed 7 \
+#       --start-time 0 --bars 0 --resolution 854x480 --fps 30 \
+#       --scene <a scene with the same video: keys and only "- source: clips"> \
+#       --output render_output/carrossel_s7_base.mp4
+#   python segment_video.py --video render_output/carrossel_s7_base.mp4 --start-time 0 --sam2-weights <dir>
+#   python clip_generator.py ... (the same) --scene examples/carrossel_completo.yaml \
+#       --masks render_output/carrossel_s7_base_segments --output render_output/carrossel_completo_s7.mp4
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: random
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/octagrams_arc.glsl
+      blend: multiply
+      uniforms:
+        u_shape: {bar: {step: 1, morph: 0.35}}
+        u_fly: {rate: 10.0, base: 4.0, from: {hits: {track: drums, notes: [36]}, envelope: 0.3}}
+        u_hue: {harmony: {score: input/carrossel/sheetsage, snap: auto}, glide: 0.8}
+        u_sat: 0.75
+      mask: {where: outside, grow: 3, feather: 3}
+    - source: rgb_split
+      amount: 14
+      trigger: {track: drums, notes: [38], envelope: 0.18}
+      mask: {where: inside, feather: 2}
+    - source: cast
+      roles:
+        - {who: largest, plays: {track: piano right hand}, act: echo, trail: 2, every: 0.08, amount: 0.6}
+        - {who: second, plays: {track: piano left hand}, act: rings, speed: 260, life: 1.1, width: 4}
+        - {who: largest, plays: {track: drums, notes: [36]}, act: punch, amount: 0.14}
+        - {who: second, plays: {track: drums, notes: [38]}, act: shake, amount: 14}
+        - {who: third, plays: {track: drums, notes: [42, 44, 46]}, act: glow, width: 10, color: [255, 235, 160]}
+        - {who: second, plays: {track: drums, notes: [38]}, act: carry, fade: 0.25}
+        - {who: largest, plays: {track: drums, notes: [36]}, act: carry, fade: 0.3, shadow: 0.45}

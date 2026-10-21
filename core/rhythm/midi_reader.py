@@ -98,16 +98,17 @@ def _lay_bars(total_beats: float, first: Tuple[int, int],
     by_bar = dict(at_bar)
     pending = sorted(at_beat)
     sig, pos, bar = first, 0.0, 1
-    downbeats, bar_beats = [], []
+    downbeats, bar_beats, sigs = [], [], []
     while pos < total_beats or not downbeats:
         while pending and pending[0][0] <= pos + 1e-6:
             sig = pending.pop(0)[1]
         sig = by_bar.get(bar, sig)
         downbeats.append(pos)
         bar_beats.append(sig[0])
+        sigs.append(sig)
         pos += sig[0] * 4.0 / sig[1]          # bar length in quarter notes
         bar += 1
-    return np.array(downbeats), np.array(bar_beats, dtype=int)
+    return np.array(downbeats), np.array(bar_beats, dtype=int), sigs
 
 
 def read_midi(
@@ -132,7 +133,7 @@ def read_midi(
     mid = mido.MidiFile(str(p))
 
     notes: List[MidiNote] = []
-    starts: Dict[Tuple[int, int, int], Tuple[float, int]] = {}
+    starts: Dict[Tuple[int, int, int], List[Tuple[float, int]]] = {}
     bpm: Optional[float] = None
     ts_meta: Optional[Tuple[int, int]] = None
     ts_events: List[Tuple[float, Tuple[int, int]]] = []    # (seconds, signature), every one
@@ -161,21 +162,25 @@ def read_midi(
             if ts_meta is None:
                 ts_meta = ts_events[-1][1]
         elif msg.type == "note_on" and msg.velocity > 0:
-            starts[(ti, msg.channel, msg.note)] = (t, msg.velocity)
+            # a note may start again before it has ended (a flam, a roll): each one counts,
+            # and each note-off ends the oldest still sounding
+            starts.setdefault((ti, msg.channel, msg.note), []).append((t, msg.velocity))
         elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
             key = (ti, msg.channel, msg.note)
-            if key in starts:
-                start_t, vel = starts.pop(key)
+            if starts.get(key):
+                start_t, vel = starts[key].pop(0)
                 notes.append(MidiNote(time=start_t, pitch=msg.note, velocity=vel,
                                       channel=msg.channel, duration=t - start_t,
                                       track=names[ti], track_index=ti))
 
     # flush unterminated notes (file truncated before note_off)
-    for (ti, ch, pitch), (start_t, vel) in starts.items():
-        notes.append(MidiNote(time=start_t, pitch=pitch, velocity=vel,
-                              channel=ch, duration=0.0, track=names[ti], track_index=ti))
+    for (ti, ch, pitch), pending in starts.items():
+        for start_t, vel in pending:
+            notes.append(MidiNote(time=start_t, pitch=pitch, velocity=vel,
+                                  channel=ch, duration=0.0, track=names[ti], track_index=ti))
     notes.sort(key=lambda n: n.time)
 
+    given = time_signature is not None
     if time_signature is None:
         time_signature = ts_meta if ts_meta else (4, 4)
 
@@ -202,7 +207,9 @@ def read_midi(
         later   = [(sec / beat_dur, sig) for sec, sig in ts_events if sec > 1e-6]
         if later or meter_changes:
             # The meter moves along the song: lay the bars one by one.
-            downbeats, bar_beats = _lay_bars(last_t / beat_dur, time_signature, later, meter_changes or ())
+            downbeats, bar_beats, sigs = _lay_bars(last_t / beat_dur, time_signature, later, meter_changes or ())
+            if not given:                     # the song's meter: most bars' (a short first bar is not it)
+                time_signature = max(set(sigs), key=lambda g: (sigs.count(g), g != sigs[0]))
             return (
                 RhythmGrid(
                     bpm=bpm, time_signature=time_signature, fps=fps,

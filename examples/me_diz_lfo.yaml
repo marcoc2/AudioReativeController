@@ -1,0 +1,26 @@
+# Me diz, modulators on the grid: the flame lens (core/video/flame_lens.py) alone over the
+# clips, its variations swept by LFOs whose periods are note values on the bar grid (the
+# swirl a triangle over two bars, the bubble a sine over one, half a turn behind), and its
+# turn jumping to a new random angle on every snare (random_on), easing there. The strip at
+# the bottom (source: meters) shows the three modulators. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: flame_lens
+      variations:
+        swirl: &tri {lfo: tri, period: 2/1, gain: 0.8}
+        bubble: &sine {lfo: sine, period: 1/1, phase: 0.5, gain: 0.6}
+      turn: &turn {random_on: {track: drums (midi), notes: [38]}, ease: 0.25, gain: 6.283}
+      zoom: 1.3
+    - source: meters
+      title: LFOs and random on the grid
+      subtitle: tri 2 bars -> swirl · sine 1 bar -> bubble · snare -> random turn
+      lanes:
+        - {label: lfo tri (2 bars) -> swirl, knob: *tri, range: [0, 0.8]}
+        - {label: lfo sine (1 bar) -> bubble, knob: *sine, range: [0, 0.6]}
+        - {label: snare, roll: {track: drums (midi), notes: [38]}}
+        - {label: random on the snare -> turn, knob: *turn, range: [0, 6.283]}

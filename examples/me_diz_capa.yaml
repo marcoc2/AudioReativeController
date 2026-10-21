@@ -1,0 +1,55 @@
+# Me diz — the carrossel_abstrato scene (tunnel, chromatic hits, cast) over the single's
+# cover: one painting turned into six slow camera moves (720x1280 portrait clips, 5 s:
+# the capybara pushed in, its face, the flower rising, the jungle, the river, the title),
+# one every two bars from a shuffle bag. The tunnel takes the background at 60% so the
+# painting stays.
+#
+#   the biggest  kick: jumps out of the painting · e-piano: ghost trails while it sounds
+#   the second   snare: jolts (and the chromatic hit on every character) · acid bass and
+#                organ: a ring out of its outline on every note
+#   the third    hats and ride: a halo
+#   the cuts     the second stays over the new shot until the next snare, the biggest
+#                until the next kick
+#
+# The master lost 7 beats at its start: --midi-offset -4.007 (measured). DAW bar 14 beat 4
+# is 27.422 s of the master.
+#
+#   python clip_generator.py --file input/me_diz/me_diz_01_10_2026.wav \
+#       --midi input/me_diz/me_diz_ep.mid --midi-offset -4.007 \
+#       --clips <the six cover clips> --clip-fit cover --seed 7 \
+#       --start-time 27.422 --bars 13 --resolution 480x854 --fps 30 \
+#       --scene <a scene with the same video: keys and only "- source: clips"> \
+#       --output render_output/me_diz_capa_base.mp4
+#   python segment_video.py --video render_output/me_diz_capa_base.mp4 --start-time 27.422 --sam2-weights <dir>
+#   python clip_generator.py ... (the same) --scene examples/me_diz_capa.yaml \
+#       --masks render_output/me_diz_capa_base_segments --output render_output/me_diz_capa.mp4
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/octagrams_arc.glsl
+      blend: normal
+      opacity: 0.6
+      uniforms:
+        u_shape: {bar: {step: 1, morph: 0.35}}
+        u_fly: {rate: 10.0, base: 4.0, from: {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}}
+        u_hue: {harmony: {score: input/me_diz/sheetsage, snap: auto}, glide: 0.8}
+        u_sat: 0.75
+      mask: {where: outside, grow: 3, feather: 3}
+    - source: rgb_split
+      amount: 14
+      trigger: {track: drums (midi), notes: [38], envelope: 0.18}
+      mask: {where: inside, feather: 2}
+    - source: cast
+      roles:
+        - {who: largest, plays: {track: e-piano}, act: echo, trail: 2, every: 0.08, amount: 0.6}
+        - {who: second, plays: {track: [bass acid, organ]}, act: rings, speed: 260, life: 1.1, width: 4}
+        - {who: largest, plays: {track: drums (midi), notes: [36]}, act: punch, amount: 0.14}
+        - {who: second, plays: {track: drums (midi), notes: [38]}, act: shake, amount: 14}
+        - {who: third, plays: {track: drums (midi), notes: [42, 46, 51]}, act: glow, width: 10, color: [255, 235, 160]}
+        - {who: second, plays: {track: drums (midi), notes: [38]}, act: carry, fade: 0.25}
+        - {who: largest, plays: {track: drums (midi), notes: [36]}, act: carry, fade: 0.3, shadow: 0.45}

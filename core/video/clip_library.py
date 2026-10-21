@@ -44,8 +44,13 @@ class ClipLibrary:
         fps: int,
         cache_size: int = 4,
         fit: str = "contain",
+        turn_wide: bool = False,
     ):
-        """``fit`` controls how a clip whose aspect ratio differs from
+        """``turn_wide`` turns landscape clips (wider than 1.2:1; near-square ones stay)
+        90° clockwise first, so they fill a portrait frame instead of being cropped to a
+        sliver of it.
+
+        ``fit`` controls how a clip whose aspect ratio differs from
         ``width:height`` is fitted:
           - ``"contain"`` (default): scale to fit, black-pad the rest
             (letterbox/pillarbox) — preserves the whole frame.
@@ -61,6 +66,7 @@ class ClipLibrary:
         self.height = height
         self.fps = fps
         self.fit = fit
+        self.turn_wide = turn_wide
         self.cache_size = max(1, cache_size)
         self.paths: List[Path] = sorted(
             p for p in self.folder.iterdir() if p.suffix.lower() in VIDEO_EXTS
@@ -83,8 +89,25 @@ class ClipLibrary:
             self._cache.popitem(last=False)
         return clip
 
+    @staticmethod
+    def _shown_size(path: Path):
+        """The clip's width and height as it plays (its rotation metadata applied)."""
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                              "stream=width,height:stream_side_data=rotation", "-of", "json", str(path)],
+                             capture_output=True, text=True).stdout
+        import json
+        s = json.loads(out)["streams"][0]
+        w, h = int(s["width"]), int(s["height"])
+        rot = next((int(d.get("rotation", 0)) for d in s.get("side_data_list", []) if "rotation" in d), 0)
+        return (h, w) if abs(rot) % 180 == 90 else (w, h)
+
     def _decode(self, path: Path) -> ClipFrames:
         W, H = self.width, self.height
+        turn = ""
+        if self.turn_wide:
+            w, h = self._shown_size(path)
+            if w > 1.2 * h:
+                turn = "transpose=clock,"
         if self.fit == "cover":
             vf = (
                 f"scale={W}:{H}:force_original_aspect_ratio=increase,"
@@ -98,7 +121,7 @@ class ClipLibrary:
         cmd = [
             "ffmpeg", "-v", "error",
             "-i", str(path),
-            "-vf", vf,
+            "-vf", turn + vf,
             "-f", "rawvideo", "-pix_fmt", "rgb24",
             "-",
         ]

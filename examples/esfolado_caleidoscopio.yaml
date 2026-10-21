@@ -1,0 +1,13 @@
+# Esfolado — "Caleidoscópio" (teste): o túnel de cristal do kasari39 (shadertoy ttKGDt) como está,
+# no refrão; cada KICK dá um tranco no relógio do shader (o voo, as dobras do cristal e os
+# anéis de luz andam mais rápido na batida).
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --scene examples/esfolado_caleidoscopio.yaml --start-time 13.351 --bars 9 \
+#       --resolution 1280x720 --fps 30 --output render_output/esfolado_caleidoscopio_c6-14.mp4
+video:
+  layers:
+    - source: shadertoy
+      file: shaders/shadertoy/kaleidoscope.glsl
+      rush: {hits: {track: kick}, amount: 2.5, envelope: 0.3}

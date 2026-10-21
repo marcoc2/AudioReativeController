@@ -1,0 +1,17 @@
+# Esfolado — "Uma luz por kick": o shader de sombras 2D do Flyguy (shadertoy XsK3RR) com quatro
+# luzes que acendem uma a cada KICK do compasso (cópia shaders/shadertoy/sombras_2d_kicks):
+# 1º kick o farol vermelho no anel, 2º a azul que orbita, 3º a amarela, 4º a roxa. A que acabou
+# de acender pisca; do 5º kick em diante piscam todas. Cada compasso novo começa no escuro.
+# No refrão o kick faz 5, 4, 3 batidas por compasso, então às vezes só três acendem.
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --scene examples/esfolado_sombras_kicks.yaml --start-time 13.351 --bars 9 \
+#       --resolution 1280x720 --fps 30 --output render_output/esfolado_sombras_kicks_c6-14.mp4
+video:
+  layers:
+    - source: shadertoy
+      file: shaders/shadertoy/sombras_2d_kicks
+      uniforms:
+        u_count: {count: {track: kick}, per: bar}
+        u_flash: {hits: {track: kick}, envelope: 0.3}

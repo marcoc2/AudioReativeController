@@ -1,0 +1,26 @@
+# Me diz, bloom (shaders/shadertoy/bloom_arc) alone over the clips: the lights of the
+# picture above a threshold, blurred and added back; the kick lowers the threshold (more
+# of the picture glows), the hats push the glow's gain, the chord tints it. The strip at
+# the bottom (source: meters) shows the drivers. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/bloom_arc
+      uniforms:
+        u_thresh: &thresh {hits: {track: drums (midi), notes: [36]}, envelope: 0.3, gain: -0.35, bias: 0.7}
+        u_gain: &gain {hits: {track: drums (midi), notes: [42, 46, 51]}, envelope: 0.25, gain: 1.6, bias: 0.4}
+        u_hue: {harmony: &score {score: input/me_diz/sheetsage, snap: beat}, glide: 0.8}
+        u_tint: 0.6
+        u_size: 1.5
+    - source: meters
+      title: bloom
+      subtitle: kick lowers the threshold · hats push the glow · chord tints
+      lanes:
+        - {label: kick -> threshold (lower glows more), knob: *thresh, range: [0.35, 0.7]}
+        - {label: hats -> glow gain, knob: *gain, range: [0.4, 2.0]}
+        - {label: chord -> tint, chords: *score}

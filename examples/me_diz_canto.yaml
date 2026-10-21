@@ -1,0 +1,24 @@
+# Me diz, the cast singing and keeping time (core/video/cast.py, acts sing and clock) alone
+# over the clips: the biggest figure rises and falls with the organ (sing: its higher notes
+# lift it, up to 90 px, settling back after), the second moves only on the kick and freezes
+# between hits, stuck over the picture that keeps going under it (clock). (This stretch has
+# no sung melody: the organ sings.) The strip at the bottom (source: meters) shows the
+# organ and the kick. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: cast
+      roles:
+        - {who: largest, plays: &organ {track: organ}, act: sing, low: 62, high: 80, amount: 90, glide: 0.15}
+        - {who: second, plays: &kick {track: drums (midi), notes: [36]}, act: clock, hold: 0.25}
+    - source: meters
+      title: cast acts sing and clock
+      subtitle: the biggest rises with the organ · the second moves only on the kick
+      lanes:
+        - {label: organ -> the biggest rises, roll: *organ}
+        - {label: organ's latest note -> lift, knob: {pitch: *organ, low: 62, high: 80, glide: 0.15}, range: [0, 1]}
+        - {label: kick -> the second moves (frozen between hits), roll: *kick}

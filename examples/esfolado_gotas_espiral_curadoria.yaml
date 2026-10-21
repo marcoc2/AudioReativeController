@@ -1,0 +1,35 @@
+# Esfolado — "Gotas em espiral": a variação da cena das gotas (esfolado_gotas_curadoria.yaml)
+# em que a tinta não aparece como uma mancha cheia: ela sai do ponto onde caiu como um
+# braço de espiral que gira como um redemoinho (rápido quando cai, desacelerando
+# enquanto seca) e vai se enrolando para fora, cada gota girando para um lado, e
+# para nos contornos do desenho como antes (a espiral só pinta dentro da região).
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --clips C:/Users/marco/Videos/ltx2/curadoria --clip-fit cover --seed 3 \
+#       --scene examples/esfolado_gotas_espiral_curadoria.yaml --start-time 13.351 --bars 9 \
+#       --resolution 1280x720 --fps 30 --output render_output/esfolado_gotas_espiral_curadoria_c6-14.mp4
+video:
+  clip_per_bar: true
+  clip_order: random
+  layers:
+    - source: clips
+    - source: drops
+      hits: {track: snare}
+      at: random
+      color: under
+      boost: 1.8
+      speed: 10
+      grow: 2.5                          # a região enche por ~2,5 s; a espiral vai revelando
+      life: 4.0
+      fade: 1.2
+      radius: 8
+      rim: 0.35
+      ink: 1.6
+      shape: spiral
+      pitch: 44                          # 44 px entre as voltas
+      turns: 2.5                         # 2,5 voltas por segundo (cresce ~110 px/s)
+      arm: 0.6                           # o braço pinta 60% de cada volta, o resto é o desenho
+      whirl: 1.5                         # gira 1,5 volta/s quando cai, desacelerando até secar
+      twirl: 1.5                         # o desenho em volta torce junto, como num redemoinho
+      spin: random

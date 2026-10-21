@@ -92,7 +92,8 @@ class MandelbulbSystem:
         import moderngl
         self.W, self.H = int(width), int(height)
         self.ss = max(1, int(supersample))
-        self.ctx = moderngl.create_standalone_context()
+        from core.gpu import context
+        self.ctx = context()
         self.prog = self.ctx.program(vertex_shader=_VS, fragment_shader=_FS)
         quad = np.array([-1, -1, 1, -1, -1, 1, 1, 1], dtype="f4")
         self._vbo = self.ctx.buffer(quad.tobytes())

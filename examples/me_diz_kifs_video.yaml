@@ -1,0 +1,34 @@
+# Me diz, the clip painted on the chord's kaleidoscope (shaders/shadertoy/kifs_acorde_arc.glsl,
+# u_video: the frame projected on the fractal's faces, triplanar) alone, full frame: as in
+# me_diz_kifs, the symmetry follows the chord's mode, the root twists it, the kick opens
+# it, the snare twists it; the shot's colours are its skin. The strip at the bottom
+# (source: meters) shows the drivers. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/kifs_acorde_arc.glsl
+      channel0: frame
+      uniforms:
+        u_mode: &mode {chord: &score {score: input/me_diz/sheetsage, snap: beat}, part: mode, glide: 0.4}
+        u_root: &root {chord: *score, part: root, glide: 0.6}
+        u_third: {chord: *score, part: tone, tone: 1}
+        u_fifth: {chord: *score, part: tone, tone: 2}
+        u_kick: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}
+        u_snare: &snare {hits: {track: drums (midi), notes: [38]}, envelope: 0.25}
+        u_orbit: {bar: {step: 0.125, morph: 0.6}}
+        u_glow: 0.4
+        u_video: 0.85
+    - source: meters
+      title: the clip on the kaleidoscope
+      subtitle: the shot is the skin · mode -> symmetry · kick opens
+      lanes:
+        - {label: chord, chords: *score}
+        - {label: "chord mode -> symmetry (minor 0, major 1)", knob: *mode, range: [0, 1]}
+        - {label: chord root -> twist, knob: *root}
+        - {label: kick -> open, knob: *kick, range: [0, 1]}
+        - {label: snare -> twist, knob: *snare, range: [0, 1]}

@@ -1,0 +1,21 @@
+# Esfolado — "Octagramas": o túnel Octgrams do whisky_shusuky (shadertoy tlVGDt) na cópia com
+# formas trocáveis (shaders/shadertoy/octagrams_arc.glsl), no luto (compassos 21–33, onde a
+# harmonia anda: Fá# → Fá → Sol# → Ré#; o refrão é todo em Fá e ficaria de uma cor só):
+#   a cada COMPASSO a forma troca (quadrado, círculo, triângulo, hexágono, cruz, estrela e volta),
+#       derretendo de uma na outra em ~0,35 s no começo do compasso
+#   cada KICK-2 dá um tranco no voo pelo túnel (ele toca nos compassos 20–27; depois o voo segue calmo)
+#   a HARMONIA (SheetSage2) pinta o túnel: a cor da fundamental do acorde, deslizando
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --scene examples/esfolado_octagramas.yaml --start-time 56.018 --bars 13 \
+#       --resolution 1280x720 --fps 30 --output render_output/esfolado_octagramas_c21-33.mp4
+video:
+  layers:
+    - source: shadertoy
+      file: shaders/shadertoy/octagrams_arc.glsl
+      uniforms:
+        u_shape: {bar: {step: 1, morph: 0.35}}
+        u_fly: {rate: 10.0, base: 4.0, from: {hits: {track: kick-2}, envelope: 0.3}}
+        u_hue: {harmony: {score: input/esfolado/sheetsage, snap: auto}, glide: 0.8}
+        u_sat: 0.75

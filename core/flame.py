@@ -391,6 +391,8 @@ uniform float u_exposure;
 uniform float u_white;
 uniform float u_gamma;
 uniform float u_gain;
+uniform float u_de_max;          // density estimation: the widest blur (accumulation pixels; 0: off)
+uniform float u_de_curve;        // how fast it narrows where the points are dense
 in vec2 v_uv;
 out vec4 f_col;
 void main() {
@@ -398,6 +400,26 @@ void main() {
     vec4 acc = vec4(0.0);
     for (int j = 0; j < u_ss; j++) for (int i = 0; i < u_ss; i++) acc += texelFetch(u_acc, base + ivec2(i, j), 0);
     acc /= float(u_ss * u_ss);
+    if (u_de_max > 0.5) {
+        // flam3's density estimation: a blur as wide as the points are sparse, so the thin
+        // regions turn smooth instead of grainy while the dense ones keep their detail
+        float r = u_de_max / pow(1.0 + acc.a * u_norm, u_de_curve);
+        if (r > 0.5) {
+            ivec2 n = textureSize(u_acc, 0);
+            vec2 c = (vec2(base) + 0.5 * float(u_ss));
+            vec4 sum = vec4(0.0);
+            float wsum = 0.0;
+            float stepv = max(1.0, r / 3.0);
+            for (int j = -3; j <= 3; j++) for (int i = -3; i <= 3; i++) {
+                vec2 o = vec2(i, j) * stepv;
+                float w = exp(-dot(o, o) / (2.0 * r * r / 4.0 + 1e-3));
+                ivec2 q = clamp(ivec2(c + o), ivec2(0), n - 1);
+                sum += texelFetch(u_acc, q, 0) * w;
+                wsum += w;
+            }
+            acc = sum / wsum;
+        }
+    }
     float lum = clamp(log(1.0 + u_exposure * acc.a * u_norm) / log(1.0 + u_exposure * u_white), 0.0, 1.0);
     lum = pow(lum, 1.0 / u_gamma);
     f_col = vec4(acc.rgb / max(acc.a, 1e-6) * lum * u_gain, 1.0);
@@ -411,7 +433,8 @@ class _GpuBackend:
         self._mgl = moderngl
         self.W, self.H, self.ss = width, height, max(1, int(supersample))
         self.threads, self.keep, self.seed = int(threads), int(keep), int(seed)
-        self.ctx = ctx = moderngl.create_standalone_context(require=430)
+        from core.gpu import context
+        self.ctx = ctx = context()                  # the shared context asks for GL 4.3
         self.cs = ctx.compute_shader(_CS)
         self.points = ctx.buffer(reserve=self.threads * self.keep * 16)
         self.draw = ctx.program(vertex_shader=_DRAW_VS, fragment_shader=_DRAW_FS)
@@ -478,6 +501,8 @@ class _GpuBackend:
         self._set(self.tone, "u_norm", (self.W * self.ss * self.H * self.ss) / (self.threads * self.keep))
         self._set(self.tone, "u_exposure", float(exposure)); self._set(self.tone, "u_white", float(white))
         self._set(self.tone, "u_gamma", float(gamma)); self._set(self.tone, "u_gain", float(gain))
+        self._set(self.tone, "u_de_max", float(self.estimator) * self.ss)
+        self._set(self.tone, "u_de_curve", float(self.estimator_curve))
         self.tone_vao.render(mgl.TRIANGLE_STRIP)
         data = self.out_fbo.read(components=3)
         return np.frombuffer(data, dtype=np.uint8).reshape(self.H, self.W, 3)[::-1].copy()
@@ -529,12 +554,16 @@ class FlameSystem:
 
     def __init__(self, width: int, height: int, genome: Genome, seed: int = 0, samples: float = 6.0,
                  supersample: int = 2, backend: str = "auto", exposure: float = 3.0,
-                 white: float = 40.0, gamma: float = 2.4, centered: bool = False):
+                 white: float = 40.0, gamma: float = 2.4, centered: bool = False,
+                 estimator: float = 0.0, estimator_curve: float = 1.2):
         self.width, self.height = int(width), int(height)
+        self.estimator, self.estimator_curve = float(estimator), float(estimator_curve)
         self.genome, self.seed = genome, int(seed)
         self.exposure, self.white, self.gamma = float(exposure), float(white), float(gamma)
         self.centered = bool(centered)
         self.backend_name, self._backend = self._open(backend, samples, supersample)
+        self._backend.estimator = self.estimator                 # GPU only: the CPU render ignores it
+        self._backend.estimator_curve = self.estimator_curve
         self._cam: Optional[np.ndarray] = None
         self._frame = 0
 

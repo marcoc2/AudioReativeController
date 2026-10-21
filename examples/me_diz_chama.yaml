@@ -1,0 +1,38 @@
+# Me diz, the arrangement reshapes a flame: a six-fold flame mandala alone, full frame,
+# painted with the shot under it (paint: under), each of its first three xforms bound to an
+# instrument (weights): the organ's held chords, the kick, the snare. When an instrument
+# plays its xform takes a bigger share of the points, so the mandala's arms swell and
+# shrink with the parts; the chord blooms its colour. The strip at the bottom (source:
+# meters) shows the three weights. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: flame
+      genome: {random: 32}
+      symmetry: 6
+      samples: 8
+      supersample: 2
+      white: 60
+      exposure: 2.0
+      paint: under
+      paint_mix: 0.9
+      spin: 0.05
+      pose: 0.35
+      harmony: {score: input/me_diz/sheetsage, snap: beat, bloom: 1.5}
+      weights:
+        0: &w0 {adsr: {track: organ}, attack: 0.2, release: 0.8, velocity: false, gain: 3.0, bias: 0.15}
+        1: &w1 {hits: {track: drums (midi), notes: [36]}, envelope: 0.4, gain: 3.0, bias: 0.2}
+        2: &w2 {hits: {track: drums (midi), notes: [38]}, envelope: 0.4, gain: 3.0, bias: 0.2}
+    - source: meters
+      title: flame, an xform per instrument
+      subtitle: organ, kick, snare -> the weight of xforms 1, 2, 3
+      lanes:
+        - {label: organ, roll: {track: organ}}
+        - {label: organ adsr -> xform 1 weight, knob: *w0, range: [0, 3.2]}
+        - {label: kick -> xform 2 weight, knob: *w1, range: [0, 3.2]}
+        - {label: snare -> xform 3 weight, knob: *w2, range: [0, 3.2]}
+        - {label: chord -> colour, chords: {score: input/me_diz/sheetsage, snap: beat}}

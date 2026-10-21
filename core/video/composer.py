@@ -4,6 +4,10 @@ Configured by the ``video:`` section of the scene YAML:
 
     video:
       clip_per_bar: true          # pick a new clip at every bar start
+      bars_per_clip: 1            # ... or every N bars (counted from the song's bar 1),
+                                  #     e.g. 2 to cut on two-bar phrases
+      clip_end: bounce            # a clip shorter than its turn: bounce (play it back
+                                  #     and forth) | loop (start it over)
       clip_order: sequential      # sequential | random | shuffle
       seed: 42
 
@@ -56,6 +60,18 @@ Configured by the ``video:`` section of the scene YAML:
     ``<other>`` onward (hand-over, e.g. kick drives clip changes only
     until the snare comes in).
 
+Pins: a bar can be given its clip, by name (the file's stem) or ``none`` (nothing there:
+black, whatever is over it shows). The clips layer carries them by bar number (1: the
+song's first bar), as the Arrange window writes them; they win over ``overrides:``, the
+older form (bar indexes from 0, the studio's timeline pins):
+
+    layers:
+      - source: clips
+        pins: {3: lofi_2, 4: lofi_2, 9: none}
+
+A pinned bar changes nothing around it: the montage draws the same clips for the other
+bars, and a clip pinned to bars in a row plays on across them.
+
 ``frame_ops`` is the seam for future pixel-level effects: a list of
 callables ``(frame, t, transport) -> frame`` applied in order after the
 clip frame is fetched, so system-rendered layers (particles, overlays)
@@ -72,6 +88,15 @@ import numpy as np
 from core.video.transport import ClipTransport
 
 ACTIONS = {"reverse", "next_clip", "random_clip", "restart"}
+
+
+def pins_of(layers) -> dict:
+    """The clips layer's ``pins:`` (bar number -> clip name or "none") as overrides (bar
+    index from 0 -> the same)."""
+    for layer in layers or []:
+        if isinstance(layer, dict) and layer.get("source", "clips") == "clips":
+            return {int(k) - 1: v for k, v in (layer.get("pins") or {}).items()}
+    return {}
 
 
 @dataclass
@@ -137,11 +162,20 @@ def _grid_is_real(grid) -> bool:
 
 
 def _default_score_loader(spec: dict, grid):
-    from core.score import read_score  # lazy: keeps the composer import light
-
     events = spec.get("events", "chord_changes")
     if events not in SCORE_EVENTS:
         raise ValueError(f"score trigger: unknown events {events!r}; expected {sorted(SCORE_EVENTS)}")
+    score = load_score(spec, grid, melody=events == "melody")
+    if events == "melody":
+        return score.melody(spec.get("voice", "instrumental"))
+    return getattr(score, events)()
+
+
+def load_score(spec: dict, grid, melody: bool = False):
+    """The transcription a ``score:`` spec names, snapped onto ``grid`` as ``snap`` says
+    (auto: to the bars when the grid is real)."""
+    from core.score import read_score  # lazy: keeps the composer import light
+
     snap = spec.get("snap", "auto")
     if snap not in SCORE_SNAPS:
         raise ValueError(f"score trigger: unknown snap {snap!r}; expected {sorted(SCORE_SNAPS)}")
@@ -152,10 +186,8 @@ def _default_score_loader(spec: dict, grid):
     if snap != "off":
         # melody is rhythm: snapping it to bars would flatten it, so it follows
         # sixteenths of the grid while chords and sections follow ``snap``
-        score = score.snap_to(grid, unit=snap, melody_division=4 if events == "melody" else None)
-    if events == "melody":
-        return score.melody(spec.get("voice", "instrumental"))
-    return getattr(score, events)()
+        score = score.snap_to(grid, unit=snap, melody_division=4 if melody else None)
+    return score
 
 
 class ClipComposer:
@@ -179,7 +211,12 @@ class ClipComposer:
         self.library = library
         self.grid = grid
         self.transport = ClipTransport(len(library))
+        clip_end = cfg.get("clip_end", "bounce")
+        if clip_end not in ("bounce", "loop"):
+            raise ValueError(f"video: clip_end {clip_end!r} (use bounce or loop)")
+        self.transport.loop = clip_end == "loop"
         self.clip_per_bar: bool = bool(cfg.get("clip_per_bar", True))
+        self.bars_per_clip: int = max(1, int(cfg.get("bars_per_clip", 1)))
         self.clip_order: str = cfg.get("clip_order", "sequential")
         self._rng = random.Random(cfg.get("seed"))
         self.frame_ops: List[Callable] = []
@@ -188,6 +225,10 @@ class ClipComposer:
 
         # manual pins: {bar_index: clip name (path stem) or clip index}
         self.overrides = {int(k): v for k, v in (cfg.get("overrides") or {}).items()}
+        self.overrides.update(pins_of(cfg.get("layers")))
+        self.blank = False             # this bar is pinned to nothing
+        self._drawn = None             # (clip, pos, direction) a pin took the place of, this bar
+        self._held = None              # the pinned clip as the last bar left it
         self._name_to_idx = None
 
         triggers = cfg.get("triggers", {})
@@ -304,6 +345,15 @@ class ClipComposer:
             return 1.0
         return max(g.speed_at(t) for g in self.gravity)
 
+    def take_state(self, other: "ClipComposer") -> None:
+        """Go on from where ``other`` stands: the same scene, played (cheaply, on a library
+        of the same clips that only knows their lengths) up to a point. A preview of bar 20
+        then shows the clips the whole song would: the montage's draws depend on what came
+        before."""
+        own = {"library": self.library, "frame_ops": self.frame_ops, "_name_to_idx": None}
+        self.__dict__.update({k: v for k, v in other.__dict__.items() if k not in own})
+        self.__dict__.update(own)
+
     def seek(self, t: float) -> None:
         """Skip events strictly before t (call once before the render loop)."""
         self._ev_ptr = 0
@@ -352,13 +402,31 @@ class ClipComposer:
 
     def _apply_override(self) -> None:
         """A pinned bar wins over any rule/action, without restarting the
-        clip on every frame (only switches when needed)."""
+        clip on every frame (only switches when needed); what the montage drew
+        is kept, to go on with after the pinned bar."""
         ref = self.overrides.get(self._last_bar)
-        if ref is None:
+        self.blank = isinstance(ref, str) and ref.strip().lower() == "none"
+        if ref is None or self.blank:
             return
         idx = self._resolve_clip_ref(ref)
-        if idx is not None and idx != self.transport.clip_idx:
-            self.transport.set_clip(idx)
+        tp = self.transport
+        if idx is None or idx == tp.clip_idx:
+            return
+        if self._drawn is None:
+            self._drawn = (tp.clip_idx, tp.pos, tp.direction)
+        tp.set_clip(idx)
+        if self._held is not None and self._held[0] == idx:   # pinned the bar before too: on it goes
+            tp.pos, tp.direction = self._held[1], self._held[2]
+
+    def _unpin(self) -> None:
+        """A new bar: the clip the montage drew comes back (it chooses on from there)."""
+        tp = self.transport
+        if self._drawn is None:
+            self._held = None
+            return
+        self._held = (tp.clip_idx, tp.pos, tp.direction)
+        tp.clip_idx, tp.pos, tp.direction = self._drawn
+        self._drawn = None
 
     def _apply_action(self, action: str) -> None:
         if action == "random_clip":
@@ -368,6 +436,26 @@ class ClipComposer:
                 self.transport.set_clip(self._rng.choice(choices))
         else:
             getattr(self.transport, action)()
+
+    def cut_times(self, until: float) -> np.ndarray:
+        """When the clip changes, up to ``until``, known before rendering: the bars that pick
+        a new clip, the triggers' clip actions and the pinned bars (what ``_cuts.json``
+        records afterwards). Effects use it to see a cut coming."""
+        if len(self.library) < 2:
+            return np.zeros(0)
+        cuts = []
+        bar = 1
+        while True:
+            t = float(self.grid.bar_start(bar))
+            if t > until:
+                break
+            if self._bar_index(t) == bar and ((self.clip_per_bar and bar % self.bars_per_clip == 0)
+                                              or bar in self.overrides):
+                cuts.append(t)
+            bar += 1
+        cuts += [e.time for e in self.events
+                 if e.time <= until and any(a in ("next_clip", "random_clip") for a in e.actions)]
+        return np.unique(np.round(cuts, 6))
 
     # ------------------------------------------------------------------
 
@@ -379,7 +467,8 @@ class ClipComposer:
         """
         bar = self._bar_index(t)
         if bar != self._last_bar:
-            if self.clip_per_bar or self._first_selection:
+            self._unpin()
+            if (self.clip_per_bar and bar % self.bars_per_clip == 0) or self._first_selection:
                 self._select_clip()
             self._last_bar = bar
 
@@ -394,6 +483,8 @@ class ClipComposer:
         frame = clip.frame(self.transport.frame_index)
         self.transport.speed = self.speed_at(t)
         self.transport.advance(len(clip))
+        if self.blank:
+            frame = np.zeros_like(frame)
 
         for op in self.frame_ops:
             frame = op(frame, t, self.transport)

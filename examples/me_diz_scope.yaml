@@ -1,0 +1,22 @@
+# Me diz, the oscilloscope on the outline (core/video/cast.py, act scope) alone over the
+# clips: the biggest figure's outline drawn as a waveform of the organ (a sine at each
+# sounding note's pitch, coloured by the pitch), the second's as the kick's thump, fading
+# after each hit. The strip at the bottom (source: meters) shows the organ and the kick.
+# Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: cast
+      roles:
+        - {who: largest, plays: {track: organ}, act: scope, amount: 22, gap: 16, width: 5, speed: 1.5, color: pitch}
+        - {who: second, plays: {track: drums (midi), notes: [36]}, act: scope, amount: 10, gap: 10, width: 3, color: [255, 240, 200], fade: 0.25}
+    - source: meters
+      title: cast act scope
+      subtitle: the outline is a waveform · organ on the biggest, kick on the second
+      lanes:
+        - {label: organ -> the biggest's outline, roll: {track: organ}}
+        - {label: kick -> the second's outline, roll: {track: drums (midi), notes: [36]}}

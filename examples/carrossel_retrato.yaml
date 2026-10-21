@@ -1,0 +1,39 @@
+# Carrossel in portrait (480x854): the carrossel_completo orchestration over the clips of
+# C:/Users/marco/Videos/visualizers — mixed footage, landscape and portrait: the landscape
+# ones are turned 90° (--clip-turn-wide), short ones start over instead of bouncing
+# (clip_end: loop), and with only nine clips for ~18 turns the order is a shuffle bag (each
+# clip once before any comes back). The tunnel is screened in, not multiplied: on black
+# footage multiply would leave it black. Effects, roles and cuts: see carrossel_completo.yaml.
+#
+#   python clip_generator.py --file input/carrossel/carrossel_28_09_2025.mp3 #       --midi input/carrossel/carrossel.mid --midi-offset 0.003 #       --clips C:/Users/marco/Videos/visualizers --clip-fit cover --clip-turn-wide --seed 7 #       --start-time 0 --bars 0 --resolution 480x854 --fps 30 #       --scene <a scene with the same video: keys and only "- source: clips"> #       --output render_output/carrossel_retrato_base.mp4
+#   python segment_video.py --video render_output/carrossel_retrato_base.mp4 --start-time 0 --sam2-weights <dir>
+#   python clip_generator.py ... (the same) --scene examples/carrossel_retrato.yaml #       --masks render_output/carrossel_retrato_base_segments --output render_output/carrossel_retrato.mp4
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/octagrams_arc.glsl
+      blend: screen          # the visualizers are mostly black: multiply would hide the tunnel
+      uniforms:
+        u_shape: {bar: {step: 1, morph: 0.35}}
+        u_fly: {rate: 10.0, base: 4.0, from: {hits: {track: drums, notes: [36]}, envelope: 0.3}}
+        u_hue: {harmony: {score: input/carrossel/sheetsage, snap: auto}, glide: 0.8}
+        u_sat: 0.75
+      mask: {where: outside, grow: 3, feather: 3}
+    - source: rgb_split
+      amount: 14
+      trigger: {track: drums, notes: [38], envelope: 0.18}
+      mask: {where: inside, feather: 2}
+    - source: cast
+      roles:
+        - {who: largest, plays: {track: piano right hand}, act: echo, trail: 2, every: 0.08, amount: 0.6}
+        - {who: second, plays: {track: piano left hand}, act: rings, speed: 260, life: 1.1, width: 4}
+        - {who: largest, plays: {track: drums, notes: [36]}, act: punch, amount: 0.14}
+        - {who: second, plays: {track: drums, notes: [38]}, act: shake, amount: 14}
+        - {who: third, plays: {track: drums, notes: [42, 44, 46]}, act: glow, width: 10, color: [255, 235, 160]}
+        - {who: second, plays: {track: drums, notes: [38]}, act: carry, fade: 0.25}
+        - {who: largest, plays: {track: drums, notes: [36]}, act: carry, fade: 0.3, shadow: 0.45}

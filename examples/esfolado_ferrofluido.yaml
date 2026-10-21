@@ -1,0 +1,22 @@
+# Esfolado — "Ferrofluido": uma poça de ferrofluido sob três ímãs (GPU), foto de estúdio.
+# Cada ímã responde a uma parte da música: o BUMBO puxa o do centro (os espinhos disparam e
+# voltam como mola), a CAIXA o do fundo à esquerda, o BAIXO o da direita; o grave (sub-banda
+# bass) é o campo contínuo de todos; cada acorde (SheetSage2) gira a malha de espinhos.
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --scene examples/esfolado_ferrofluido.yaml --start-time 13.351 --bars 9 \
+#       --resolution 1280x720 --fps 30 --output render_output/esfolado_ferrofluido_c6-14.mp4
+video:
+  layers:
+    - source: ferrofluid
+      supersample: 2
+      level_from: subbands.bass
+      base: 0.2
+      magnets:
+        - {track: kick, at: [0.0, 0.35], strength: 1.0, pulse: 1.0}
+        - {track: snare, at: [-1.1, 1.2], strength: 0.9, pulse: 0.9}
+        - {track: bass, at: [1.2, 0.9], strength: 0.8, pulse: 0.35}
+      spring: {freq: 2.5, damping: 0.3}
+      harmony: {score: input/esfolado/sheetsage, snap: auto}
+      spin: 0.02

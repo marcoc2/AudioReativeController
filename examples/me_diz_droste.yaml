@@ -1,0 +1,28 @@
+# Me diz, the Droste spiral (shaders/shadertoy/droste_arc.glsl) alone over the clips: the
+# picture folded into a log-polar spiral of itself, Escher's "Print Gallery", zooming one
+# step in on every bar (the bar's phase drives it, so the bar line is where the spiral has
+# gone one full turn in), and the kick jolts it. The strip at the bottom (source: meters)
+# shows the drivers. Commands: see me_diz_acorde.yaml.
+video:
+  clip_per_bar: true
+  bars_per_clip: 2
+  clip_order: shuffle
+  clip_end: loop
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/droste_arc.glsl
+      uniforms:
+        u_phase: &phase {bar: {step: 1, morph: 2.2857}}
+        u_ratio: 0.35
+        u_twist: 1.5
+        u_kick: &kick {hits: {track: drums (midi), notes: [36]}, envelope: 0.3}
+        u_cx: 0.5
+        u_cy: 0.45
+    - source: meters
+      title: Droste spiral
+      subtitle: one step in per bar · the kick jolts it
+      lanes:
+        - {label: drums, roll: {track: drums (midi), notes: [36, 38, 42, 46, 51]}}
+        - {label: bar -> zoom step, knob: *phase, range: window}
+        - {label: kick -> jolt, knob: *kick, range: [0, 1]}

@@ -1,0 +1,20 @@
+# Esfolado — "Prism liquid da música": o vidro líquido na cópia shaders/shadertoy/prism_liquid_arc,
+# nos compassos 20–27 (o trecho com kick e harmonia andando: KICK-2 e Fá# → Fá → Sol# → Ré# → Fá):
+#   cada KICK-2 espirra o líquido: as bolhas se abrem para fora em ~60 ms, crescem, se separam
+#       e voltam a se juntar em ~0,5 s
+#   a HARMONIA (SheetSage2) pinta o vidro e o céu refletido com a cor da fundamental do acorde
+#   a cada COMPASSO o diamante troca de número de gomos (3, 4, 5, 6, 8, 12), derretendo
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --scene examples/esfolado_prism_liquid_musica.yaml --start-time 53.351 --bars 8 \
+#       --resolution 1280x720 --fps 30 --output render_output/esfolado_prism_liquid_musica_c20-27.mp4
+video:
+  layers:
+    - source: shadertoy
+      file: shaders/shadertoy/prism_liquid_arc
+      uniforms:
+        u_kick_age: {since: {track: kick-2}}
+        u_hue: {harmony: {score: input/esfolado/sheetsage, snap: auto}, glide: 0.8}
+        u_sat: 0.55
+        u_facets: {bar: {step: 1, morph: 0.5}}

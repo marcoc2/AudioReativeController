@@ -1,0 +1,21 @@
+# Exemplo do adaptador Shadertoy: o shader shaders/shadertoy/arc_lente_kick.glsl sobre os
+# quadrinhos da curadoria. O clipe entra no iChannel0; o KICK-2 incha a lente e separa as
+# cores (u_kick) e dá um tranco no relógio do shader (rush); o grave gira o centro (u_bass).
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --clips C:/Users/marco/Videos/ltx2/curadoria --clip-fit cover --seed 3 \
+#       --scene examples/shadertoy_exemplo_curadoria.yaml --start-time 56.018 --bars 4 \
+#       --resolution 1280x720 --fps 30 --output render_output/shadertoy_exemplo_c22-25.mp4
+video:
+  clip_per_bar: true
+  clip_order: random
+  layers:
+    - source: clips
+    - source: shadertoy
+      file: shaders/shadertoy/arc_lente_kick.glsl
+      channel0: frame
+      rush: {hits: {track: kick-2}, amount: 3.0, envelope: 0.3}
+      uniforms:
+        u_kick: {hits: {track: kick-2}, envelope: 0.3}
+        u_bass: subbands.bass

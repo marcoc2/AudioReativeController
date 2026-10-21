@@ -163,3 +163,22 @@ def test_shift_in_time_moves_grid_and_notes_together():
     assert np.allclose(grid.downbeats, [0.059])
     assert grid.start_offset == pytest.approx(0.059)
     assert grid.phase(0.059) == pytest.approx(0.0)        # bar 1 now starts where the audio does
+
+
+def test_a_note_struck_again_before_it_ends_counts_twice(tmp_path):
+    """A flam: the second snare starts before the first one's note-off — both are hits."""
+    mid = mido.MidiFile(ticks_per_beat=480)
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
+    track.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(120)))
+    track.append(mido.Message("note_on", note=38, velocity=60, channel=0, time=0))
+    track.append(mido.Message("note_on", note=38, velocity=110, channel=0, time=30))    # 31 ms later
+    track.append(mido.Message("note_off", note=38, velocity=0, channel=0, time=90))
+    track.append(mido.Message("note_off", note=38, velocity=0, channel=0, time=30))
+    path = tmp_path / "flam.mid"
+    mid.save(path)
+    _, notes = read_midi(str(path), time_signature=(4, 4))
+    assert [n.velocity for n in notes] == [60, 110]
+    assert notes[0].time == 0.0 and notes[1].time == pytest.approx(30 / 960)
+    # each note-off ends the oldest still sounding
+    assert notes[0].duration == pytest.approx(120 / 960) and notes[1].duration == pytest.approx(120 / 960)

@@ -1,0 +1,84 @@
+# Esfolado inteira — os shaders do Shadertoy se revezando a cada 2 compassos, cada um na versão
+# ligada à música. Gerado por um script (a ordem gira; a "uma luz por kick" só entra onde há kick
+# nos dois compassos, senão cede a vez ao próximo). Kick = as trilhas kick e kick-2 juntas.
+#
+#   python clip_generator.py --file input/esfolado/esfolado_mix_20_09_2026.mp3 \
+#       --midi input/esfolado/esfolado.mid --midi-offset 0.018 \
+#       --scene examples/esfolado_shaders_inteira.yaml --start-time 0 --bars 0 \
+#       --resolution 1280x720 --fps 30 --output render_output/esfolado_shaders_inteira.mp4
+#
+# Créditos: sombras 2D — Flyguy (shadertoy XsK3RR); Octgrams — whisky_shusuky (tlVGDt);
+# kaleidoscope — kasari39 (ttKGDt); Diamond Dust — Tonny Espeset (ffKXRw); starleidoscope e
+# prism liquid — autores a preencher.
+video:
+  layers:
+    - source: solid
+      color: [0, 0, 0]
+    # prism: vidro líquido: o kick espirra, o acorde pinta, o compasso troca os gomos
+    - source: shadertoy
+      file: shaders/shadertoy/prism_liquid_arc
+      bars: [[1, 2], [15, 16], [29, 30], [43, 44]]
+      uniforms:
+        u_kick_age: {since: {track: [kick, kick-2]}}
+        u_hue: {harmony: {score: input/esfolado/sheetsage, snap: auto}, glide: 0.8}
+        u_sat: 0.55
+        u_facets: {bar: {step: 1, morph: 0.5}}
+    # octagramas: túnel de octagramas: forma por compasso, o kick empurra o voo, o acorde pinta
+    - source: shadertoy
+      file: shaders/shadertoy/octagrams_arc.glsl
+      bars: [[3, 4], [17, 18], [31, 32], [45, 46]]
+      uniforms:
+        u_shape: {bar: {step: 1, morph: 0.35}}
+        u_fly: {rate: 10.0, base: 4.0, from: {hits: {track: [kick, kick-2]}, envelope: 0.3}}
+        u_hue: {harmony: {score: input/esfolado/sheetsage, snap: auto}, glide: 0.8}
+        u_sat: 0.75
+    # sombras_musica: sombras 2D: cada luz segue um instrumento
+    - source: shadertoy
+      file: shaders/shadertoy/sombras_2d_arc
+      bars: [[5, 6], [19, 20], [33, 34], [47, 48]]
+      uniforms:
+        u_kick: {hits: {track: [kick, kick-2]}, envelope: 0.35}
+        u_snare: {hits: {track: snare}, envelope: 0.3}
+        u_turn: {rate: 2.5, base: 0.1, from: {hits: {track: snare}, envelope: 0.3}}
+        u_orbit: {rate: 1.5, base: 0.2, from: {hits: {track: ez-hihat}, envelope: 0.12}}
+        u_hat: {hits: {track: ez-hihat}, envelope: 0.12}
+        u_acid: {hits: {track: acid}, envelope: 0.2}
+        u_acid_y: {pitch: {track: acid}, low: 48, high: 53, glide: 0.08}
+        u_bass: {hits: {track: bass}, envelope: 0.25}
+        u_bass_y: {pitch: {track: bass}, low: 48, high: 53, glide: 0.08}
+        u_spin: {rate: 4.0, base: 0.3, from: {hits: {track: bass}, envelope: 0.2}}
+    # caleidoscopio: túnel de cristal: o kick solta anéis de luz, o acorde pinta
+    - source: shadertoy
+      file: shaders/shadertoy/kaleidoscope_arc.glsl
+      bars: [[7, 8], [21, 22], [35, 36], [49, 50]]
+      uniforms:
+        u_ring0: {since: {track: [kick, kick-2]}, nth: 0}
+        u_ring1: {since: {track: [kick, kick-2]}, nth: 1}
+        u_ring2: {since: {track: [kick, kick-2]}, nth: 2}
+        u_hue: {harmony: {score: input/esfolado/sheetsage, snap: auto}, glide: 0.8}
+        u_sat: 0.7
+        u_paint: 0.65
+    # diamond_dust: pó de diamante: a textura do som molda o padrão e os flocos
+    - source: shadertoy
+      file: shaders/shadertoy/diamond_dust_arc
+      bars: [[9, 10], [23, 24], [37, 38], [51, 52]]
+      uniforms:
+        u_warp: {feature: texture.harmonic_change, gain: 1.5}
+        u_rough: {feature: texture.noisiness, gain: 0.3, bias: -0.07}
+        u_flow: {rate: 0.05, from: texture.loudness}
+        u_breath: {feature: texture.swell, gain: -0.4}
+        u_ripple: {feature: texture.tremolo_depth, gain: 1.2}
+        u_trem_phase: {rate: 6.283, from: texture.tremolo_rate}
+        u_glint: {feature: texture.loudness, gain: 5.0, bias: -4.0}
+        u_spin: {rate: 1.5, from: texture.percussive}
+    # sombras_kicks: sombras 2D: uma luz por kick do compasso
+    - source: shadertoy
+      file: shaders/shadertoy/sombras_2d_kicks
+      bars: [[11, 12], [25, 26], [39, 40]]
+      uniforms:
+        u_count: {count: {track: [kick, kick-2]}, per: bar}
+        u_flash: {hits: {track: [kick, kick-2]}, envelope: 0.3}
+    # starleidoscope: estrelas em caleidoscópio, ouvindo o mix pelo canal de som
+    - source: shadertoy
+      file: shaders/shadertoy/starleidoscope.glsl
+      bars: [[13, 14], [27, 28], [41, 42]]
