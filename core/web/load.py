@@ -315,7 +315,7 @@ class Loader:
         for i, spec in enumerate(cued):
             self._set(gen, "cues", "running", done=i, of=len(cued), message=Path(str(spec.get("file") or "")).name)
             try:
-                got = [(c[0], c[0] + c[2]) for c in read_cues(spec.get("cues"), spec.get("file"))]
+                got = [tuple(float(x) for x in c[:4]) for c in read_cues(spec.get("cues"), spec.get("file"))]
             except Exception as exc:                      # told, not fatal: the lane still edits
                 got, bad = {"error": f"{type(exc).__name__}: {exc}"}, bad + 1
                 self.events.log("warn", f"cues of {spec.get('file')}: {exc}")

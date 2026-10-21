@@ -253,6 +253,26 @@ out vec4 arc_out;
 `;
 const FOOT = `
 void main() { vec4 c = vec4(0.0, 0.0, 0.0, 1.0); mainImage(c, gl_FragCoord.xy); arc_out = vec4(c.rgb, 1.0); }`;
+// our own passes that carry an alpha (the characters' layer)
+const FOOT_ALPHA = `
+void main() { vec4 c = vec4(0.0); mainImage(c, gl_FragCoord.xy); arc_out = c; }`;
+const OWN_ALPHA = {
+  // a character: the clip (its alpha the cutout) put at u_rect (0..1 of the frame, y down), over what is there
+  place: `uniform vec4 u_rect; uniform float u_flip; uniform float u_opacity;
+void mainImage(out vec4 o, in vec2 fc) {
+  vec2 uv = fc / iResolution.xy;
+  vec4 below = texture(iChannel0, uv);
+  vec2 p = vec2(uv.x, 1.0 - uv.y);
+  vec2 q = (p - u_rect.xy) / max(u_rect.zw - u_rect.xy, vec2(1e-6));
+  if (q.x < 0.0 || q.x > 1.0 || q.y < 0.0 || q.y > 1.0) { o = below; return; }
+  if (u_flip > 0.5) q.x = 1.0 - q.x;
+  vec4 c = texture(iChannel1, q);
+  float a = c.a * u_opacity;
+  o = vec4(mix(below.rgb, c.rgb, a), a + below.a * (1.0 - a));
+}`,
+  // an FX's picture with the alpha it was given (an FX on the characters keeps their figures)
+  keepalpha: `void mainImage(out vec4 o, in vec2 fc) { vec2 uv = fc / iResolution.xy; o = vec4(texture(iChannel0, uv).rgb, texture(iChannel1, uv).a); }`,
+};
 const OWN = {
   copy: `void mainImage(out vec4 o, in vec2 fc) { o = vec4(texture(iChannel0, fc / iResolution.xy).rgb, 1.0); }`,
   // a video frame, cover or contain, top row first
@@ -265,6 +285,8 @@ void mainImage(out vec4 o, in vec2 fc) {
   if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { o = vec4(0.0, 0.0, 0.0, 1.0); return; }
   o = vec4(texture(iChannel0, vec2(uv.x, 1.0 - uv.y)).rgb, 1.0);
 }`,
+  // the characters' layer over the picture, by its alpha
+  over: `void mainImage(out vec4 o, in vec2 fc) { vec2 uv = fc / iResolution.xy; vec4 b = texture(iChannel1, uv); o = vec4(mix(texture(iChannel0, uv).rgb, b.rgb, b.a), 1.0); }`,
   comp: `uniform float u_mode; uniform float u_opacity;
 void mainImage(out vec4 o, in vec2 fc) {
   vec2 uv = fc / iResolution.xy;
@@ -298,11 +320,11 @@ function compile(type, text) {
   return s;
 }
 let vsShader = null;
-function program(code) {
+function program(code, alpha = false) {
   const { body, defaults } = adapt(code);
   const p = gl.createProgram();
   gl.attachShader(p, vsShader || (vsShader = compile(gl.VERTEX_SHADER, VS)));
-  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, HEAD + body + FOOT));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, HEAD + body + (alpha ? FOOT_ALPHA : FOOT)));
   gl.linkProgram(p);
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
   return { prog: p, defaults, locs: {} };
@@ -352,17 +374,18 @@ function setSize(res) {
   canvas.width = W; canvas.height = H;
   if (!gl) return;
   for (const T of Object.values(TEX)) { gl.deleteTexture(T.tex); gl.deleteFramebuffer(T.fbo); }
-  TEX = {}; for (const k2 of ["a", "b", "c", "d", "e"]) TEX[k2] = makeTarget();
+  TEX = {}; for (const k2 of ["a", "b", "c", "d", "e", "f", "g"]) TEX[k2] = makeTarget();
 }
 function initGL() {
   if (!gl) { log("err", "no WebGL2 here: the preview is off, the Arrange still works"); return; }
   gl.bindVertexArray(gl.createVertexArray());
   blackTex = mediaTex();
   for (const [k, code] of Object.entries(OWN)) PROGS[k] = program(code);
+  for (const [k, code] of Object.entries(OWN_ALPHA)) PROGS[k] = program(code, true);
   setSize("854x480");
 }
 function loc(P, n) { if (!(n in P.locs)) P.locs[n] = gl.getUniformLocation(P.prog, n); return P.locs[n]; }
-function run(P, uniforms, inputs, target, t) {
+function run(P, uniforms, inputs, target, t, vec4s = null) {
   gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
   gl.viewport(0, 0, W, H);
   gl.useProgram(P.prog);
@@ -377,9 +400,10 @@ function run(P, uniforms, inputs, target, t) {
     const l = loc(P, "iChannel" + i); if (l) gl.uniform1i(l, i);
   }
   const cr = loc(P, "iChannelResolution[0]"); if (cr) gl.uniform3fv(cr, new Float32Array([W, H, 1, W, H, 1, W, H, 1, W, H, 1]));
+  for (const [k, v] of Object.entries(vec4s || {})) { const l = loc(P, k); if (l) gl.uniform4fv(l, new Float32Array(v)); }
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
-function clearTarget(T) { gl.bindFramebuffer(gl.FRAMEBUFFER, T.fbo); gl.viewport(0, 0, W, H); gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT); }
+function clearTarget(T, alpha = 1) { gl.bindFramebuffer(gl.FRAMEBUFFER, T.fbo); gl.viewport(0, 0, W, H); gl.clearColor(0, 0, 0, alpha); gl.clear(gl.COLOR_BUFFER_BIT); }
 
 // videos: one element per clip, kept in step with the song
 const vids = new Map();
@@ -391,7 +415,7 @@ function vid(url) {
     v = { el, tex: mediaTex(), last: 0, aspect: 16 / 9 };
     el.addEventListener("loadedmetadata", () => { if (el.videoHeight) v.aspect = el.videoWidth / el.videoHeight; });
     vids.set(url, v);
-    if (vids.size > 14) {           // the longest unused goes
+    if (vids.size > 24) {           // the longest unused goes
       const old = [...vids.entries()].filter(([u, x]) => x !== v).sort((a, b) => a[1].last - b[1].last)[0];
       if (old) { old[1].el.removeAttribute("src"); old[1].el.load(); gl.deleteTexture(old[1].tex); vids.delete(old[0]); }
     }
@@ -399,12 +423,14 @@ function vid(url) {
   v.last = frameNo;
   return v;
 }
-function syncVid(v, want) {
+function syncVid(v, want, rate = 1) {
   const el = v.el;
   if (el.readyState >= 1) {
     const d = el.duration || 0;
     if (d > 0) want = ((want % d) + d) % d;
-    if (playing) {
+    if (playing && rate > 0.05) {
+      const r = Math.max(0.0625, Math.min(16, rate));
+      if (Math.abs(el.playbackRate - r) > 1e-3) el.playbackRate = r;
       if (el.paused) el.play().catch(() => { });
       if (Math.abs(el.currentTime - want) > 0.35 && !el.seeking) el.currentTime = want;
     } else {
@@ -432,6 +458,50 @@ const activeSpan = (m, bar) => spansOf(m).find(s => bar >= s.first && bar <= s.l
 function uniformsOf(m, t) { const u = {}; for (const p of m.params) u[p.name] = paramAt(p, t); return u; }
 
 let chips = [];
+// The characters at song time t: each FG clip where its cue (REAPER's, a cue file's) or its
+// block says, in its place in the frame, cut out by its alpha video (Python makes it once)
+function placeValue(v, def, t) {
+  if (v == null) return def;
+  if (typeof v === "number") return v;
+  const got = knobAt(v.knob, t);
+  return got == null ? def : got;
+}
+function clipTimeOf(m, t, bar) {
+  const p = m.place;
+  if (m.cued) {
+    const cues = p.cue_times || [];
+    let lo = 0, hi = cues.length - 1, k = -1;
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (cues[mid][0] <= t) { k = mid; lo = mid + 1; } else hi = mid - 1; }
+    if (k < 0) return null;
+    const [at, start, length, rate] = cues[k];
+    if (t < at + length) return { ct: start + (t - at) * rate, rate, own: true };
+    if (t < at + length + (p.hold || 0)) return { ct: start + length * rate - 0.02, rate: 0, own: true };
+    return null;
+  }
+  const s = activeSpan(m, bar);
+  if (!s) return null;
+  return { ct: (s.from || 0) + (t - B[s.first - 1]) * (s.rate || 1), rate: s.rate ?? 1, own: !s.file, url: s.url, proxy: s.proxy };
+}
+function fgCharacters(t, bar) {
+  const out = [];
+  for (const m of members) {
+    if (m.lane !== "fg" || m.kind !== "clip" || !m.enabled || !m.place) continue;
+    if ((m.mutes || []).some(([a, b]) => bar >= a && bar <= b)) continue;       // hidden there: it goes on underneath
+    const at = clipTimeOf(m, t, bar);
+    if (!at) continue;
+    const p = m.place, cut = at.own && p.cut && p.cut.state === "ready" ? p.cut : null;
+    let url = cut ? cut.url : (at.url || p.file_url), why = "";
+    if (!cut) {
+      why = !at.own ? "another clip: whole frame" : !p.cut ? "not cut out" : p.cut.state === "making" ? "cutting it out…" : p.cut.why || "whole frame";
+      if (!playable(url, at.own ? p.file_proxy : at.proxy)) { chips.push(["engine", `FG · ${m.label} · making a proxy`]); continue; }
+      url = proxyOf[url] || url;
+    }
+    if (!url) continue;
+    out.push({ m, url, ct: at.ct, rate: at.rate, cut: !!cut, why, fit: p.fit || "contain", flip: p.flip,
+      x: placeValue(p.x, 0.5, t), y: placeValue(p.y, 0.5, t), scale: placeValue(p.scale, 1, t), opacity: m.opacity == null ? 1 : m.opacity });
+  }
+  return out;
+}
 function shaderLayer(m, t, input, target) {
   const s = shaderFor(m.key);
   if (s.status !== "ok") return false;
@@ -479,7 +549,8 @@ function drawFrame(t) {
     let fc = TEX.c, fa = TEX.d, drew = false;
     clearTarget(fc);
     for (const m of fgs) {
-      if (m.live && m.kind !== "clip" && shaderLayer(m, t, fc.tex, TEX.e)) {
+      if (m.kind === "clip") continue;                  // the characters come after, cut out
+      if (m.live && shaderLayer(m, t, fc.tex, TEX.e)) {
         run(PROGS.comp, { u_mode: BLEND[m.blend] ?? 0, u_opacity: m.opacity }, [fc.tex, TEX.e.tex], fa, t);
         [fc, fa] = [fa, fc]; drew = true; chips.push(["fg", `FG · ${m.label}`]);
       } else chips.push(["engine", `FG · ${m.label} · at render`]);
@@ -489,6 +560,26 @@ function drawFrame(t) {
       run(PROGS.comp, { u_mode: 2, u_opacity: 1 }, [cur.tex, fc.tex], alt, t);
       [cur, alt] = [alt, cur];
     }
+  }
+  const chars = fgCharacters(t, bar);
+  if (chars.length) {
+    let cc = TEX.f, ca = TEX.g;
+    clearTarget(cc, 0);
+    for (const ch of chars) {
+      const v = vid(ch.url), tex = syncVid(v, ch.ct, ch.rate);
+      const el = v.el;
+      if (!el.videoWidth) { chips.push(["engine", `FG · ${ch.m.label} · loading`]); continue; }
+      const k = (ch.fit === "cover" ? Math.max : Math.min)(W / el.videoWidth, H / el.videoHeight) * ch.scale;
+      const w = el.videoWidth * k / W, hh = el.videoHeight * k / H;
+      run(PROGS.place, { u_flip: ch.flip ? 1 : 0, u_opacity: ch.opacity }, [cc.tex, tex], ca, t, { u_rect: [ch.x - w / 2, ch.y - hh / 2, ch.x + w / 2, ch.y + hh / 2] });
+      [cc, ca] = [ca, cc];
+      chips.push(ch.cut ? ["fg", `FG · ${ch.m.label}`] : ["engine", `FG · ${ch.m.label} · ${ch.why}`]);
+    }
+    for (const m of lane("fgfx")) {             // the FG's FX on the characters, their figures kept
+      if (m.live && shaderLayer(m, t, cc.tex, TEX.e)) { run(PROGS.keepalpha, {}, [TEX.e.tex, cc.tex], ca, t); [cc, ca] = [ca, cc]; }
+    }
+    run(PROGS.over, {}, [cur.tex, cc.tex], alt, t);
+    [cur, alt] = [alt, cur];
   }
   // the master
   for (const m of lane("master")) {

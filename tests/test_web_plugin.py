@@ -163,3 +163,9 @@ def test_the_render_command_and_where_it_goes(project, tmp_path):
     assert checked_render({"codec": "x264", "fps": "25"}) == {"render.codec": "x264", "render.fps": 25}
     with pytest.raises(ValueError):
         checked_render({"codec": "prores"})
+
+
+def test_a_knobs_values_take_its_gain_and_bias(project):
+    s = _session(project)
+    got = s.knob("{hits: {track: kick}, envelope: 0.25, gain: 0.06, bias: 0.72}")["values"]
+    assert min(got) >= 0.72 - 1e-6 and max(got) <= 0.78 + 1e-6

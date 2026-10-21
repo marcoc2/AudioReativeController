@@ -219,8 +219,12 @@ class KnobEditor:
         if t1 <= t0:
             t1 = min(dur, t0 + 8.0)
         try:
-            ts, vs = kf.sample(spec, t0, t1, int(n), notes=notes, features_at=features_at, grid=grid,
-                               cuts=cuts or None)
+            import numpy as np
+            from core.video.layers import _music_knob
+            f = _music_knob("knob", spec, list(notes), features_at, None, grid,
+                            (lambda to: [c for c in cuts if c <= to]) if cuts else None)
+            ts = np.linspace(float(t0), float(t1), int(n))
+            vs = [float(f(t)) for t in ts]
             out.update(times=[round(num(t), 4) for t in ts], values=[round(num(v), 4) for v in vs],
                        bars=[num(b) for b in self.bars() if t0 <= b <= t1], cuts=[num(c) for c in cuts if t0 <= c <= t1])
         except Exception as exc:

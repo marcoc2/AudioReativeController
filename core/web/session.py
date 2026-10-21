@@ -88,9 +88,11 @@ class Session(Edits, KnobEditor, Plugin, ProjectEdits):
     """The open project: its song and bars, its scene, the arrangement being edited."""
 
     def __init__(self, media, events):
+        from core.web.cutouts import Cutouts
         from core.web.proxies import Proxies
         self.media, self.events = media, events
         self.proxies = Proxies(media, events)
+        self.cutouts = Cutouts(media, events, on_ready=lambda: self.events.emit("state", self.state()))
         self.lock = threading.RLock()
         self.gen = 0                        # which opening this is (a later one makes results stale)
         self.reset()
@@ -117,7 +119,7 @@ class Session(Edits, KnobEditor, Plugin, ProjectEdits):
             self.saved_at = ""
             self.knobs: dict = {}
             self.features_at: Optional[Callable] = None
-            self.cues: dict = {}            # cue key -> [(t0, t1)], or {"error": ...}
+            self.cues: dict = {}            # cue key -> [(song s, clip s, seconds, rate)], or {"error": ...}
             self.lib = None
             self.montage: Optional[list] = None
             self.montage_gen = 0
@@ -364,6 +366,16 @@ class Session(Edits, KnobEditor, Plugin, ProjectEdits):
             cut = spec.get("cutout")
             track = cut.get("track") if isinstance(cut, dict) else cut
             found = arr.find_mask_track(own) if own and not track else None
+            at = spec.get("at") if isinstance(spec.get("at"), (list, tuple)) and len(spec.get("at")) == 2 else (0.5, 0.5)
+            for key, default in (("x", at[0]), ("y", at[1])):
+                v = spec.get(key, default)
+                place[key] = num(v) if isinstance(v, (int, float)) else {"knob": yaml_text(v)}
+            if lane == "fg":                                   # what the live preview draws of a character
+                place["cut"] = self.cutouts.describe(spec)
+                place["hold"] = num(spec.get("hold", 0.0)) if isinstance(spec.get("hold", 0.0), (int, float)) else 0.0
+                place["cue_times"] = [[num(x) for x in c] for c in got] if cued and isinstance(got, list) else None
+                place["file_url"] = self.media.url(resolve(own)) if own else None
+                place["file_proxy"] = self.proxies.status(resolve(own)) if own else None
             place.update(fit=spec.get("fit", "contain"), flip=bool(spec.get("flip")), loop=bool(spec.get("loop")),
                          cutout=Path(str(track)).name if track else None,
                          cutout_spec=plain(cut) if isinstance(cut, dict) else ({"track": cut} if cut else None),
@@ -417,7 +429,7 @@ class Session(Edits, KnobEditor, Plugin, ProjectEdits):
                     for s in m["spans"] if s.get("missing")]
 
     def cue_bars(self, cues: list) -> list:
-        return [(self.bar_at(t0), self.bar_at(max(t0, t1 - 1e-3))) for t0, t1 in cues]
+        return [(self.bar_at(c[0]), self.bar_at(max(c[0], c[0] + c[2] - 1e-3))) for c in cues]
 
     def cued_specs(self) -> list:
         """Every cued layer, the quick ones (a cue file) first: a REAPER edit takes seconds."""
@@ -506,7 +518,7 @@ class Session(Edits, KnobEditor, Plugin, ProjectEdits):
 
     def knob(self, text) -> dict:
         """A knob's values over the song (``KNOB_HZ`` a second), from its YAML text."""
-        from core.video.layers import _knob
+        from core.video.layers import _music_knob
         try:
             how = yaml.safe_load(text) if isinstance(text, str) else text
         except yaml.YAMLError as exc:
@@ -520,8 +532,8 @@ class Session(Edits, KnobEditor, Plugin, ProjectEdits):
         if grid is None:
             return {"error": "the bars are not known yet"}
         try:
-            f = _knob("web", how, notes, features_at=features_at, grid=grid,
-                      cuts=(lambda to: [c for c in cuts if c <= to]) if cuts else None)
+            f = _music_knob("web", how, notes, features_at=features_at, grid=grid,       # gain and bias too
+                            cuts=(lambda to: [c for c in cuts if c <= to]) if cuts else None)
             out = {"values": [round(num(f(i / KNOB_HZ)), 4) for i in range(int(dur * KNOB_HZ) + 1)]}
         except Exception as exc:
             waiting = features_at is None and "feature" in str(exc).lower()

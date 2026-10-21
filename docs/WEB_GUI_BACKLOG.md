@@ -565,90 +565,10 @@ play (by container and codec, ffprobe) get an H.264 proxy made once in
 exact preview itself (the GPU was busy with 21 of 24 GB in use) and a proxy made for a real
 `.mov`.
 
-## 23. [ ] Retire the Dear PyGui windows
-
-**Do.** When 1–22 are done and two things are proven: every workflow of
-`tests/test_arrange_window.py` has its session test (item 4), and files dropped from
-Explorer arrive with their full paths in WebView2 (item 25). Then `arc_studio.py` and
-`arc_arrange.py` (and `arc_window.py`: the Win32 drop hook, its resize cursor and its
-native folder dialog, replaced by pywebview's `create_file_dialog`) move to `archive/` per
-WORKSPACE_PLAN section 6, their tests with them; README points at the new app.
-
----
-
-## The rest of the Arrange
-
-## 24. [ ] The browser: clips
-
-**Today.** Folder field with "…" and the remembered folder, filter ("final.mp4"), covers
-made by ffmpeg in the background (`arr.cover`, up to 400, a generation counter cancels a
-stale list), name and length, the clip player (192 px, from `from` to the end, OpenCV
-thread), "sound: on/off" (its own audio player, 8 clips cached), the "from (s)" slider,
-"Cut it out (SAM2)". Dragging a clip puts its length in bars (images 4 bars); one over
-30 s asks how many bars ("Put it" / "The whole video" / Cancel); several clips go one after
-another.
-
-**Do.** All of it. Covers from `arr.cover` (Python, cached), not from video elements in the
-page. The player is a `<video>` with its sound; the length question is a small dialog.
-
-## 25. [ ] Files from Explorer
-
-**Today.** `arc_window.py` hooks the Win32 window (`WM_DROPFILES`) to get real paths;
-dropped on the lanes they become clips from the bar under the mouse; on the browser a
-folder opens it, a file is chosen.
-
-**Do.** pywebview's drop events give the full path (`pywebviewFullPath`); the same
-behaviour without Win32 code. Check that WebView2 delivers paths for folders too.
-
-## 26. [ ] Catalog and demos
-
-**Today.** Generators and FX by category, search, flags, about tooltips; picking one shows
-its demo (ready / stale / rendering / missing / failed, "Make demo" / "Make it again",
-plays looping, click for full size), its about, needs, file and parameters; FX get "Add to
-the master".
-
-**Do.** All of it; demos play as `<video>` from `demos.video_path`, "Make demo" runs
-`python -m core.demos render --only KEY --force` with its progress in the log.
-
-## 27. [ ] SAM2 seeds
-
-**Today.** The seeds window (`open_sam`, `_sam_spec`, `sam_press`, `_sam_draw`): auto
-(objects 1–16, whole or parts, reseed every N s) or my seeds (boxes and +/− points per
-object, each its colour, right click removes), the frame slider, keep figures / every
-object / all but object 1, soft edge, the cache state; OK writes the `sam_cutout` FX,
-Cancel removes one just added.
-
-**Do.** In two steps, the spec always written by Python (`_sam_spec`):
-- **27a. Auto.** The `sam_cutout` FX's options as an inspector section: objects, whole or
-  parts, reseed, keep, soft edge, the cache state.
-- **27b. My seeds.** A panel over the preview: the frame comes from Python (OpenCV seek,
-  JPEG), the frame slider, objects, boxes and +/− points drawn in the page.
-
-## 28. [ ] Repaint (ComfyUI)
-
-**Today.** Main window only: video, start, workflow (`reference/*.json`), scene with
-`repaint:`, prompt, FPS, seconds; "Check ComfyUI/GPU" (queue and `nvidia-smi`), Repaint
-(`repaint.py`, its lines in the log), Stop (kills it and cancels the jobs).
-
-**Do.** A Repaint panel with the same, its settings saved in the project's `repaint:`;
-after a render, its output is offered as the video to repaint.
-
----
-
-## Dropped (not migrated)
-
-Say if any of these should stay.
-
-- The particle modes (`particles`, `particles_v2`, `particles_v3`, `geometry`) and their
-  scripts in `generators/`, the pygame preview (`_surface_to_dpg`), the Mode combo.
-- The AUDIO CONTROLS and MIDI AUTOMATION tables, and `ARCPipeline` in the GUI (only those
-  and the particle preview use it).
-- The CLIP DECK and its pin strip (the montage row pins), the DAW timeline with the scrubber
-  and the "SAIDA" output lane (the Arrange's montage row and playhead).
-- The SCENE — LAYERS stack editor (the lanes and the inspector replace it; the YAML text of
-  a layer stays, item 17).
-- The SCENE — CLIP TRIGGERS rows editor and the trigger events lane, as they are: the
-  scene's `video:` settings and its triggers move to the montage's inspector (item 11),
-  with the Arrange's trigger rows (item 17).
-- The global gravity and clip-order overrides as GUI widgets (they stay in the project's
-  `clips:` and in the Render panel's options).
+The characters in Live (2026-10-21): each FG clip on its cues (REAPER's, a cue file's: song s,
+clip s, length, rate, hold) or its blocks, placed as `Footage` places it (x, y, scale, which may
+follow the music, fit, flip), cut out by a VP9 WebM with alpha that `core/web/cutouts.py` makes
+once from the engine's own matte (the mask track, or the SAM2 cache of its `sam_cutout`); the
+FG's FX work on them keeping their figures. A SAM2 cutout not made yet shows the whole frame and
+says so. The session's knob values now take gain and bias (`_music_knob`), so the meters, the
+places and the curves read as the render does.
