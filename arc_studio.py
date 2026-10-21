@@ -5,6 +5,7 @@ Usage:
     python arc_studio.py
 """
 
+import re
 import subprocess
 import sys
 import threading
@@ -73,6 +74,7 @@ class _State:
     loaded:   bool = False
     loading:   bool = False
     rendering: bool = False
+    render_job: Optional[dict] = None   # the final video being made: _run_render
 
     # waveform sources: name → ("audio", raw samples) | ("energy", env array);
     # per-view envelopes are computed at draw time (zoom-aware)
@@ -224,12 +226,13 @@ def _set_status(msg: str):
 
 
 def _log(msg: str):
+    print(msg, flush=True)                           # the terminal keeps what the box lets go
     try:
         prev  = dpg.get_value("log_box")
         lines = (prev + "\n" + msg).split("\n")
         dpg.set_value("log_box", "\n".join(lines[-30:]))
     except Exception:
-        print(msg)
+        pass
 
 
 def _refresh_controls(t: Optional[float] = None):
@@ -2470,7 +2473,7 @@ def _clip_preview_frames(start_t: float, n_frames: int, layers=None) -> list:
         features_at = lambda t: S.extractor.get_features_at_time(t, apply_gate=False)
     stack = build_compositor(comp, video_cfg, S.midi_notes, pw, ph,
                              fps=S.fps, features_at=features_at, grid=S.grid,
-                             masks=S.masks_dir or None)
+                             masks=S.masks_dir or None, span=(start_t, start_t + n_frames / S.fps))
     if len(stack) > 1:
         _log(f"Preview: {len(stack)} layers")
 
@@ -2507,6 +2510,11 @@ def cancel_preview() -> bool:
         _set_status("Stopping the preview being made…")
         return True
     return False
+
+
+def _sam_stopped():
+    from core.video.sam_cutout import Stopped
+    return Stopped
 
 
 def _do_preview(at: Optional[float] = None, bars: Optional[int] = None, layers=None):
@@ -2589,7 +2597,7 @@ def _do_preview(at: Optional[float] = None, bars: Optional[int] = None, layers=N
         S.preview_playing = True   # main loop takes over from here
         _set_status(f"Preview ready — {len(frames)} frames. Playing…")
 
-    except _PreviewCancelled:
+    except (_PreviewCancelled, _sam_stopped()):
         _log("Preview stopped before it was done.")
         _set_status("Preview stopped.")
     except Exception as exc:
@@ -2625,13 +2633,17 @@ def btn_stop_preview():
 # Full render
 # ---------------------------------------------------------------------------
 
-def _build_render_cmd() -> list:
-    """Full-render command line for the currently selected mode."""
+def _build_render_cmd(start: Optional[float] = None, bars: Optional[int] = None,
+                      output: Optional[str] = None) -> list:
+    """Full-render command line for the currently selected mode; ``start`` (s), ``bars`` (0:
+    to the song's end) and ``output`` in place of the studio's own settings."""
+    start = S.start_time if start is None else float(start)
+    bars = (0 if S.full_song else S.bars) if bars is None else int(bars)
     if S.mode == "clips":
         cmd = [sys.executable, "clip_generator.py",
                "--file",  S.audio_path,
                *(["--clips", S.clips_dir] if S.clips_dir else []),   # generative scenes need none
-               "--bars",  "0" if S.full_song else str(S.bars),
+               "--bars",  str(bars),
                "--cache-size", str(S.cache_size),
                "--fps",   str(S.fps),
                "--resolution", f"{S.width}x{S.height}",
@@ -2641,8 +2653,8 @@ def _build_render_cmd() -> list:
         if S.clips_seed is not None:
             cmd += ["--seed", str(S.clips_seed)]
         cmd += ["--codec", S.codec]
-        if S.start_time > 0:
-            cmd += ["--start-time", f"{S.start_time:.3f}"]
+        if start > 0:
+            cmd += ["--start-time", f"{start:.3f}"]
         if S.render_stems:
             cmd += ["--stems"]
         if S.clip_fit != "contain":
@@ -2653,7 +2665,7 @@ def _build_render_cmd() -> list:
             cmd += ["--masks", S.masks_dir]
         if S.profile:
             cmd += ["--profile"]
-        cmd += ["--output", _render_output_path()]
+        cmd += ["--output", output or _render_output_path()]
         if S.midi_path and S.midi_offset:
             cmd += ["--midi-offset", str(S.midi_offset)]
         if S.midi_path and S.meter.strip():
@@ -2667,7 +2679,7 @@ def _build_render_cmd() -> list:
         script = _MODE_SCRIPTS.get(S.mode, "generators/particle_generator.py")
         cmd = [sys.executable, script,
                "--file",  S.audio_path,
-               "--bars",  str(S.bars),
+               "--bars",  str(bars),
                "--fps",   str(S.fps),
                "--resolution", f"{S.width}x{S.height}",
                "--scene", S.scene_path]
@@ -2676,11 +2688,13 @@ def _build_render_cmd() -> list:
     return cmd
 
 
-def _render_output_path() -> str:
-    """render_output/<song>_<scene>[_from<start>].mp4 — one file per song, scene and start."""
+def _render_output_path(tail: Optional[str] = None) -> str:
+    """render_output/<song>_<scene>[_from<start>].mp4 — one file per song, scene and start
+    (``tail``: another ending, "_bars5-12")."""
     song = Path(S.audio_path or "render").stem
     scene = Path(S.scene_path or "scene").stem
-    tail = f"_from{S.start_time:.0f}s" if S.start_time > 0 else ""
+    if tail is None:
+        tail = f"_from{S.start_time:.0f}s" if S.start_time > 0 else ""
     return f"render_output/{song}_{scene}{tail}.mp4"
 
 
@@ -2746,14 +2760,14 @@ def btn_start_from_scrubber():
     _set_status(f"Render começa em {S.start_time:.3f}s (compasso {_bar_at(t + 1e-3) + 1})")
 
 
-def btn_render_full():
-    if S.rendering:
-        return
+def _render_problem() -> str:
+    """Why the final video can't be made now, or ""."""
+    if S.render_job and S.render_job.get("running"):
+        return "a video is being rendered already"
     if S.mode == "clips":
         # clips mode reads MIDI + clips itself; no feature extraction needed
         if not S.audio_path:
-            _set_status("Clips mode: select an audio file first.")
-            return
+            return "Clips mode: select an audio file first."
         needs_clips = True
         try:
             import yaml
@@ -2765,35 +2779,80 @@ def btn_render_full():
         except Exception:
             pass
         if needs_clips and not S.clips_dir:
-            _set_status("Clips mode: select a clips folder (esta cena usa clipes).")
-            return
+            return "Clips mode: select a clips folder (esta cena usa clipes)."
     elif not S.loaded:
+        return "load the project first"
+    return ""
+
+
+def btn_render_full():
+    why = _render_problem()
+    if why:
+        _set_status(why)
         return
-    cmd = _build_render_cmd()
+    _run_render(_build_render_cmd(), S.start_time)
+
+
+_FRAME_LINE = re.compile(r"^\s*(\d+)/(\d+)\s+t=")
+_FRAMES_OF = re.compile(r"\bframes=(\d+)")
+
+
+def _run_render(cmd: list, start: float) -> None:
+    """The render's process in the background: its lines go on to the terminal, its
+    progress (frame n of N) to ``S.render_job``; Stop kills it (``stop_render``)."""
+    import os
+    out = cmd[cmd.index("--output") + 1] if "--output" in cmd else ""
     _log("$ " + " ".join(Path(c).name if c.endswith(".py") else c for c in cmd))
     _set_status("Rendering (see log)…")
-
-    out = cmd[cmd.index("--output") + 1] if "--output" in cmd else ""
-    start = S.start_time
+    job = S.render_job = {"running": True, "done": 0, "total": 0, "out": out, "result": "", "line": "",
+                          "started": time.time(), "proc": None, "stop": False}
 
     def _run():
-        S.rendering = True
         try:
-            subprocess.run(cmd, check=True)
-            _set_status("Render complete.")
-            _log(f"Done. -> {out}" if out else "Done.")
-            if out:                       # the repaint picks up where the render left it
-                S.last_render, S.last_render_start = out, start
-                S.repaint_video, S.repaint_start = out, start
-                if dpg.does_item_exist("repaint_video_label"):
-                    dpg.set_value("repaint_video_label", Path(out).name)
-                    dpg.set_value("repaint_start_input", start)
-        except subprocess.CalledProcessError as e:
-            _set_status(f"Render failed (exit {e.returncode}).")
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                    encoding="utf-8", errors="replace", bufsize=1,
+                                    env={**os.environ, "PYTHONUNBUFFERED": "1"})
+            job["proc"] = proc
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+                m = _FRAME_LINE.match(line)
+                if m:
+                    job["done"], job["total"] = int(m.group(1)), int(m.group(2))
+                elif not job["total"] and _FRAMES_OF.search(line):
+                    job["total"] = int(_FRAMES_OF.search(line).group(1))
+                if line.strip():
+                    job["line"] = line.strip()
+            code = proc.wait()
+            if job["stop"]:
+                job["result"] = "stopped"
+                _set_status("Render stopped.")
+            elif code:
+                job["result"] = f"failed (exit {code}): {job['line']}"
+                _set_status(f"Render failed (exit {code}).")
+            else:
+                job["result"], job["done"] = "done", job["total"]
+                _set_status("Render complete.")
+                _log(f"Done. -> {out}" if out else "Done.")
+                if out:                   # the repaint picks up where the render left it
+                    S.last_render, S.last_render_start = out, start
+                    S.repaint_video, S.repaint_start = out, start
+                    if dpg.does_item_exist("repaint_video_label"):
+                        dpg.set_value("repaint_video_label", Path(out).name)
+                        dpg.set_value("repaint_start_input", start)
+        except Exception as exc:                         # noqa: BLE001 - said, not raised
+            job["result"] = f"failed: {exc}"
+            _set_status(f"Render failed: {exc}")
         finally:
-            S.rendering = False
+            job["running"] = False
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def stop_render() -> None:
+    job = S.render_job
+    if job and job.get("running") and job.get("proc") is not None:
+        job["stop"] = True
+        job["proc"].kill()
 
 # ---------------------------------------------------------------------------
 # Repaint (ComfyUI)
@@ -3034,7 +3093,11 @@ def _mode_script(mode: str) -> str:
 
 
 RESOLUTIONS = (("9:16 portrait", ("480x854", "720x1280", "1080x1920")),
+               ("10:16 portrait", ("480x768", "720x1152", "1080x1728", "1200x1920")),
+               ("4:5 portrait", ("480x600", "720x900", "864x1080", "1080x1350")),
                ("1:1 square", ("480x480", "720x720", "1080x1080", "2160x2160")),
+               ("5:4 landscape", ("600x480", "900x720", "1080x864", "1350x1080")),
+               ("16:10 landscape", ("768x480", "1152x720", "1728x1080", "1920x1200", "2560x1600")),
                ("16:9 landscape", ("854x480", "1280x720", "1920x1080", "2560x1440", "3840x2160")))
 RES_CHOICES = [f"{r}  {shape}" for shape, sizes in RESOLUTIONS for r in sizes]
 RES_TAGS = ("video_res", "arr_video_res")          # the choosers: the preview's, the Arrange's
@@ -3188,6 +3251,36 @@ class _ArrangeHost:
         """The clips the montage draws from (the project's clips folder)."""
         return list(S.resolved_paths)
 
+    def render_output(self, first=None, last=None):
+        """Where the final video goes: the whole song (first None) or bars first..last."""
+        return _render_output_path("" if first is None else f"_bars{first}-{last}")
+
+    def render(self, first=None, last=None):
+        """The final video: the whole song (first None) or bars first..last (the Arrange's
+        bars: 1 the song's first). What is wrong, or ""."""
+        why = _render_problem()
+        if why:
+            return why
+        if first is None:
+            _run_render(_build_render_cmd(start=0.0, bars=0, output=self.render_output()), 0.0)
+            return ""
+        db = getattr(S.grid, "downbeats", None) if S.grid is not None else None
+        if db is None or not len(db):
+            return "the song has no bars yet: load the project"
+        first, last = max(1, min(first, last)), min(len(db), max(first, last))
+        at = float(db[first - 1])
+        _run_render(_build_render_cmd(start=at, bars=last - first + 1, output=self.render_output(first, last)), at)
+        return ""
+
+    def render_state(self):
+        """The final video being made (or the last one): running, done, total (frames), out,
+        result ("", "done", "stopped", "failed ..."), started; None before any."""
+        job = S.render_job
+        return None if job is None else {k: v for k, v in job.items() if k != "proc"}
+
+    def stop_render(self):
+        stop_render()
+
     def edit_knob(self, target, path, default=0.0, mode="knob"):
         """The studio's knob editor on a parameter the Arrange window owns (``mode``
         trigger: only who plays it)."""
@@ -3279,6 +3372,7 @@ def _build_ui():
     arc_arrange.build(_ArrangeHost())
     from core.video import sam_cutout                   # SAM2 cutting a clip out at a preview: said
     sam_cutout.status = lambda msg: (_set_status(msg), _log(msg))
+    sam_cutout.stopped = lambda: S.preview_cancel      # a preview's Stop stops SAM2 too
 
     with dpg.window(label="New Scene", modal=True, show=False, tag="dlg_new_scene",
                     width=360, height=90, pos=(300, 120), no_resize=True):
@@ -3678,6 +3772,47 @@ def _parse_args():
 # Main loop
 # ---------------------------------------------------------------------------
 
+_TOLD: set = set()
+
+
+def _tell(what: str) -> None:
+    """An error the app goes on after: its traceback in the terminal, once per place."""
+    import traceback
+    key = (what, traceback.format_exc().strip().splitlines()[-1])
+    if key not in _TOLD:
+        _TOLD.add(key)
+        print(f"[{what}] went wrong, the studio goes on:\n{traceback.format_exc()}", flush=True)
+
+
+def _positional(fn) -> int:
+    """How many of (sender, app_data, user_data) a callback takes, as dearpygui passes them:
+    its positional parameters (a keyword-only one keeps its default)."""
+    code = getattr(fn, "__code__", None)
+    if code is not None:
+        return code.co_argcount - (1 if getattr(fn, "__self__", None) is not None else 0)
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return 3
+    if any(p.kind == p.VAR_POSITIONAL for p in params):
+        return 3
+    return sum(p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) for p in params)
+
+
+def run_callbacks() -> None:
+    """The callbacks queued since the last frame, here on the main thread (manual callback
+    management): one that fails is told and the rest still run."""
+    for job in dpg.get_callback_queue() or []:
+        fn = job[0] if job else None
+        if fn is None:
+            continue
+        try:
+            fn(*job[1:1 + min(3, _positional(fn))])
+        except Exception:
+            _tell(getattr(fn, "__name__", "a callback"))
+
+
 def main():
     pygame.init()
     pygame.mixer.quit()
@@ -3718,6 +3853,7 @@ def main():
         if args.project:
             dpg.set_value("project_label", Path(args.project).name)
 
+    dpg.configure_app(manual_callback_management=True)   # callbacks run in the loop (run_callbacks)
     dpg.create_viewport(title="ARC Studio", width=WIN_W + 10, height=WIN_H + 10)
     dpg.setup_dearpygui()
     dpg.show_viewport()
@@ -3730,11 +3866,15 @@ def main():
 
     was_loaded = S.loaded
     while dpg.is_dearpygui_running():
+        run_callbacks()                         # clicks, drags, keys: here, between frames
         arrange = __import__("arc_arrange")
         if S.loaded != was_loaded:              # loaded (again): the montage's clips, bar by bar
             was_loaded = S.loaded
             arrange.A.redraw = True
-        arrange.tick()                          # the Arrange window's thumbnails and redraws
+        try:
+            arrange.tick()                      # the Arrange window's thumbnails and redraws
+        except Exception:
+            _tell("the Arrange window's frame")
 
         # Deck thumbnails ready -> load textures (must run on main thread)
         if S._deck_ready:

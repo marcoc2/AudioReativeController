@@ -58,3 +58,17 @@ def test_layer_follows_the_voice_and_the_hits(tmp_path):
     assert comp.frame_at(0.0).shape == (90, 160, 3)
     with pytest.raises(ValueError):
         MouthsLayer({**spec, "hits": [{"track": "snare", "gesture": "kiss"}]}, notes, 160, 90, 24)
+
+
+def test_jaw_tint_and_light_follow_the_music():
+    """jaw_from, tint and light take any knob, as the plugin window links them."""
+    _sys()
+    notes = [MidiNote(time=0.5, pitch=36, velocity=100, channel=0, duration=0.1, track="kick", track_index=0)]
+    spec = {"source": "mouths", "rows": 2, "supersample": 1, "jaw_from": {"hits": {"track": "kick"}, "envelope": 0.5},
+            "tint": {"lfo": "saw", "period": 2.0}, "light": 0.7}
+    layer = MouthsLayer(spec, notes, 160, 90, 24)
+    layer.frame_at(0.4)
+    assert layer._smooth["jaw"] < 0.05
+    for f in range(4):
+        layer.frame_at(0.5 + f / 24)
+    assert layer._smooth["jaw"] > 0.3 and 0.2 < layer.tint < 0.4 and layer._light(0.0) == 0.7

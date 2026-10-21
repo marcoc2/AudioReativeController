@@ -39,3 +39,20 @@ def test_layer_saccades_on_the_hit_and_is_registered():
     assert comp.frame_at(0.0).shape == (90, 160, 3)
     with pytest.raises(ValueError):
         EyesLayer({**spec, "hits": [{"track": "snare", "gesture": "wink"}]}, notes, 160, 90, 24)
+
+
+def test_every_moving_value_follows_the_music():
+    """wander, hue, depth, light and pupil_from take any knob: a feature (a name), a hit's
+    envelope, an LFO... (a feature named once crashed it: float('subbands.bass'))."""
+    _sys()
+    notes = [MidiNote(time=0.5, pitch=36, velocity=100, channel=0, duration=0.1, track="kick", track_index=0)]
+    feats = lambda t: {"subbands": {"bass": 1.0 if t > 0.4 else 0.0}}           # noqa: E731
+    spec = {"source": "eyes", "rows": 2, "supersample": 1, "wander": "subbands.bass",
+            "hue": {"hits": {"track": "kick"}, "envelope": 0.3}, "depth": {"lfo": "sine", "period": 1.0},
+            "light": {"feature": "subbands.bass", "gain": 0.5, "bias": 0.5}, "pupil_from": "subbands.bass"}
+    layer = EyesLayer(spec, notes, 160, 90, 24, features_at=feats)
+    before = layer.frame_at(0.3)
+    assert layer.hue == 0.0 and layer._wander(0.3) == 0.0
+    hit = layer.frame_at(0.5)
+    assert layer.hue == pytest.approx(1.0) and layer._wander(0.5) == 1.0 and layer._light(0.5) == 1.0
+    assert not np.array_equal(before, hit)

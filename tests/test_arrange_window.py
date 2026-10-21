@@ -458,6 +458,10 @@ def test_the_studios_size_choosers():
         w, h = (int(x) for x in line.split()[0].split("x"))
         shape = line.split("  ")[1]
         assert ("portrait" in shape) == (h > w) and ("square" in shape) == (h == w)
+        a, b = (int(x) for x in shape.split()[0].split(":"))
+        assert abs(w / h - a / b) < 0.002 and w % 2 == 0 and h % 2 == 0      # its shape, and even (x264)
+    shapes = {line.split("  ")[1] for line in S.RES_CHOICES}
+    assert {"4:5 portrait", "5:4 landscape", "10:16 portrait", "16:10 landscape"} <= shapes
     dpg.create_context()
     try:
         assert S.set_resolution("1080x1920  9:16 portrait") == "" and (S.S.width, S.S.height) == (1080, 1920)
@@ -805,9 +809,14 @@ def test_a_catalog_entry_plays_its_demo_or_offers_to_make_it(window, tmp_path, m
     from core import catalog, demos
     R, host, path = window
     monkeypatch.setattr(demos, "DEMOS", tmp_path / "demos")
-    made = []
-    monkeypatch.setattr(R.subprocess, "Popen", lambda cmd, **kw: made.append(cmd) or type(
-        "P", (), {"poll": lambda self: None})())
+    made, popen = [], R.subprocess.Popen
+
+    def fake(cmd, **kw):                                  # the demo's run; another thread's ffmpeg is its own
+        if "core.demos" not in cmd:
+            return popen(cmd, **kw)
+        made.append(cmd)
+        return type("P", (), {"poll": lambda self: None})()
+    monkeypatch.setattr(R.subprocess, "Popen", fake)
     e = catalog.by_key("grain")
     R._show_entry(e)                                      # none yet: a button makes it
     tag = "arr_cat_info_fx"
@@ -1113,3 +1122,344 @@ def test_a_block_dragged_onto_another_row_goes_there(window):
     R.press(_x(R, 3), _y(R, "FG"))                        # a clip onto an FX track: it moves along only
     R.release(_x(R, 4), _y(R, "FG fx"))
     assert any(b == [(4, 5)] for l, b, _ in lanes()["FG"])
+
+
+def test_the_preview_window_says_what_the_studio_says_now(window):
+    """Not a line from before: once the preview is over, the window follows the studio's
+    status (it plays, it loops); a failure stays said until the next preview."""
+    R, host, path = window
+    progress = [(True, "SAM2: cutting x.mp4 out: 10/714 frames", "")]
+    host.preview = lambda at, bars, layers: True
+    host.preview_texture = lambda: ("arr_tex", 192, 192, (96, 170))
+    host.preview_progress = lambda: progress[0]
+    host.preview_state = lambda: "ready"
+    R.preview_bars(1, 2)
+    R.tick()
+    assert R.dpg.get_value("arr_prev_text") == "SAM2: cutting x.mp4 out: 10/714 frames"
+    progress[0] = (False, "Preview ready - 120 frames. Playing...", "")
+    R.tick()
+    progress[0] = (False, "Preview loop - 120 frames. Stop to pause.", "")
+    R.tick()                                              # over, and still followed
+    assert R.A.previewing is None and R.dpg.get_value("arr_prev_text") == "Preview loop - 120 frames. Stop to pause."
+    R.preview_bars(1, 2)
+    progress[0] = (False, "Preview crashed - see log.", "RuntimeError: SAM2 could not cut x.mp4 out")
+    R.A.previewing = (0.0, True)
+    R.tick()
+    progress[0] = (False, "Ready.", "")
+    R.tick()                                              # the failure stays said
+    assert R.dpg.get_value("arr_prev_text") == "the preview failed: RuntimeError: SAM2 could not cut x.mp4 out"
+
+
+def test_callbacks_run_on_the_main_thread_and_one_that_fails_is_only_told(monkeypatch, capsys):
+    """The studio runs dearpygui's callbacks itself, between frames: each gets as many of
+    (sender, app_data, user_data) as it takes positionally (a keyword-only one keeps its
+    default, as dearpygui does); one that raises is told once, the rest still run."""
+    import functools
+    import arc_studio as S
+    got = []
+
+    class Owner:
+        def method(self, sender, app_data):
+            got.append(("method", sender, app_data))
+
+    def boom(sender):
+        raise KeyError("arr_edge")
+    jobs = [(lambda s, a, *, here=(1, 2): got.append(("kw", s, a, here)), "btn", 5, "ud"),
+            (boom, "x", None, None),
+            (Owner().method, "m", 7, "ud"),
+            (functools.partial(lambda tag, s: got.append(("partial", tag, s)), "p"), "q", 1, 2),
+            (lambda: got.append(("none",)), "z", 0, 0),
+            (None, "n", 0, 0)]
+    monkeypatch.setattr(S.dpg, "get_callback_queue", lambda: jobs)
+    S.run_callbacks()
+    S.run_callbacks()                                     # the same failure: told once
+    assert got.count(("kw", "btn", 5, (1, 2))) == 2 and ("method", "m", 7) in got
+    assert ("partial", "p", "q") in got and ("none",) in got
+    assert capsys.readouterr().out.count("[boom] went wrong, the studio goes on") == 1
+
+
+def test_a_characters_place_linked_to_the_music_is_said_edited_and_unlinked(window):
+    """y following the snare: said in words, its Link opens the knob editor on it, "fixed"
+    puts it back to a number (where the music held it); a number gets its Link too."""
+    R, host, path = window
+    lion = R.A.members["FG"][0]
+    R._set_member("FG", lion.at, {**lion.spec, "y": {"hits": {"track": "snare"}, "envelope": 0.25,
+                                                       "gain": -0.04, "bias": 0.7}})
+    assert R._knob_text(R.A.members["FG"][0].spec["y"]) == \
+        "a jump on each snare hit, fading in 0.25 s; around 0.7, by -0.04"
+    assert R._knob_text({"lfo": "sine", "period": "4/1", "gain": 0.1, "bias": 0.25}) == \
+        "a sine wave, one every 4/1; around 0.25, by 0.1"
+    R.A.sel = ("block", "FG", lion.at, 0)
+    R._draw_inspector()
+    shown = " ".join(str(dpg.get_value(t)) for t in _all_children("arr_inspector") if dpg.get_item_type(t).endswith("Text"))
+    assert "follows the music: a jump on each snare hit" in shown
+    opened = []
+    host.edit_knob = lambda target, p, default=0.0, mode="knob": opened.append((target.uid, tuple(p), default, mode))
+    links = [b for b in _all_children("arr_inspector") if dpg.get_item_type(b).endswith("Button")
+             and dpg.get_item_label(b) == "Link..."]
+    assert len(links) == 3                                # x, y, scale
+    _click(links[1])
+    uid, here = R._where("FG", lion.at)
+    assert opened == [(uid, here + ("y",), 0.5, "knob")]
+    fixed = next(b for b in _all_children("arr_inspector") if dpg.get_item_type(b).endswith("Button")
+                 and dpg.get_item_label(b) == "fixed")
+    _click(fixed)
+    assert R.A.members["FG"][0].spec["y"] == 0.7 and "y fixed at 0.7" in R.dpg.get_value("arr_status")
+
+
+def test_a_blocks_music_links_and_fx_are_copied_onto_another(window):
+    """Right-click: copy a block's links (what the music moves) or its FX; right-click another:
+    paste them (the links its kind takes; the FX after its own, over all its bars; seeds of
+    another clip's SAM2 cutout become SAM2's own). One undo each."""
+    R, host, path = window
+    lion = R.A.members["FG"][0]
+    snare = {"hits": {"track": "snare"}, "envelope": 0.25, "gain": -0.04, "bias": 0.7}
+    R._set_member("FG", lion.at, {**lion.spec, "y": snare, "fx": [
+        {"source": "rgb_split", "bars": [[3, 3]], "trigger": {"track": "snare", "envelope": 0.15}},
+        {"source": "sam_cutout", "seeds": {"at": 0, "objects": [{"box": [0, 0, 1, 1]}]}}]})
+    R._insert_member("FG", {"source": "footage", "file": "two.mp4", "blocks": [{"bars": [9, 10]}]}, None, 9, 10)
+    R._insert_member("BG", {"source": "shadertoy", "file": "shaders/shadertoy/nebulosa_arc.glsl",
+                            "bars": [[1, 2]]}, None, 1, 2)
+
+    def menu(key, bar, sub=0):
+        R.context_menu(_x(R, bar), _y(R, key, sub))
+        return {dpg.get_item_label(i): i for i in dpg.get_item_children("arr_menu", 1)
+                if dpg.get_item_type(i).endswith("MenuItem")}
+
+    def spec(file):
+        return next(m.spec for k in ("FG", "BG") for m in R.A.members[k] if m.spec.get("file") == file)
+    lion_row = next(m.row for m in R.A.members["FG"] if m.spec.get("file") == "lion.mp4")
+    items = menu("FG", 3, lion_row)
+    assert "Copy its music links (y)" in items and "Copy its FX (2): rgb_split, sam_cutout" in items
+    _click(items["Copy its music links (y)"])
+    _click(menu("FG", 3, lion_row)["Copy its FX (2): rgb_split, sam_cutout"])
+    two_row = next(m.row for m in R.A.members["FG"] if m.spec.get("file") == "two.mp4")
+    items = menu("FG", 9, two_row)
+    n = len(R.A.undo)
+    _click(items["Paste music links from the dancer (y)"])
+    assert spec("two.mp4")["y"] == snare and len(R.A.undo) == n + 1
+    items = menu("FG", 9, two_row)
+    _click(next(i for label, i in items.items() if label.startswith("Paste FX from the dancer")))
+    fx = spec("two.mp4")["fx"]
+    assert fx == [{"source": "rgb_split", "trigger": {"track": "snare", "envelope": 0.15}},
+                  {"source": "sam_cutout", "seeds": "auto"}]                 # its bars, the other's seeds: gone
+    assert "SAM2 seeds were the other clip's" in R.dpg.get_value("arr_status")
+    R.btn_undo()
+    assert "fx" not in spec("two.mp4") and spec("two.mp4")["y"] == snare
+    items = menu("BG", 1)                                 # a shader: no y of a clip to take
+    assert not any(label.startswith("Paste music links") for label in items)
+    assert any(label.startswith("Paste FX from the dancer") for label in items)
+    items = menu("BG fx", 1)                              # an FX track's block: itself, copied
+    _click(items["Copy this FX: feedback"])
+    items = menu("FG", 9, two_row)
+    _click(items["Paste FX from feedback (feedback)"])
+    assert spec("two.mp4")["fx"] == [{"source": "feedback"}]
+
+
+def test_every_parameter_of_a_plugin_is_edited_in_its_window(window, tmp_path):
+    """Not only numbers: a folder (typed or picked), a flag, a colour, a structure in YAML."""
+    R, host, path = window
+    clips = tmp_path / "clips"
+    clips.mkdir()
+    dpg.set_value("arr_folder", str(clips))
+    R.A.content = ("gen", "cubes")
+    spec = R._content_spec("FG", 3, 4)
+    assert spec["clips_dir"] == clips.resolve().as_posix()          # the browser's folder to begin with
+    fg = R._lane_item("FG")[3]
+    R._edit(fg, ("layers",), lambda ls: list(ls) + [{"source": "cubes", "bars": [[3, 4]]}])
+    at = ("layers", 1)
+    R.open_plugin(fg, at)
+
+    def items(kind):
+        out, todo = [], list(dpg.get_item_children("arr_plugin_body", 1) or [])
+        while todo:
+            i = todo.pop()
+            if dpg.get_item_type(i) == kind:
+                out.append(i)
+            for slot in (dpg.get_item_children(i) or {}).values():
+                todo += slot
+        return out
+
+    folder = [i for i in items("mvAppItemType::mvInputText") if "folder" in dpg.get_item_configuration(i)["hint"]]
+    assert len(folder) == 1 and "required" in dpg.get_item_configuration(folder[0])["hint"]
+    assert len(items("mvAppItemType::mvCheckbox")) >= 3                 # on, crop_faces, one_clip_per_face
+    assert items("mvAppItemType::mvColorEdit")                          # bg_color
+    R._set_text(fg, at + ("clips_dir",), "  D:/my clips ", True)
+    R._set_text(fg, at + ("clip_reactivity",), "{clip_per_bar: true, clip_order: shuffle}", False)
+    R._set_text(fg, at + ("zoom_pulse",), "{notes: [36", False)          # not YAML: nothing changes
+    R.set_param(fg, at + ("crop_faces",), False)
+    R.A.param_pick = (fg, at + ("clips_dir",))
+    R._picked_param(None, {"file_path_name": str(clips)})
+    R.btn_save()
+    cubes = _layers(path)[2]["layers"][1]
+    assert cubes["clips_dir"] == clips.as_posix() and cubes["crop_faces"] is False
+    assert cubes["clip_reactivity"] == {"clip_per_bar": True, "clip_order": "shuffle"}
+    assert "zoom_pulse" not in cubes
+    fg = R._lane_item("FG")[3]                                          # (saved: a new one)
+    R._set_text(fg, at + ("clips_dir",), "", True)                      # empty: taken out
+    assert "clips_dir" not in R._item(fg)[2]["layers"][1]
+
+
+def test_a_folder_is_picked_with_the_systems_own_dialog(window, tmp_path, monkeypatch):
+    """Any drive: Windows' dialog (on a thread), its answer handed over on the main loop."""
+    import threading
+    import tkinter
+    from tkinter import filedialog
+    import arc_window
+    R, host, path = window
+    clips = tmp_path / "other drive clips"
+    clips.mkdir()
+
+    class _Root:
+        def withdraw(self): pass
+        def attributes(self, *a): pass
+        def destroy(self): pass
+
+    asked = {}
+    monkeypatch.setattr(tkinter, "Tk", _Root)
+    monkeypatch.setattr(filedialog, "askdirectory", lambda **kw: asked.update(kw) or str(clips))
+    R._choose_folder()
+    for t in threading.enumerate():
+        if t.name == "arc-pick":
+            t.join(5)
+    assert dpg.get_value("arr_folder") != str(clips)                    # not yet: on the main loop
+    R.tick()
+    assert dpg.get_value("arr_folder") == str(clips) and asked["mustexist"]
+
+
+def _widgets(kind, root="arr_plugin_body"):
+    out, todo = [], list(dpg.get_item_children(root, 1) or [])
+    while todo:
+        i = todo.pop(0)
+        if dpg.get_item_type(i) == f"mvAppItemType::{kind}":
+            out.append(i)
+        for slot in (dpg.get_item_children(i) or {}).values():
+            todo += slot
+    return out
+
+
+def _fire(item, value=None):
+    """A widget used: its callback, as dearpygui calls it."""
+    cb = dpg.get_item_callback(item)
+    n = cb.__code__.co_argcount
+    cb(*(item, value, None)[:n])
+
+
+def test_a_layers_own_clips_are_set_with_controls_not_yaml(window, monkeypatch):
+    """cubes' clip_reactivity: when a clip changes, its order, its triggers (who plays, what
+    it does, until, not near, gravity), each a control; zoom_pulse: who plays, its envelope."""
+    R, host, path = window
+    asked = []
+    monkeypatch.setattr(R, "_link", lambda uid, p, d, mode="knob": asked.append((p[-1], mode)))
+    fg = R._lane_item("FG")[3]
+    R._edit(fg, ("layers",), lambda ls: list(ls) + [{"source": "cubes", "clips_dir": "C:/c", "bars": [[3, 4]],
+                                                     "zoom_pulse": {"notes": [36], "envelope": 0.25}}])
+    at = ("layers", 1)
+    R.open_plugin(fg, at)
+    from core.scene_doc import plain
+    cubes = lambda: plain(R._item(fg)[2]["layers"][1])                 # noqa: E731
+    order = next(c for c in _widgets("mvCombo") if dpg.get_item_configuration(c)["items"] == list(R.CLIP_ORDERS))
+    _fire(order, "shuffle")
+    assert cubes()["clip_reactivity"] == {"clip_order": "shuffle"}
+    plus = next(b for b in _widgets("mvButton") if dpg.get_item_label(b) == "+ trigger")
+    _fire(plus)
+    _fire(next(b for b in _widgets("mvButton") if dpg.get_item_label(b) == "+ trigger"))
+    assert asked == [("kick", "trigger"), ("snare", "trigger")]         # who plays: the studio's editor
+    trs = lambda: cubes()["clip_reactivity"]["triggers"]                # noqa: E731
+    assert trs() == {"kick": R.NEW_TRIGGER, "snare": R.NEW_TRIGGER}
+    reverse = [c for c in _widgets("mvCheckbox") if dpg.get_item_label(c) == "reverse"]
+    _fire(reverse[0], True)                                              # the kick reverses too
+    assert trs()["kick"]["actions"] == ["next_clip", "reverse"]
+    nxt = next(c for c in _widgets("mvCheckbox") if dpg.get_item_label(c) == "next clip")
+    _fire(nxt, False)
+    assert trs()["kick"]["actions"] == ["reverse"]
+    until = lambda: [c for c in _widgets("mvCombo") if dpg.get_item_configuration(c)["items"] == ["-", "snare"]]
+    _fire(until()[0], "snare")                                           # the kick's until
+    _fire(until()[1], "snare")                                           # and not near the snare
+    assert trs()["kick"]["until"] == "snare" and trs()["kick"]["exclude"] == {"trigger": "snare", "window": 0.04}
+    names = [t for t in _widgets("mvInputText") if dpg.get_value(t) == "snare"]
+    _fire(names[0], "caixa")                                             # renamed: the kick follows
+    assert list(trs()) == ["kick", "caixa"] and trs()["kick"]["until"] == "caixa"
+    grav = [c for c in _widgets("mvCheckbox") if not dpg.get_item_label(c)]
+    _fire(grav[-1], True)                                                # the caixa's gravity
+    assert trs()["caixa"]["gravity"]["peak"] == 3.0
+    R._drop_trigger(fg, at + ("clip_reactivity", "triggers"), "caixa")   # its x
+    assert list(trs()) == ["kick"] and "until" not in trs()["kick"] and "exclude" not in trs()["kick"]
+    every = next(c for c in _widgets("mvCheckbox") if dpg.get_item_label(c) == "every")
+    _fire(every, False)
+    seed = next(t for t in _widgets("mvInputText") if dpg.get_item_configuration(t)["hint"] == "none")
+    _fire(seed, "7")
+    assert cubes()["clip_reactivity"]["clip_per_bar"] is False and cubes()["clip_reactivity"]["seed"] == 7
+    env = next(f for f in _widgets("mvInputFloat") if dpg.get_value(f) == pytest.approx(0.25))
+    _fire(env, 0.4)
+    assert cubes()["zoom_pulse"] == {"notes": [36], "envelope": 0.4}
+    R.btn_save()
+    assert _layers(path)[2]["layers"][1]["clip_reactivity"]["triggers"]["kick"]["actions"] == ["reverse"]
+
+
+def test_eyes_gestures_chords_and_features_are_controls(window, monkeypatch):
+    """eyes: its hits as gesture rows (which, who plays, how long), harmony with its own
+    editor, pupil_from linked like a knob, iris_hues two numbers, rows fixed (no Link)."""
+    R, host, path = window
+    asked = []
+    monkeypatch.setattr(R, "_link", lambda uid, p, d, mode="knob": asked.append((p[-2:], mode)))
+    fg = R._lane_item("FG")[3]
+    R._edit(fg, ("layers",), lambda ls: list(ls) + [{"source": "eyes", "bars": [[3, 4]]}])
+    at = ("layers", 1)
+    R.open_plugin(fg, at)
+    from core.scene_doc import plain
+    eyes = lambda: plain(R._item(fg)[2]["layers"][1])                  # noqa: E731
+    buttons = lambda label: [b for b in _widgets("mvButton") if dpg.get_item_label(b) == label]   # noqa: E731
+    _fire(buttons("+ gesture")[0])
+    _fire(buttons("+ gesture")[0])
+    assert asked == [(("hits", 0), "trigger"), (("hits", 1), "trigger")]
+    which = [c for c in _widgets("mvCombo") if dpg.get_item_configuration(c)["items"] == ["saccade", "dilate", "blink"]]
+    _fire(which[1], "blink")
+    env = [f for f in _widgets("mvInputFloat") if dpg.get_value(f) == pytest.approx(0.2)]
+    _fire(env[1], 0.12)
+    assert eyes()["hits"] == [{"notes": [36], "gesture": "saccade", "envelope": 0.2},
+                              {"notes": [36], "gesture": "blink", "envelope": 0.12}]
+    R._edit(fg, at + ("hits",), lambda ls: ls[1:])                       # (the first one's x)
+    assert [h["gesture"] for h in eyes()["hits"]] == ["blink"]
+    _fire(buttons("Chords from")[0])
+    assert asked[-1] == ((1, "harmony"), "score")
+    labels = [dpg.get_value(t) for t in _widgets("mvText")]
+    assert not any(l.startswith("~ rows") or l.startswith("~ seed") for l in labels)
+    assert "~ pupil_from" in labels and "~ wander" in labels
+    hues = [f for f in _widgets("mvInputFloat") if dpg.get_value(f) in (pytest.approx(0.08), pytest.approx(0.6))]
+    _fire(hues[1], 0.7)
+    assert eyes()["iris_hues"] == [0.08, 0.7]
+    pupil = next(t for t in _widgets("mvInputText") if dpg.get_item_configuration(t)["hint"] == "texture.loudness")
+    row = dpg.get_item_parent(dpg.get_item_parent(pupil))               # its row (the text in a group)
+    link = next(b for b in buttons("Link") if dpg.get_item_parent(dpg.get_item_parent(b)) == row)
+    _fire(link)
+    assert eyes()["pupil_from"] == "texture.loudness" and asked[-1] == ((1, "pupil_from"), "knob")
+
+
+def test_the_final_video_is_rendered_from_the_arrange(window):
+    """Render video...: saved first, the whole song or some bars, its progress, and the video
+    to open when it is done."""
+    R, host, path = window
+    asked, state = [], {}
+    host.render_output = lambda first=None, last=None: f"render_output/x{'' if first is None else f'_bars{first}-{last}'}.mp4"
+    host.render = lambda first=None, last=None: asked.append((first, last)) or ""
+    host.render_state = lambda: dict(state) if state else None
+    host.stop_render = lambda: state.update(running=False, result="stopped")
+    R._rename("FG", 0, "Leo")                                           # unsaved
+    R.open_render()
+    assert dpg.get_value("arr_render_out") == "-> render_output/x.mp4"
+    R.btn_render()
+    assert asked == [(None, None)] and not R.A.dirty and host.saved == 1  # saved before
+    state.update(running=True, done=240, total=960, started=__import__("time").time() - 10, out="render_output/x.mp4")
+    R.tick()
+    assert dpg.get_value("arr_render_bar") == pytest.approx(0.25) and "240/960" in dpg.get_value("arr_render_state")
+    assert "left" in dpg.get_value("arr_render_state") and dpg.get_item_label("arr_render_btn") == "Rendering 25%..."
+    state.update(running=False, done=960, result="done")
+    R.tick()
+    assert dpg.is_item_shown("arr_render_done") and dpg.get_value("arr_render_state").startswith("done")
+    dpg.set_value("arr_render_first", 5)
+    dpg.set_value("arr_render_last", 3)
+    R._render_where(bars=True)
+    assert dpg.get_value("arr_render_out") == "-> render_output/x_bars3-5.mp4"
+    R.btn_render()
+    assert asked[-1] == (3, 5)

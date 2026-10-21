@@ -121,6 +121,7 @@ class _A:
     entry = None               # the Generator or FX chosen in the browser (catalog key)
     plugin = None              # the layer (uid) the plugin window shows
     plugin_at = ()             # and where in it: () the layer, ("layers", 2, "fx", 0) a block's FX
+    param_pick = None          # (uid, path): the parameter a folder/file dialog is choosing for
     catalog_drawn = False
     undo: list = []            # the arrangement before each edit, newest last
     redo: list = []            # what undo took back, newest last
@@ -607,7 +608,13 @@ def _content_spec(lane: str, first: int, last: int):
         return None
     if A.content[0] == "gen":
         e = catalog.by_key(A.content[1])
-        return {**e.spec(), "bars": [[first, last]]} if e else None
+        if e is None:
+            return None
+        spec = {**e.spec(), "bars": [[first, last]]}
+        folder = _clips_folder()
+        if folder and any(p.name == "clips_dir" for p in e.params):     # its own clips: these
+            spec["clips_dir"] = folder
+        return spec
     clip, start = A.content[1], A.content[2]
     block = arr.Block(first, last, start)
     if lane == arr.BG:
@@ -810,6 +817,8 @@ def context_menu(x: float, y: float) -> None:
                                       callback=lambda: (_close_menu(), open_plugin(uid, here)))
                 dpg.add_menu_item(label="Turn on" if not mem.enabled else "Turn off (bypass)",
                                   callback=lambda: (_close_menu(), _toggle(uid, here)))
+                for label, fn in _copy_paste_choices(key, mem):   # its links, its FX: to others
+                    dpg.add_menu_item(label=label, callback=lambda s, d, *, fn=fn: (_close_menu(), fn()))
                 if hit is None:                          # cued / whole song: hidden in some bars
                     for label, (a, b, show) in _mute_choices(mem, bar):
                         dpg.add_menu_item(label=label, callback=lambda s, d, *, a=a, b=b, show=show: (
@@ -1190,6 +1199,155 @@ def _show_edge() -> None:
     elif not resizing and dpg.does_item_exist("arr_edge"):
         dpg.configure_item("arr_edge", show=False)
     arc_window.set_cursor("resize" if got else None)
+
+
+# ----------------------------------------------------------------------- copy and paste: links, FX
+
+NOT_LINKS = {"source", "file", "name", "role", "blocks", "bars", "cues", "cutout", "fx", "mute", "lane_row",
+             "enabled", "fit", "loop", "flip", "spill", "fade_in", "fade_out", "layers", "canvas", "pins",
+             "blend", "hold", "mask"}
+PLACE_KEYS = {"x", "y", "scale", "opacity"}     # what any clip can be given
+
+
+def _is_link(v) -> bool:
+    """A value the music moves (a knob: a pulse on the kick, an LFO, the notes' pitch...)."""
+    from core.knob_forms import form_of
+    return isinstance(v, dict) and form_of(v) not in (None, "constant")
+
+
+def links_of(spec: dict) -> dict:
+    """{path: value}: what in a layer the music moves: its knobs (a shader's uniforms too)
+    and who plays it (``trigger``, ``triggers``)."""
+    out = {}
+    for k, v in (spec or {}).items():
+        if k in NOT_LINKS:
+            continue
+        if k == "uniforms" and isinstance(v, dict):
+            out.update({("uniforms", u): uv for u, uv in v.items() if _is_link(uv)})
+        elif _is_link(v) or k in ("trigger", "triggers") and isinstance(v, dict):
+            out[(k,)] = v
+    return out
+
+
+def _takes(spec: dict, path: tuple) -> bool:
+    """``spec`` (a layer) has room for the link at ``path``: a key it has or its kind takes
+    (a clip's place and size; a Generator's or FX's own parameters; a shader's uniform)."""
+    from core import catalog
+    key = path[0]
+    if key == "uniforms":
+        return isinstance(spec.get("uniforms"), dict) and path[1] in spec["uniforms"] or \
+            (spec.get("source") == "shadertoy" and any(p.name == path[1] for p in
+                                                       (catalog.of_layer(spec).params if catalog.of_layer(spec) else [])))
+    if key in spec or spec.get("source") == "footage" and key in PLACE_KEYS or key == "opacity":
+        return True
+    e = catalog.of_layer(spec)
+    return e is not None and any(p.name == key for p in e.params)
+
+
+def _fx_list(key: str, mem) -> list:
+    """The FX a block carries (an FX track's block: itself)."""
+    from core.scene_doc import plain
+    if _is_fx(key) or mem.kind == arr.FX:
+        return [plain(mem.spec)]
+    return [plain(f) for f in mem.spec.get("fx") or [] if isinstance(f, dict)]
+
+
+def _names(paths) -> str:
+    return ", ".join(p[-1] for p in paths)
+
+
+def _copy_paste_choices(key: str, mem) -> list:
+    """[(menu label, fn)]: copy this block's links or FX; paste the ones copied before."""
+    out = []
+    links = links_of(mem.spec)
+    if links:
+        out.append((f"Copy its music links ({_names(links)})", lambda: copy_links(key, mem.at)))
+    fx = _fx_list(key, mem)
+    if fx:
+        what = "this FX" if (_is_fx(key) or mem.kind == arr.FX) else f"its FX ({len(fx)})"
+        out.append((f"Copy {what}: {', '.join(arr.label_of(f) for f in fx)}", lambda: copy_fx(key, mem.at)))
+    board = getattr(A, "board_links", None)
+    if board:
+        fits = [p for p in board["links"] if _takes(mem.spec, p)]
+        if fits:
+            out.append((f"Paste music links from {board['from']} ({_names(fits)})",
+                        lambda: paste_links(key, mem.at)))
+    board = getattr(A, "board_fx", None)
+    if board and not _is_fx(key):
+        out.append((f"Paste FX from {board['from']} ({', '.join(arr.label_of(f) for f in board['fx'])})",
+                    lambda: paste_fx(key, mem.at)))
+    return out
+
+
+def copy_links(key: str, at: int) -> None:
+    import copy
+    mem = _member(key, at)
+    links = links_of(mem.spec) if mem else {}
+    if links:
+        from core.scene_doc import plain
+        A.board_links = {"from": mem.label, "links": {p: copy.deepcopy(plain(v)) for p, v in links.items()}}
+        _status(f"copied {mem.label}'s music links ({_names(links)}): right-click another block, Paste")
+
+
+def copy_fx(key: str, at: int) -> None:
+    import copy
+    mem = _member(key, at)
+    fx = _fx_list(key, mem) if mem else []
+    if fx:
+        A.board_fx = {"from": mem.label, "fx": copy.deepcopy(fx), "file": mem.spec.get("file")}
+        _status(f"copied {mem.label}'s FX ({', '.join(arr.label_of(f) for f in fx)}): right-click another "
+                "block, Paste")
+
+
+def paste_links(key: str, at: int) -> None:
+    """The links copied before, on this block (the ones its kind takes; the rest said). One undo."""
+    import copy
+    mem, board = _member(key, at), getattr(A, "board_links", None)
+    if mem is None or not board:
+        return
+    spec = copy.deepcopy(mem.spec)
+    put, left = [], []
+    for path, v in board["links"].items():
+        if not _takes(spec, path):
+            left.append(path)
+            continue
+        if path[0] == "uniforms":
+            spec.setdefault("uniforms", {})[path[1]] = copy.deepcopy(v)
+        else:
+            spec[path[0]] = copy.deepcopy(v)
+        put.append(path)
+    if put:
+        _set_member(key, at, spec)
+    _status(f"{mem.label}: {_names(put) or 'nothing'} now follow{'s' if len(put) == 1 else ''} the music as on "
+            f"{board['from']}"
+            + (f" ({_names(left)}: not something it has)" if left else ""))
+
+
+def paste_fx(key: str, at: int) -> None:
+    """The FX copied before, after this block's own (over all its bars: a copied FX's bars
+    were the other block's). A SAM2 cutout's seeds were drawn on the other clip: here SAM2
+    finds the objects by itself. One undo."""
+    import copy
+    mem, board = _member(key, at), getattr(A, "board_fx", None)
+    if mem is None or not board:
+        return
+    fx, note = [], ""
+    for f in copy.deepcopy(board["fx"]):
+        f.pop("bars", None)
+        f.pop(arr.ROW_KEY, None)
+        if f.get("source") == SAM:
+            if mem.spec.get("source") != "footage":
+                continue
+            if isinstance(f.get("seeds"), dict) and mem.spec.get("file") != board.get("file"):
+                f["seeds"] = "auto"
+                note = " (the SAM2 seeds were the other clip's: here it finds the objects by itself)"
+        fx.append(f)
+    if not fx:
+        _status(f"{mem.label}: nothing to paste here")
+        return
+    _set_member(key, at, {**mem.spec, "fx": list(mem.spec.get("fx") or []) + fx})
+    _status(f"{mem.label}: + {', '.join(arr.label_of(f) for f in fx)} from {board['from']}{note}")
+    _draw_inspector()
 
 
 def _mutes(spec: dict) -> list:
@@ -1857,6 +2015,127 @@ def on_key_space(sender, app_data) -> None:
 PREVIEW_BARS = 8       # the most a block's preview renders (it is held in memory)
 
 
+# ----------------------------------------------------------------------- the final video
+
+def open_render() -> None:
+    """The final video's window: the whole song or some bars, where it goes, Render / Stop,
+    how far it is, and the video opened when it is done."""
+    if not dpg.does_item_exist("arr_render"):
+        with dpg.window(tag="arr_render", label="Render the video", width=520, height=300, pos=(300, 120)):
+            dpg.add_radio_button(["the whole song", "these bars"], tag="arr_render_what", horizontal=True,
+                                 default_value="the whole song", callback=lambda: _render_where())
+            with dpg.group(horizontal=True):
+                dpg.add_input_int(label="to", tag="arr_render_first", width=110, min_value=1, min_clamped=True,
+                                  default_value=1, callback=lambda: _render_where(bars=True))
+                dpg.add_input_int(tag="arr_render_last", width=110, min_value=1, min_clamped=True,
+                                  default_value=1, callback=lambda: _render_where(bars=True))
+            dpg.add_text("", tag="arr_render_size", color=(150, 150, 165))
+            dpg.add_text("", tag="arr_render_out", color=(170, 210, 170), wrap=500)
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Render", tag="arr_render_go", width=110, callback=lambda: btn_render())
+                dpg.add_button(label="Stop", tag="arr_render_stop", width=70,
+                               callback=lambda: A.host.stop_render() if hasattr(A.host, "stop_render") else None)
+            dpg.add_progress_bar(tag="arr_render_bar", width=-1, default_value=0.0, overlay="")
+            dpg.add_text("", tag="arr_render_state", wrap=500)
+            with dpg.group(horizontal=True, tag="arr_render_done", show=False):
+                dpg.add_button(label="Open the video", callback=lambda: _open_render(False))
+                dpg.add_button(label="Show it in its folder", callback=lambda: _open_render(True))
+    first, last = getattr(A, "span", None) or (1, _bars())
+    dpg.set_value("arr_render_first", first)
+    dpg.set_value("arr_render_last", last)
+    dpg.set_value("arr_render_size", f"{A.host.resolution() if hasattr(A.host, 'resolution') else ''}"
+                  "  (the size above: final video)")
+    _render_where()
+    dpg.show_item("arr_render")
+    dpg.focus_item("arr_render")
+
+
+def _render_bars():
+    """(first, last) when some bars are asked for; None: the whole song."""
+    if dpg.get_value("arr_render_what") != "these bars":
+        return None
+    a, b = dpg.get_value("arr_render_first"), dpg.get_value("arr_render_last")
+    return max(1, min(a, b)), min(_bars(), max(a, b))
+
+
+def _render_where(bars: bool = False) -> None:
+    if bars:
+        dpg.set_value("arr_render_what", "these bars")
+    span = _render_bars()
+    out = A.host.render_output(*span) if hasattr(A.host, "render_output") and span else \
+        A.host.render_output() if hasattr(A.host, "render_output") else ""
+    dpg.set_value("arr_render_out", f"-> {out}" if out else "")
+
+
+def btn_render() -> None:
+    """Render: saved first (the render reads the scene file), then the studio's renderer."""
+    if not hasattr(A.host, "render"):
+        _status("the final video needs the studio (arc_studio.py)")
+        return
+    if A.dirty:
+        btn_save()
+        if A.dirty:
+            dpg.set_value("arr_render_state", "not rendered: the scene could not be saved")
+            return
+    span = _render_bars()
+    why = A.host.render(*span) if span else A.host.render()
+    dpg.set_value("arr_render_state", why or "starting...")
+    dpg.configure_item("arr_render_done", show=False)
+    if not why:
+        A.render_seen = True
+
+
+def _open_render(folder: bool) -> None:
+    import os
+    import subprocess
+    state = A.host.render_state() if hasattr(A.host, "render_state") else None
+    out = Path(state["out"]).resolve() if state and state.get("out") else None
+    if out is None or not out.exists():
+        _status("the video is not there")
+        return
+    if folder:
+        subprocess.Popen(["explorer", "/select,", str(out)])
+    else:
+        os.startfile(str(out))                           # noqa: S606 - the user's own video
+
+
+def _render_tick() -> None:
+    """How the final video goes (frame n of N, time left), in its window and the status."""
+    if not dpg.does_item_exist("arr_render") or not hasattr(A.host, "render_state"):
+        return
+    st = A.host.render_state()
+    if st is None:
+        return
+    running = st.get("running")
+    dpg.configure_item("arr_render_go", enabled=not running)
+    dpg.configure_item("arr_render_stop", enabled=bool(running))
+    done, total = st.get("done", 0), st.get("total", 0)
+    frac = done / total if total else 0.0
+    if running:
+        spent = time.time() - st.get("started", time.time())
+        left = spent / frac * (1 - frac) if frac > 0.01 else None
+        text = (f"rendering: frame {done}/{total}" + (f", about {_mmss(left)} left" if left is not None else "")
+                if total else "starting: reading the song and the clips...")
+    else:
+        result = st.get("result") or ""
+        text = (f"done: {st.get('out')}" if result == "done" else
+                f"stopped at frame {done}/{total}" if result == "stopped" else result)
+        if result == "done":
+            frac = 1.0
+    dpg.set_value("arr_render_bar", frac)
+    dpg.configure_item("arr_render_bar", overlay=f"{100 * frac:.0f}%" if total else "")
+    if dpg.get_value("arr_render_state") != text:
+        dpg.set_value("arr_render_state", text)
+    dpg.configure_item("arr_render_done", show=not running and st.get("result") == "done")
+    if dpg.does_item_exist("arr_render_btn"):
+        dpg.configure_item("arr_render_btn", label=f"Rendering {100 * frac:.0f}%..." if running else "Render video...")
+
+
+def _mmss(seconds: float) -> str:
+    seconds = int(seconds)
+    return f"{seconds // 60}:{seconds % 60:02d}" if seconds >= 60 else f"{seconds} s"
+
+
 def preview_bars(first: int, last: int) -> None:
     """The studio's preview of these bars (the first PREVIEW_BARS of them), with the
     arrangement as it is now (saved or not), in a window of its own that says how the
@@ -1901,6 +2180,7 @@ def preview_bars(first: int, last: int) -> None:
         _preview_window(label, f"the studio is busy: {label} comes next...")
         return
     A.queued = None
+    A.prev_failed = False
     _preview_window(label, f"rendering {label}...")
     A.previewing = (time.time(), False)
     _status(f"previewing {label}: rendering...")
@@ -1935,8 +2215,23 @@ def _preview_window(label: str, text: str, error: bool = False) -> None:
 
 
 def _watch_preview() -> None:
-    """Once a frame while a preview is made: its progress, then that it plays or why it failed;
-    bars waiting for the studio (loading, or making another preview) start when it can."""
+    """Once a frame: the preview window says what the studio says now (never a line from
+    before); a preview's progress, then that it plays or why it failed; bars waiting for the
+    studio (loading, or making another preview) start when it can."""
+    _follow_preview()
+    if A.previewing is not None or not dpg.does_item_exist("arr_prev_text") or \
+            not hasattr(A.host, "preview_progress") or getattr(A, "prev_failed", False):
+        return
+    busy, status, _ = A.host.preview_progress()
+    status = status.replace("—", "-").replace("…", "...")
+    if A.queued is not None:                             # waiting: what holds it up, as it goes
+        head = str(dpg.get_value("arr_prev_text")).split("\n")[0]
+        status = f"{head}\nnow: {status}" if busy and status else head
+    if status and dpg.get_value("arr_prev_text") != status:
+        dpg.set_value("arr_prev_text", status)
+
+
+def _follow_preview() -> None:
     if A.queued is not None and hasattr(A.host, "preview_state"):
         first, last, asked = A.queued
         state = A.host.preview_state()
@@ -1963,6 +2258,7 @@ def _watch_preview() -> None:
     elif seen or time.time() - asked > 3.0:              # it started (a thread) and is over
         A.previewing = None
         text = f"the preview failed: {error}" if error else status
+        A.prev_failed = bool(error)                      # (then it stays said)
         _status(text)
     if dpg.does_item_exist("arr_prev_text"):
         dpg.set_value("arr_prev_text", text)
@@ -2280,21 +2576,87 @@ def _draw_cues_info(p, mem) -> None:
                        callback=lambda: preview_bars(first, last))
 
 
+PLACES = (("x", 0.5, "0 left .. 1 right; Link: the music moves it"),
+          ("y", 0.5, "0 top .. 1 bottom; Link: the music moves it"),
+          ("scale", 1.0, "1: as tall as the frame; Link: the music sizes it"))
+
+
+def _knob_text(v) -> str:
+    """A link to the music, said: what moves it, around what, by how much."""
+    if not isinstance(v, dict):
+        return str(v)
+
+    def who(t):
+        if not isinstance(t, dict):
+            return str(t)
+        track = t.get("track")
+        track = ", ".join(map(str, track)) if isinstance(track, (list, tuple)) else track
+        notes = f" (notes {', '.join(map(str, t['notes']))})" if t.get("notes") else ""
+        return f"{track}{notes}" if track else ", ".join(f"{k}: {x}" for k, x in t.items())
+    if "hits" in v:
+        what = f"a jump on each {who(v['hits'])} hit, fading in {v.get('envelope', 0.1):g} s"
+    elif "adsr" in v:
+        what = f"swells and fades with {who(v['adsr'])}"
+    elif "pitch" in v:
+        what = f"higher with {who(v['pitch'])}'s notes"
+    elif "random_on" in v:
+        what = f"somewhere new on each {who(v['random_on'])} hit"
+    elif "lfo" in v:
+        what = f"a {v['lfo']} wave, one every {v.get('period', '?')}"
+    elif "feature" in v:
+        what = f"the song's {v['feature']}"
+    elif "from" in v:
+        what = f"moving at {v.get('rate', 1):g}/s, pushed by " + _knob_text(v["from"])
+    else:
+        what = ", ".join(f"{k}: {x}" for k, x in v.items())
+    around = f"; around {v['bias']:g}" if isinstance(v.get("bias"), (int, float)) else ""
+    by = f", by {v['gain']:g}" if isinstance(v.get("gain"), (int, float)) else ""
+    return what + around + by
+
+
+def _link_place(uid, here: tuple, key: str, default: float, label: str) -> None:
+    """The studio's knob editor on a character's x, y or scale: what in the music moves it."""
+    if not hasattr(A.host, "edit_knob"):
+        _status("Link needs the studio's knob editor")
+        return
+    A.host.edit_knob(PluginTarget(uid, label), tuple(here) + (key,), default, "knob")
+
+
+def unlink_place(lane: str, at: int, key: str, default: float) -> None:
+    """A character's x, y or scale back to a number: where the music held it (its bias)."""
+    mem = _member(lane, at)
+    if mem is None:
+        return
+    v = mem.spec.get(key)
+    fixed = float(v["bias"]) if isinstance(v, dict) and isinstance(v.get("bias"), (int, float)) else default
+    _set_member(lane, at, {**mem.spec, key: round(fixed, 4)})
+    _status(f"{mem.label}: {key} fixed at {fixed:g} (Link... gives it to the music again)")
+
+
 def _draw_placement(p, lane: str, mem) -> None:
     """A character's place in the frame and its cutout."""
     spec = mem.spec
 
     def put(key, cast=float):
         return lambda s, v: _set_member(lane, mem.at, {**_member(lane, mem.at).spec, key: cast(v)})
-    with dpg.group(horizontal=True, parent=p):
-        for key, default in (("x", 0.5), ("y", 0.5), ("scale", 1.0)):
-            v = _num(spec, key, default)
-            dpg.add_text(key)
+    uid, here = _where(lane, mem.at)
+    for key, default, about in PLACES:                   # each: a number, or linked to the music
+        v = _num(spec, key, default)
+        with dpg.group(horizontal=True, parent=p):
+            dpg.add_text(f"{key:<5}")
             if v is None:
-                dpg.add_text("(follows the music)", color=(200, 160, 100))
+                dpg.add_text(f"follows the music: {_knob_text(spec.get(key))}", color=(200, 160, 100))
+                dpg.add_button(label="Link...", callback=lambda s, a, *, key=key, d=default: _link_place(
+                    uid, here, key, d, mem.label))
+                dpg.add_button(label="fixed", callback=lambda s, a, *, key=key, d=default: unlink_place(
+                    lane, mem.at, key, d))
             else:
                 dpg.add_input_float(default_value=v, width=80, step=0.05, format="%.2f", callback=put(key),
                                     on_enter=True)
+                dpg.add_button(label="Link...", callback=lambda s, a, *, key=key, d=default: _link_place(
+                    uid, here, key, d, mem.label))
+                dpg.add_text(about, color=(120, 120, 135))
+    with dpg.group(horizontal=True, parent=p):
         dpg.add_text("fit")
         dpg.add_combo(["contain", "cover"], default_value=spec.get("fit", "contain"), width=80,
                       callback=put("fit", str))
@@ -2554,27 +2916,65 @@ def _draw_plugin() -> None:
         for prm in params:
             path = at + _param_path(spec, prm.name)
             value = get_path(it[2], path)
+            section = _section_of(spec, prm.name)
+            if section is not None:                      # a structure: its own controls
+                section(uid, path, value)
+                continue
             with dpg.table_row():
-                label = dpg.add_text(("~ " if prm.knob else "  ") + prm.name,
+                movable = prm.knob or _is_from(prm, value)
+                label = dpg.add_text(("~ " if movable else "  ") + prm.name,
                                      color=(230, 210, 140) if value is not None else (170, 170, 180))
                 if prm.about:
                     with dpg.tooltip(label):
                         dpg.add_text(prm.about, wrap=380)
                 numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
-                if numeric or (value is None and prm.knob):
+                if numeric or (value is None and _is_number(prm.default)):     # fixed ones too (rows, seed)
                     shown = float(value) if numeric else float(prm.default)
                     dpg.add_input_float(default_value=shown, width=-1, step=0, format="%.4g", on_enter=True,
                                         callback=lambda s, v, *, path=path: set_param(uid, path, v))
-                elif value is None:
-                    dpg.add_text("-" if prm.default is None else str(prm.default), color=(120, 120, 130))
-                else:
-                    sig = _anchor_name(value)
-                    dpg.add_text(("*" + sig + "  " if sig else "") + _summary(value),
-                                 color=(230, 210, 140) if sig else (170, 210, 170))
+                elif _is_flag(value, prm):
+                    dpg.add_checkbox(default_value=bool(prm.default if value is None else value),
+                                     callback=lambda s, v, *, path=path: set_param(uid, path, bool(v)))
+                elif _is_colour(value, prm):
+                    rgb = [int(c) for c in (value if value is not None else prm.default or [0, 0, 0])[:3]]
+                    dpg.add_color_edit(default_value=rgb, no_alpha=True, width=-1,
+                                       callback=lambda s, v, *, path=path: set_param(
+                                           uid, path, [int(round(c * 255 if max(v[:3]) <= 1 else c)) for c in v[:3]]))
+                elif _is_numbers(value, prm):
+                    nums = list(value if value is not None else prm.default)
+                    with dpg.group(horizontal=True):
+                        for k, x in enumerate(nums):
+                            dpg.add_input_float(default_value=float(x), width=80, step=0, format="%.4g",
+                                                on_enter=True, callback=lambda s, v, *, path=path, k=k, nums=nums:
+                                                set_param(uid, path, [v if j == k else x for j, x in enumerate(nums)]))
+                elif value is None and (_is_trigger(prm.name, value) or prm.name in SCORES) or value is not None and (
+                        _anchor_name(value) or isinstance(value, dict) and (
+                            form_of(plain(value)) is not None or _is_trigger(prm.name, value))):
+                    sig = _anchor_name(value) if value is not None else None
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("-" if value is None else ("*" + sig + "  " if sig else "") + _summary(value),
+                                     color=(120, 120, 130) if value is None else (230, 210, 140) if sig
+                                     else (170, 210, 170))
+                        if prm.name in PULSES and isinstance(value, dict):     # each hit: how long
+                            dpg.add_text("envelope")
+                            dpg.add_input_float(default_value=float(plain(value).get("envelope", 0.25)), width=70,
+                                                step=0, format="%.3g", on_enter=True,
+                                                callback=lambda s, v, *, path=path: set_param(
+                                                    uid, path + ("envelope",), max(0.0, v)))
+                            with dpg.tooltip(dpg.last_item()):
+                                dpg.add_text("seconds each hit lasts")
+                else:                                    # a folder, a name, a list...: typed
+                    _text_cell(uid, path, prm, value)
                 with dpg.group(horizontal=True):
-                    if _is_trigger(prm.name, value):         # who plays: a track, notes, a stem
+                    if prm.name in SCORES:                   # the chords: a transcription
+                        dpg.add_button(label="Chords from", callback=lambda s, a, *, path=path: _link(
+                            uid, path, 0.0, "score"))
+                    elif _is_trigger(prm.name, value):       # who plays: a track, notes, a stem
                         dpg.add_button(label="Who plays", callback=lambda s, a, *, path=path: _link(
                             uid, path, 0.0, "trigger"))
+                    elif _is_from(prm, value) and not isinstance(value, dict):   # a feature: from it on
+                        dpg.add_button(label="Link", callback=lambda s, a, *, path=path, prm=prm, value=value:
+                                       _link_from(uid, path, value if value is not None else prm.default))
                     elif prm.knob or (isinstance(value, dict) and form_of(plain(value)) is not None):
                         dpg.add_button(label="Link" if not isinstance(value, dict) else "Edit",
                                        callback=lambda s, a, *, path=path, d=prm.default: _link(uid, path, d))
@@ -2582,6 +2982,388 @@ def _draw_plugin() -> None:
                         dpg.add_button(label="x", callback=lambda s, a, *, path=path: set_param(uid, path, None))
                         with dpg.tooltip(dpg.last_item()):
                             dpg.add_text("back to its default")
+
+
+# ----------------------------------------------------------------------- clip reactivity
+
+CLIP_ORDERS = ("sequential", "shuffle", "random")
+CLIP_ENDS = ("bounce", "loop")
+CLIP_ACTIONS = (("next_clip", "next clip"), ("random_clip", "random clip"), ("restart", "restart"),
+                ("reverse", "reverse"))
+GRAVITY = (("peak", 3.0, "the clip's speed at the hit"), ("floor", 0.3, "its speed far from any hit"),
+           ("radius", 0.45, "how far a hit pulls, seconds"), ("curve", 2.0, "over 1: the pull close to the hit"))
+NEW_TRIGGER = {"notes": [36], "actions": ["next_clip"]}
+
+
+def _cell_label(text: str, about: str = "", on: bool = True, colour=None):
+    label = dpg.add_text(text, color=colour or ((230, 210, 140) if on else (170, 170, 180)))
+    if about:
+        with dpg.tooltip(label):
+            dpg.add_text(about, wrap=380)
+    return label
+
+
+def _who(spec) -> str:
+    """Who plays a trigger, in a few words."""
+    from core.scene_doc import _anchor_name, plain
+    sig = _anchor_name(spec)
+    if sig:
+        return f"*{sig}"
+    spec = plain(spec) if isinstance(spec, dict) else {}
+    parts = [f"{k} {spec[k]}" for k in ("track", "notes", "audio", "score", "events") if k in spec]
+    return ", ".join(str(x) for x in parts) or "nobody yet"
+
+
+def _draw_reactivity(uid, path: tuple, value) -> None:
+    """The clips a layer plays of its own (``clip_reactivity``, a ClipComposer config), each
+    option a control: when a clip changes, in what order, and the triggers: who plays (the
+    studio's editor) and what it does to the clip."""
+    from core.scene_doc import plain
+    cfg = plain(value) if isinstance(value, dict) else {}
+    put = lambda key, v: set_param(uid, path + (key,), v)      # noqa: E731
+    with dpg.table_row():
+        _cell_label(path[-1], "the clips it plays: when one changes, in what order, what the music does to them")
+        dpg.add_text("the clips it shows", color=(150, 150, 165))
+        if value is not None:
+            dpg.add_button(label="x", callback=lambda: set_param(uid, path, None))
+            with dpg.tooltip(dpg.last_item()):
+                dpg.add_text("all of these back to their defaults (no triggers)")
+    with dpg.table_row():
+        _cell_label("   a new clip", "every N bars (counted from the song's first); off: only when a trigger says",
+                    "clip_per_bar" in cfg or "bars_per_clip" in cfg)
+        with dpg.group(horizontal=True):
+            dpg.add_checkbox(label="every", default_value=bool(cfg.get("clip_per_bar", True)),
+                             callback=lambda s, v: put("clip_per_bar", bool(v)))
+            dpg.add_input_int(default_value=int(cfg.get("bars_per_clip", 1)), width=90, min_value=1,
+                              min_clamped=True, on_enter=True, callback=lambda s, v: put("bars_per_clip", max(1, v)))
+            dpg.add_text("bar(s)")
+        dpg.add_text("")
+    with dpg.table_row():
+        _cell_label("   clip_order", "sequential: the folder's order (every face in step); shuffle: each clip once "
+                    "per round, in a random order (each face its own); random: any clip each time",
+                    "clip_order" in cfg)
+        dpg.add_combo(CLIP_ORDERS, default_value=cfg.get("clip_order", "sequential"), width=-1,
+                      callback=lambda s, v: put("clip_order", v))
+        dpg.add_text("")
+    with dpg.table_row():
+        _cell_label("   clip_end", "a clip shorter than its turn: bounce (back and forth) or loop (start over)",
+                    "clip_end" in cfg)
+        dpg.add_combo(CLIP_ENDS, default_value=cfg.get("clip_end", "bounce"), width=-1,
+                      callback=lambda s, v: put("clip_end", v))
+        dpg.add_text("")
+    with dpg.table_row():
+        _cell_label("   seed", "the same number: the same draw every render; empty: a new one each time", "seed" in cfg)
+        dpg.add_input_text(default_value="" if cfg.get("seed") is None else str(cfg["seed"]), hint="none",
+                           decimal=True, width=-1, on_enter=True,
+                           callback=lambda s, v: put("seed", int(v) if v.strip().lstrip("-").isdigit() else None))
+        dpg.add_text("")
+    trs = cfg.get("triggers") if isinstance(cfg.get("triggers"), dict) else {}
+    tpath = path + ("triggers",)
+    with dpg.table_row():
+        _cell_label("   triggers", "a hit (a track, notes, a stem, a chord change) and what it does to the clip",
+                    bool(trs))
+        dpg.add_text("what the music does to the clip" if trs else "none: the clips only change with the bars",
+                     color=(150, 150, 165))
+        dpg.add_button(label="+ trigger", callback=lambda: _add_trigger(uid, tpath))
+    raw = get_path_of(uid, tpath) or {}
+    for name, spec in trs.items():
+        _draw_trigger(uid, tpath, name, spec, raw.get(name), [k for k in trs if k != name])
+
+
+def get_path_of(uid, path: tuple):
+    from core.scene_doc import get_path
+    it = _item(uid)
+    return get_path(it[2], tuple(path)) if it is not None else None
+
+
+def _draw_trigger(uid, tpath: tuple, name: str, spec: dict, raw, others: list) -> None:
+    """One trigger: its name, who plays it, what it does; softer hits left out, until another
+    comes in, not near another's hits (a mic's bleed), the clip's speed pulled by its hits."""
+    spec = spec if isinstance(spec, dict) else {}
+    me = tpath + (name,)
+    put = lambda key, v: set_param(uid, me + (key,), v)         # noqa: E731
+    with dpg.table_row():
+        dpg.add_input_text(default_value=name, width=-1, on_enter=True,
+                           callback=lambda s, v: _rename_trigger(uid, tpath, name, v))
+        with dpg.tooltip(dpg.last_item()):
+            dpg.add_text("its name (Enter renames it)")
+        dpg.add_text(_who(raw if raw is not None else spec), color=(170, 210, 170))
+        with dpg.group(horizontal=True):
+            dpg.add_button(label="Who plays", callback=lambda: _link(uid, me, 0.0, "trigger"))
+            dpg.add_button(label="x", callback=lambda: _drop_trigger(uid, tpath, name))
+            with dpg.tooltip(dpg.last_item()):
+                dpg.add_text("take this trigger out")
+    acts = list(spec.get("actions") or [])
+    with dpg.table_row():
+        _cell_label("     does", "what each hit does to the clip (none: only its gravity, if any)", True,
+                    (150, 150, 165))
+        with dpg.group(horizontal=True):
+            for act, label in CLIP_ACTIONS:
+                dpg.add_checkbox(label=label, default_value=act in acts,
+                                 callback=lambda s, v, *, act=act: put("actions", [
+                                     a for a, _ in CLIP_ACTIONS if (a in acts and a != act) or (a == act and v)] or None))
+        dpg.add_text("")
+    with dpg.table_row():
+        _cell_label("     only", "min velocity: softer hits are left out (0..127); until: it stops at the other's "
+                    "first hit; not near: its hits close to the other's go (a drum mic's bleed)", True,
+                    (150, 150, 165))
+        ex = spec.get("exclude") if isinstance(spec.get("exclude"), dict) else {}
+        with dpg.group(horizontal=True):
+            dpg.add_text("min velocity")
+            dpg.add_input_int(default_value=int(spec.get("min_velocity", 0)), width=80, min_value=0, max_value=127,
+                              min_clamped=True, max_clamped=True, on_enter=True,
+                              callback=lambda s, v: put("min_velocity", v or None))
+            dpg.add_text("until")
+            dpg.add_combo(["-"] + others, default_value=spec.get("until") or "-", width=90,
+                          callback=lambda s, v: put("until", None if v == "-" else v))
+            dpg.add_text("not near")
+            dpg.add_combo(["-"] + others, default_value=ex.get("trigger") or "-", width=90,
+                          callback=lambda s, v: put("exclude", None if v == "-" else
+                                                    {"trigger": v, "window": float(ex.get("window", 0.04))}))
+        dpg.add_text("")
+    g = spec.get("gravity") if isinstance(spec.get("gravity"), dict) else None
+    with dpg.table_row():
+        _cell_label("     gravity", "its hits pull the clip's speed: fast at the hit, slow far from any", True,
+                    (150, 150, 165))
+        with dpg.group(horizontal=True):
+            dpg.add_checkbox(default_value=g is not None,
+                             callback=lambda s, v: put("gravity", {k: d for k, d, _ in GRAVITY} if v else None))
+            for key, default, about in (GRAVITY if g is not None else ()):
+                dpg.add_text(key)
+                dpg.add_input_float(default_value=float(g.get(key, default)), width=70, step=0, format="%.3g",
+                                    on_enter=True, callback=lambda s, v, *, key=key: set_param(
+                                        uid, me + ("gravity", key), v))
+                with dpg.tooltip(dpg.last_item()):
+                    dpg.add_text(about)
+        dpg.add_text("")
+
+
+def _add_trigger(uid, tpath: tuple) -> None:
+    """A new trigger (the kick, next clip), then the studio's editor to say who plays it."""
+    have = get_path_of(uid, tpath) or {}
+    name = next(n for n in ["kick", "snare"] + [f"trigger{i}" for i in range(1, 99)] if n not in have)
+    err = set_param(uid, tpath + (name,), dict(NEW_TRIGGER))
+    if err:
+        _status(err)
+        return
+    _link(uid, tpath + (name,), 0.0, "trigger")
+
+
+def _rename_trigger(uid, tpath: tuple, old: str, new: str) -> None:
+    """A trigger by another name (``until``/``not near`` that named it follow)."""
+    new = new.strip()
+    if not new or new == old:
+        return
+    if new in (get_path_of(uid, tpath) or {}):
+        _status(f"there is a trigger {new} already")
+        _draw_plugin()
+        return
+    _edit(uid, tpath, lambda trs: _renamed(trs, old, new))
+
+
+def _drop_trigger(uid, tpath: tuple, name: str) -> None:
+    """A trigger out (``until``/``not near`` that named it go too: nothing left to name)."""
+    _edit(uid, tpath, lambda trs: _renamed(trs, name, None) or None)
+
+
+def _renamed(trs, old: str, new) -> dict:
+    """``trs`` with ``old`` called ``new`` (None: taken out) and the references to it."""
+    out = {}
+    for k, v in (trs or {}).items():
+        if k == old and new is None:
+            continue
+        if isinstance(v, dict) and (v.get("until") == old or (v.get("exclude") or {}).get("trigger") == old):
+            v = dict(v)                                  # its own now (a shared signal stays as it was)
+            if v.get("until") == old:
+                v["until"] = new
+                if new is None:
+                    v.pop("until")
+            if (v.get("exclude") or {}).get("trigger") == old:
+                v["exclude"] = {**v["exclude"], "trigger": new} if new is not None else None
+                if new is None:
+                    v.pop("exclude")
+        out[new if k == old else k] = v
+    return out
+
+
+# ----------------------------------------------------------------------- gestures
+
+def _gestures_of(spec: dict) -> tuple:
+    """The gestures a layer's ``hits:`` can ask for (its class's GESTURES), or ()."""
+    from core import catalog
+    import importlib
+    got = catalog.NATIVE.get(str(spec.get("source")))
+    if not got:
+        return ()
+    try:
+        return tuple(getattr(getattr(importlib.import_module(got[0]), got[1]), "GESTURES", ()))
+    except (ImportError, AttributeError):
+        return ()
+
+
+def _draw_gestures(uid, path: tuple, value, gestures: tuple) -> None:
+    """A layer's ``hits:``: each gesture a row: who plays it, which gesture, how long."""
+    from core.scene_doc import plain
+    hits = [h for h in (plain(value) if isinstance(value, list) else [])]
+    raw = get_path_of(uid, path) or []
+    with dpg.table_row():
+        _cell_label(path[-1], "what the music makes it do: " + ", ".join(gestures), bool(hits))
+        dpg.add_text(f"gestures: {', '.join(gestures)}" if hits else "none yet", color=(150, 150, 165))
+        dpg.add_button(label="+ gesture", callback=lambda: _add_gesture(uid, path, gestures))
+    for i, h in enumerate(hits):
+        h = h if isinstance(h, dict) else {}
+        me = path + (i,)
+        with dpg.table_row():
+            dpg.add_combo(gestures, default_value=h.get("gesture", gestures[0]), width=-1,
+                          callback=lambda s, v, *, me=me: set_param(uid, me + ("gesture",), v))
+            with dpg.group(horizontal=True):
+                dpg.add_text(_who(raw[i] if i < len(raw) else h), color=(170, 210, 170))
+                dpg.add_text("  for")
+                dpg.add_input_float(default_value=float(h.get("envelope", 0.2)), width=70, step=0, format="%.3g",
+                                    on_enter=True, callback=lambda s, v, *, me=me: set_param(
+                                        uid, me + ("envelope",), max(0.001, v)))
+                with dpg.tooltip(dpg.last_item()):
+                    dpg.add_text("seconds each hit's gesture lasts")
+                dpg.add_text("s")
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Who plays", callback=lambda s, a, *, me=me: _link(uid, me, 0.0, "trigger"))
+                dpg.add_button(label="x", callback=lambda s, a, *, i=i: _edit(
+                    uid, path, lambda ls, i=i: [x for j, x in enumerate(ls or []) if j != i] or None))
+                with dpg.tooltip(dpg.last_item()):
+                    dpg.add_text("take this gesture out")
+
+
+def _add_gesture(uid, path: tuple, gestures: tuple) -> None:
+    """A new gesture (the kick's, the first kind), then the studio's editor: who plays it."""
+    have = list(get_path_of(uid, path) or [])
+    _edit(uid, path, lambda ls: list(ls or []) + [{"notes": [36], "gesture": gestures[0], "envelope": 0.2}])
+    _link(uid, path + (len(have),), 0.0, "trigger")
+
+
+def _section_of(spec: dict, name: str):
+    """The controls of a structure parameter (fn(uid, path, value)), or None."""
+    if name == "hits":
+        gestures = _gestures_of(spec)
+        if gestures:
+            return lambda uid, path, value: _draw_gestures(uid, path, value, gestures)
+    return SECTIONS.get(name)
+
+
+SCORES = ("harmony",)   # a transcription's chords (the studio's editor, score mode)
+
+
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _is_numbers(value, prm) -> bool:
+    """A short list of numbers (not a colour): one field each."""
+    v = value if value is not None else prm.default
+    return isinstance(v, list) and 0 < len(v) <= 4 and all(_is_number(x) for x in v)
+
+
+def _is_from(prm, value) -> bool:
+    """``..._from``: a feature (or any knob) a layer reads from the music."""
+    return prm.name.endswith("_from") and (value is None or isinstance(value, (str, dict)))
+
+
+def _link_from(uid, path: tuple, now) -> None:
+    """The knob editor on a feature parameter, starting from the feature it reads now."""
+    if isinstance(now, str) and get_path_of(uid, path) is None:
+        set_param(uid, path, now)
+    _link(uid, path, 0.0)
+
+
+SECTIONS = {"clip_reactivity": _draw_reactivity}
+
+
+PICKS = {"dir": ("_dir", "dir", "folder", "_folder", "masks"), "file": ("file", "_file", "path", "_path",
+                                                                          "image", "video", "audio", "lut",
+                                                                          "voice")}
+
+
+def _picks(name: str):
+    """"dir" or "file": the parameter names a folder or a file (a ... button picks it)."""
+    for kind, ends in PICKS.items():
+        if name in ends or any(name.endswith(e) for e in ends if e.startswith("_")):
+            return kind
+    return None
+
+
+def _is_flag(value, prm) -> bool:
+    return isinstance(value, bool) or value is None and isinstance(prm.default, bool)
+
+
+def _is_colour(value, prm) -> bool:
+    """[r, g, b] 0..255 in a parameter named for a colour."""
+    v = value if value is not None else prm.default
+    return (prm.name.endswith(("color", "colour")) and isinstance(v, list) and len(v) in (3, 4)
+            and all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in v)
+            and (any(c > 1 for c in v) or all(isinstance(c, int) for c in v)))
+
+
+def _yaml_line(value) -> str:
+    from core.scene_doc import plain
+    import yaml
+    return yaml.safe_dump(plain(value), default_flow_style=True, width=1 << 16).strip()
+
+
+def _text_cell(uid, path: tuple, prm, value) -> None:
+    """A parameter that is not a number: its text (a folder, a name) or, a list or a table,
+    its YAML on one line. Enter sets it; empty takes it out (back to its default)."""
+    is_text = isinstance(value, str) or value is None and isinstance(prm.default, str)
+    shown = value if isinstance(value, str) else "" if value is None else _yaml_line(value)
+    pick = _picks(prm.name)
+    hint = {"dir": "a folder", "file": "a file"}.get(pick) if pick else \
+        ("" if prm.default is None else str(prm.default) if is_text else _yaml_line(prm.default))
+    if pick and "required" in prm.about:
+        hint += " (required)"
+    with dpg.group(horizontal=True):
+        dpg.add_input_text(default_value=shown, hint=hint or "", width=-40 if pick else -1, on_enter=True,
+                           callback=lambda s, v, *, is_text=is_text: _set_text(uid, path, v, is_text))
+        if pick:
+            dpg.add_button(label="...", callback=lambda: _pick_param(uid, path, pick, shown))
+
+
+def _set_text(uid, path: tuple, text: str, is_text: bool) -> None:
+    import yaml
+    text = text.strip()
+    if not text:
+        set_param(uid, path, None)
+        return
+    if not is_text:
+        try:
+            value = yaml.safe_load(text)
+        except yaml.YAMLError as e:
+            _status(f"{path[-1]}: not something it reads ({getattr(e, 'problem', None) or e})")
+            return
+    else:
+        value = text
+    err = set_param(uid, path, value)
+    _status(err or f"{path[-1]} = {text}")
+
+
+def _pick_param(uid, path: tuple, kind: str, now: str = "") -> None:
+    """The folder (or file) dialog for a parameter (Windows' own: any drive); what it picks
+    is set there."""
+    A.param_pick = (uid, path)
+    if arc_window.pick(kind, lambda chosen: _picked_param(None, {"file_path_name": chosen}),
+                       now or (_clips_folder() or ""), f"{path[-1]}: choose a {'folder' if kind == 'dir' else 'file'}"):
+        return
+    tag = "dlg_arr_param_dir" if kind == "dir" else "dlg_arr_param_file"
+    start = Path(now) if now else None
+    if start is not None and start.exists():
+        dpg.configure_item(tag, default_path=str(start if start.is_dir() else start.parent))
+    dpg.show_item(tag)
+
+
+def _picked_param(sender, app_data) -> None:
+    path = app_data.get("file_path_name") if isinstance(app_data, dict) else None
+    if path and A.param_pick:
+        uid, at = A.param_pick
+        err = set_param(uid, at, Path(path).as_posix())
+        _status(err or f"{at[-1]} = {Path(path).as_posix()}")
+    A.param_pick = None
 
 
 def _layer_name(spec: dict) -> str:
@@ -2600,7 +3382,10 @@ def _is_trigger(name: str, value) -> bool:
     from core.scene_doc import plain
     if isinstance(value, dict):
         return bool(set(plain(value)) & TRIGGER_KEYS) and not set(plain(value)) & {"hits", "feature", "lfo"}
-    return value is None and name in ("trigger", "hits")
+    return value is None and name in ("trigger", "hits") + PULSES
+
+
+PULSES = ("zoom_pulse", "invert")   # a trigger and how long each hit lasts (``envelope``, seconds)
 
 
 def _link(uid, path: tuple, default, mode: str = "knob") -> None:
@@ -2751,6 +3536,20 @@ def on_picture_press(sender, app_data) -> None:
 
 def _start_clip_drag() -> None:
     A.clip_drag = (A.clip, A.start, max(0.0, (A.clip_len or 0.0) - A.start))
+
+
+def _clips_folder():
+    """The folder the browser lists (or the studio's clips), as a scene writes it."""
+    folder = dpg.get_value("arr_folder") if dpg.does_item_exist("arr_folder") else ""
+    folder = folder or (A.host.clips_dir() if A.host is not None else "") or ""
+    return Path(folder).resolve().as_posix() if folder and Path(folder).is_dir() else None
+
+
+def _choose_folder() -> None:
+    """The clips' folder, from Windows' own dialog (any drive); dearpygui's when there is none."""
+    if not arc_window.pick("dir", lambda chosen: _pick_folder(None, {"file_path_name": chosen}),
+                           dpg.get_value("arr_folder") or "", "A folder of clips"):
+        dpg.show_item("dlg_arr_folder")
 
 
 def _pick_folder(sender, app_data) -> None:
@@ -3061,8 +3860,8 @@ def _sam_cache_text() -> None:
     else:
         done = sam_cutout.cached(A.sam["clip"], sam_cutout.config(spec))
         text = (f"cut out already: {done} (the renders read it)" if done else
-                "not cut out yet: the next preview or render runs SAM2 on the clip once (GPU), then it is "
-                "kept in render_output/footage")
+                "not cut out yet: the next preview or render runs SAM2 on the frames its blocks show (GPU), "
+                "then they are kept in render_output/footage; more are cut only if more of the clip is used")
     dpg.set_value("arr_sam_cache", text)
 
 
@@ -3564,8 +4363,10 @@ def tick() -> None:
     _show_edge()
     _show_saved()
     _sam_tick()
+    _render_tick()
     for paths, pos in arc_window.take():
         drop_files(paths, pos)
+    arc_window.picked()                                  # folders and files chosen in a dialog
     if A.demo_frame is not None:
         frame, A.demo_frame = A.demo_frame, None
         dpg.set_value("arr_demo_tex", frame)
@@ -3731,7 +4532,7 @@ def build(host) -> None:
                         dpg.add_button(label="clear all", callback=lambda: sam_clear(True))
                     dpg.add_text("on the picture: drag a box around it, click points on it (+) or on what is "
                                  "not it (-); right-click takes the nearest away. Each object is followed "
-                                 "from this frame to the clip's end.", wrap=410, color=(120, 120, 140))
+                                 "from this frame to the end of what its blocks show.", wrap=410, color=(120, 120, 140))
                 dpg.add_separator()
                 dpg.add_radio_button(SAM_KEEPS, tag="arr_sam_keep", default_value=SAM_KEEPS[0],
                                      callback=lambda: _sam_cache_text())
@@ -3744,6 +4545,11 @@ def build(host) -> None:
     dpg.bind_item_handler_registry("arr_sam_canvas", "arr_sam_handler")
     dpg.add_file_dialog(show=False, directory_selector=True, callback=_pick_folder, tag="dlg_arr_folder",
                         width=620, height=420)
+    dpg.add_file_dialog(show=False, directory_selector=True, callback=_picked_param, tag="dlg_arr_param_dir",
+                        width=620, height=420, cancel_callback=lambda *_: setattr(A, "param_pick", None))
+    with dpg.file_dialog(show=False, callback=_picked_param, tag="dlg_arr_param_file", width=620, height=420,
+                         cancel_callback=lambda *_: setattr(A, "param_pick", None)):
+        dpg.add_file_extension(".*")
     with dpg.window(label="Arrange - the background, the foreground and the master, bar by bar",
                     tag="arr_win", show=False, width=1090, height=900, pos=(5, 40)):
         with dpg.group(horizontal=True):
@@ -3753,7 +4559,7 @@ def build(host) -> None:
                     with dpg.group(horizontal=True):
                         dpg.add_input_text(tag="arr_folder", width=260, hint="a folder of clips",
                                            on_enter=True, callback=lambda: btn_list())
-                        dpg.add_button(label="...", callback=lambda: dpg.show_item("dlg_arr_folder"))
+                        dpg.add_button(label="...", callback=lambda: _choose_folder())
                     with dpg.group(horizontal=True):
                         dpg.add_input_text(tag="arr_filter", width=200, hint="filter, e.g. final.mp4",
                                            on_enter=True, callback=lambda: btn_list())
@@ -3797,6 +4603,9 @@ def build(host) -> None:
                     dpg.add_button(label="Undo", width=60, callback=btn_undo)
                     dpg.add_button(label="Redo", width=60, callback=btn_redo)
                     dpg.add_button(label="Preview (choose bars)", tag="arr_prev_btn", callback=preview_span)
+                    dpg.add_button(label="Render video...", tag="arr_render_btn", callback=lambda: open_render())
+                    with dpg.tooltip("arr_render_btn"):
+                        dpg.add_text("the final video: the whole song or some bars (saved first)")
                     dpg.add_text("", tag="arr_save_state")
                 with dpg.group(horizontal=True):
                     dpg.add_text("final video:")

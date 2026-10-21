@@ -160,11 +160,6 @@ def prepare(args) -> Render:
         extractor = AudioFeatureExtractor(args.file, fps=fps, skip_separation=not args.stems)
         features_at = lambda t: extractor.get_features_at_time(t, apply_gate=False)
 
-    stack = build_compositor(composer, video_cfg, midi_notes, W, H,
-                             fps=fps, features_at=features_at, grid=grid, masks=args.masks)
-    if len(stack) > 1:
-        print(f"layers: {len(stack)} (compositing enabled)")
-
     # A negative --midi-offset (the master lost its first bars) puts the grid before the audio.
     start_sec = max(0.0, float(grid.start_offset)) if grid.start_offset else 0.0
     if args.start_time > 0.0:
@@ -184,6 +179,11 @@ def prepare(args) -> Render:
         print(f"Full-song mode: rendering {total_dur:.1f}s of audio")
     n_frames  = int(total_dur * fps)
     triggers  = list(video_cfg.get("triggers", {}).keys())
+
+    stack = build_compositor(composer, video_cfg, midi_notes, W, H, fps=fps, features_at=features_at,
+                             grid=grid, masks=args.masks, span=(start_sec, start_sec + total_dur))
+    if len(stack) > 1:
+        print(f"layers: {len(stack)} (compositing enabled)")
 
     sig = grid.time_signature
     print(

@@ -47,6 +47,11 @@ def main():
                     help="A JSON file of one's own seeds: {at: clip s, objects: [{box: [x0, y0, x1, y1], "
                          "points: [[x, y, 1|0], ...]}]} (0..1 of the frame); only those objects are "
                          "followed, from that frame on (no automatic search)")
+    ap.add_argument("--frames", default=None,
+                    help="Only these frames: 'first:end,first:end' (end not included; the video is "
+                         "read from each first on, nothing else is decoded); the rest get no labels")
+    ap.add_argument("--first-id", type=int, default=1,
+                    help="The first object's id (a track grown by another run goes on numbering)")
     args = ap.parse_args()
     if not args.sam2_weights:
         ap.error("give --sam2-weights (or set ARC_SAM2_WEIGHTS)")
@@ -71,6 +76,17 @@ def main():
             print(f"cuts from {path}: {len(cuts)}", flush=True)
         elif args.cuts != "auto":
             ap.error(f"no cuts file {path}")
+    ranges, total = None, None
+    if args.frames:
+        import cv2
+        cap = cv2.VideoCapture(args.video)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        try:
+            ranges = [tuple(int(x) for x in part.split(":")) for part in args.frames.split(",") if part.strip()]
+        except ValueError:
+            ap.error(f"--frames {args.frames!r}: write them like 0:120,600:720")
+        print(f"frames {args.frames} of {total}", flush=True)
     tracker = RegionTracker(args.sam2_weights, args.sam2_model)
     preview = None
     if args.preview:
@@ -82,7 +98,9 @@ def main():
                          granularity=args.granularity, reseed=args.reseed, cut=args.cut,
                          points_per_side=args.points, min_iou=args.min_iou,
                          min_stability=args.min_stability, preview=preview, model=args.sam2_model,
-                         log=lambda m: print(m, flush=True), cuts=cuts, seeds=seeds)
+                         log=lambda m: print(m, flush=True), cuts=cuts, seeds=seeds, ranges=ranges,
+                         frames_at=lambda first, count: iter_frames(args.video, first, count),
+                         total=total, first_id=args.first_id)
     finally:
         if preview is not None:
             preview.stdin.close()

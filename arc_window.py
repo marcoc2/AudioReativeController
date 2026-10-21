@@ -9,6 +9,9 @@ its window procedure is wrapped to catch WM_DROPFILES and WM_SETCURSOR.
   mouse let go, in the viewport's client area (the space of ``dpg.get_mouse_pos(local=False)``).
 - ``set_cursor("resize")`` shows the left-right arrows (a block's end that Shift+drag
   takes) until ``set_cursor(None)``; meanwhile WM_SETCURSOR is answered here, not by ImGui.
+- ``pick("dir" | "file", done, start, title)``: the system's own folder or file dialog
+  (dearpygui's cannot leave the drive it starts on), on a thread of its own so the window
+  goes on drawing; ``picked()``, on the main loop, calls ``done(path)`` with what was chosen.
 """
 import ctypes
 import sys
@@ -21,6 +24,8 @@ GWLP_WNDPROC = -4
 CURSORS = {"resize": 32644, "arrow": 32512}      # IDC_SIZEWE, IDC_ARROW
 
 _drops = []
+_picks = []           # (done, path): dialogs answered, for the main loop
+_picking = [False]    # a dialog is open
 _hooked = {}          # hwnd -> (the new window procedure, the old one): kept alive
 _cursor = [None]      # the shape asked for (None: ImGui's own)
 
@@ -30,6 +35,55 @@ def take() -> list:
     out = _drops[:]
     del _drops[:]
     return out
+
+
+def pick(kind: str, done, start: str = "", title: str = "") -> bool:
+    """Open the folder ("dir") or file ("file") dialog (one open already: that one); False
+    when there is none to open (no tkinter)."""
+    if _picking[0]:
+        return True
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        return False
+    import threading
+    from pathlib import Path
+    first = Path(start) if start else None
+    while first is not None and not first.is_dir() and first.parent != first:
+        first = first.parent
+    _picking[0] = True
+
+    def run():
+        import tkinter
+        from tkinter import filedialog
+        path = ""
+        try:
+            root = tkinter.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)            # over the studio, not behind it
+            where = str(first) if first is not None and first.is_dir() else None
+            if kind == "dir":
+                path = filedialog.askdirectory(parent=root, initialdir=where, title=title or "Choose a folder",
+                                               mustexist=True)
+            else:
+                path = filedialog.askopenfilename(parent=root, initialdir=where, title=title or "Choose a file")
+            root.destroy()
+        except Exception as e:                           # noqa: BLE001 - a dialog that failed: nothing chosen
+            print(f"[arc_window] the {kind} dialog failed: {e}")
+        finally:
+            _picking[0] = False
+        if path:
+            _picks.append((done, path))
+
+    threading.Thread(target=run, daemon=True, name="arc-pick").start()
+    return True
+
+
+def picked() -> None:
+    """On the main loop: each dialog answered since, its ``done(path)``."""
+    while _picks:
+        done, path = _picks.pop(0)
+        done(path)
 
 
 def set_cursor(kind) -> None:

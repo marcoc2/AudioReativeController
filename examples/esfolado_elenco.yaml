@@ -39,13 +39,13 @@ video:
     snare_flip: {track: snare, actions: [reverse]}
   layers:
     - source: clips
-      pins: {9: none}
+      pins: {9: none, 15: none, 16: none, 22: none, 23: none, 24: none, 25: none, 26: none, 27: none, 28: none, 29: none, 30: none, 31: none, 32: none, 33: none, 34: none, 35: none, 50: none, 51: none, 52: none, 53: none, 54: none, 55: none, 1: none}
     - source: group
       name: BG
       canvas: below
       layers:
         - source: shadertoy
-          bars: [[18, 21]]
+          bars: [[18, 18]]
           file: shaders/shadertoy/octagrams_arc.glsl
           uniforms:
             u_shape:
@@ -66,64 +66,6 @@ video:
               high: 86
               glide: 0.15
             u_sat: 0.8
-        - source: shadertoy
-          bars: [[22, 32]]
-          fade_in: 1
-          file: shaders/shadertoy/nebulosa_arc.glsl
-          speed: 0.6
-          rush:
-            hits:
-              track: piano
-            amount: 1.5
-            envelope: 0.6
-          uniforms:
-            u_form: 0.53
-            u_hue:
-              lfo: sine
-              period: 8/1
-              gain: 0.08
-              bias: 0.6
-            u_dark: 0.35
-            u_bright:
-              adsr:
-                track: piano
-              attack: 0.05
-              decay: 0.6
-              sustain: 0.5
-              release: 1.0
-              gain: 0.8
-              bias: 0.8
-        - source: deep_zoom
-          bars: [[33, 35]]
-          from: 88.0
-          decades: 2.0
-          depth: 13
-          iterations: 2500
-          hue: 0.62
-          flow:
-            rate: 0.0
-            base: 0.4
-        - source: shadertoy
-          bars: [[36, 39]]
-          file: shaders/shadertoy/kaleidoscope_arc.glsl
-          uniforms:
-            u_ring0:
-              since:
-                track: kick
-              nth: 0
-            u_ring1:
-              since:
-                track: kick
-              nth: 1
-            u_ring2:
-              since:
-                track: kick
-              nth: 2
-            u_hue:
-              harmony:
-                score: input/esfolado/sheetsage
-                snap: beat
-              glide: 0.8
         - source: footage
           role: background
           fit: cover
@@ -149,20 +91,6 @@ video:
           role: background
           fit: cover
           loop: true
-          file: C:\Users\marco\Videos\ltx2\published\2026-01-14_DTeM3gdAFQ0__LTX-2_00007_.mp4
-          blocks:
-            - {bars: [9, 9], from: 2.667}
-        - source: footage
-          role: background
-          fit: cover
-          loop: true
-          file: C:\Users\marco\Videos\ltx2\published\2026-04-03_DWrj4OqRNZU__final.mp4
-          blocks:
-            - {bars: [10, 10], from: 13.333}
-        - source: footage
-          role: background
-          fit: cover
-          loop: true
           file: C:\Users\marco\Videos\ltx2\published\2026-04-15_DXIciYbMfEW__final.mp4
           blocks:
             - {bars: [11, 12]}
@@ -177,17 +105,257 @@ video:
           role: background
           fit: cover
           loop: true
-          file: C:\Users\marco\Videos\ltx2\published\2026-04-15_DXIciYbMfEW__final.mp4
+          file: C:\Users\marco\Videos\ltx2\published\2026-04-17_DXPYb2TgO9P__LTX23_multiframe_00084__newaudio_20260417_135609.mp4
+          blocks:
+            - {bars: [22, 23]}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-07-30_DbbCYq7x_0c__cebopao_cutback_13f_safe_concat_20260730_122812_newaudio_20260730_123853.mp4
+          blocks:
+            - {bars: [24, 24]}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-08-25_DceG1AMkTNH_04__LTX25_V2V_api_00181_.mp4
+          blocks:
+            - {bars: [25, 26], from: 2.666}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-10-01_Dd9BLpZETds_03__video-35.mp4
+          blocks:
+            - {bars: [27, 28]}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-06-29_DaLV5AYETl5_10__LTX23_multiframe_03089_.mp4
+          blocks:
+            - {bars: [29, 29], from: 2.667}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-06-30_DaN6cxaANik_08__LTX23_multiframe_02006_.mp4
+          blocks:
+            - {bars: [30, 30], from: 5.333}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-06-30_DaN6cxaANik_12__LTX23_multiframe_00295_.mp4
+          blocks:
+            - {bars: [31, 31]}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-06-18_DZvh1y4j0vq_02__video6.mp4
+          blocks:
+            - {bars: [32, 32]}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-06-18_DZvh1y4j0vq_04__video5.mp4
+          blocks:
+            - {bars: [33, 33], from: 5.333}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\published\2026-09-18_DdcQGX3mdDe_09__LTX23_multifram_api_08166_.mp4
+          blocks:
+            - {bars: [34, 34]}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\peppa_cursed\video2_safe_concat_20260525_112823_newaudio_20260526_210911_cutback_210f_cutfront_252f.mp4
+          blocks:
+            - {bars: [35, 35]}
+          lane_row: 0
+        - source: mandelbulb
+          bars: [[36, 37]]
+          lane_row: 0
+        - source: shadertoy
+          file: shaders/shadertoy/nebulosa_arc.glsl
+          bars: [[38, 39]]
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\letras\ChatGPT Image 28 de jul. de 2026, 20_56_56.png
+          blocks:
+            - {bars: [40, 40]}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\ComfyUI_00012_.mp4
+          blocks:
+            - {bars: [43, 43]}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\prepara\LTX-2_00096_.mp4
+          blocks:
+            - {bars: [44, 44]}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\LTX-2_00025_.mp4
+          blocks:
+            - {bars: [45, 45]}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\LTX-2_00007_.mp4
+          blocks:
+            - {bars: [46, 46]}
+          lane_row: 0
+        - source: chladni
+          bars: [[49, 49]]
+          lane_row: 0
+        - source: cubes
+          bars: [[50, 51]]
+          lane_row: 0
+          clips_dir: C:/Users/marco/Videos/ltx2/curadoria
+          faces_with_clips: 6.0
+          face_resolution: 512.0
+          one_clip_per_face: true
+          clip_reactivity:
+            clip_per_bar: true
+            clip_order: shuffle
+            seed: 7
+            triggers:
+              kick:
+                notes:
+                  - 36
+                actions:
+                  - reverse
+              snare:
+                notes:
+                  - 38
+                  - 40
+                actions:
+                  - next_clip
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\curadoria\uncoso\LTX23_multifram_api_05975_.mp4
+          blocks:
+            - {bars: [8, 8]}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\tororo\final.mp4
+          blocks:
+            - {bars: [7, 7]}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\2_3_samples\LTX_00074_.mp4
+          blocks:
+            - {bars: [6, 6]}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\2_3_samples\LTX-2_00020_.mp4
+          blocks:
+            - {bars: [9, 9]}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\2_3_samples\LTX-2_00023_.mp4
+          blocks:
+            - {bars: [10, 10]}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\2_3_samples\LTX-2_00079_.mp4
           blocks:
             - {bars: [15, 15]}
+          lane_row: 0
+        - source: footage
+          role: background
+          file: C:\Users\marco\Videos\ltx2\2_3_samples\LTX-2_00015_.mp4
+          fit: cover
+          loop: true
+          blocks:
+            - {bars: [16, 16], from: 8.0}
+          lane_row: 0
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: C:\Users\marco\Videos\ltx2\2_3_samples\ovo_sal.mp4
+          blocks:
+            - {bars: [17, 17], from: 5.333}
+          lane_row: 0
+        - source: footage
+          role: background
+          file: C:\Users\marco\Videos\ltx2\2_3_samples\LTX-2_00046_.mp4
+          fit: cover
+          loop: true
+          blocks:
+            - {bars: [19, 19], from: 5.333}
+          lane_row: 0
+        - source: eyes
+          bars: [[20, 20]]
+          lane_row: 0
+          wander: subbands.bass
+        - source: mouths
+          bars: [[21, 21]]
+          lane_row: 0
+          jaw_from: subbands.mid
+        - source: footage
+          role: background
+          fit: cover
+          loop: true
+          file: F:\workspace\AudioReativeController\input\esfolado\single_cover.jpg
+          blocks:
+            - {bars: [1, 1]}
           lane_row: 0
       fx:
         - {source: pixel_sort, bars: [[5, 8]], amount: {hits: {track: snare}, envelope: 0.35, gain: 0.8}, direction: [vertical, horizontal]}
         - {source: shadertoy, bars: [[9, 12]], file: shaders/shadertoy/fluxo_cromatico_arc.glsl, uniforms: {u_flow: {relative: subbands.bass, window: 6, gain: 2.0}, u_keep: 0.9, u_kick: {hits: {track: kick}, envelope: 0.25}, u_turn: {random_on: {track: snare}, ease: 0.2, gain: 6.283}}}
         - {source: flame_lens, bars: [[13, 17]], variations: {swirl: {hits: {track: snare}, envelope: 0.5, amount: 1.0}, bubble: {hits: {track: acid-tb-303, notes: [48, 52, 53]}, envelope: 0.4, amount: 0.8}}, turn: {rate: 1.5, base: 0.15, from: {hits: {track: kick}, envelope: 0.4}}, zoom: 1.3}
         - {source: shadertoy, bars: [[40, 43]], file: shaders/shadertoy/droste_arc.glsl, uniforms: {u_phase: {bar: {step: 1, morph: 0.6}}, u_kick: {hits: {track: kick}, envelope: 0.3}}}
-        - {source: datamosh, bars: [[44, 47]], length: 1/1, block: 16, push: 2.0, leak: 0.015}
-        - {source: feedback, bars: [[48, 54]], decay: 0.9, base_scale: 0.98, max_scale: 1.02, max_rotate: 0.02, hue_shift: 0.01}
+        - {source: datamosh, bars: [[44, 48]], length: 1/1, block: 16, push: 2.0, leak: 0.015}
     - source: group
       name: FG
       layers:
@@ -207,8 +375,7 @@ video:
           cutout: {track: render_output/footage/dancing/WanimateInterpolated_00063-audio_segments, drop: [1], feather: 1}
           name: the lion
           blocks:
-            - {bars: [5, 10]}
-            - {bars: [36, 39]}
+            - {bars: [5, 6]}
         - source: footage
           file: input/esfolado/dancing/WanimateInterpolated_00064-audio.mp4
           loop: true
@@ -223,37 +390,28 @@ video:
           cutout: {track: render_output/footage/dancing/WanimateInterpolated_00064-audio_segments, drop: [1], feather: 1}
           name: Cebolinha
           blocks:
-            - {bars: [5, 10]}
-            - {bars: [36, 39]}
+            - {bars: [5, 6]}
         - source: footage
           role: foreground
-          file: C:\Users\marco\Videos\ltx2\published\2026-09-23_DdpE4awGc_x_02__LTX23_V2V_api_01739_.mp4
+          file: C:\Users\marco\Videos\ltx2\published\2026-09-23_DdpE4awGc_x_01__video.mp4
           fit: contain
           loop: true
-          scale: 0.6
-          x: 0.5
-          y: 0.62
-          blocks:
-            - {bars: [16, 17], from: 13.333}
-          lane_row: 5
-        - source: footage
-          bars: [[18, 21], [40, 43]]
-          file: input/esfolado/dancing/WanimateInterpolated_00068-audio.mp4
-          loop: true
-          scale: 0.7
-          x: 0.3
+          scale: 0.9000000953674316
+          x: 0.19999995827674866
           y:
-            pitch:
-              track: FM5 MIDI (patches 2, 5, 10, 11, 12, 14)
-            low: 70
-            high: 86
-            glide: 0.1
-            gain: -0.25
-            bias: 0.75
-          cutout: {track: render_output/footage/dancing/WanimateInterpolated_00068-audio_segments, drop: [1], feather: 1}
-          name: the drawn boy
+            hits:
+              track: kick
+              notes:
+                - 36
+            envelope: 0.25
+            gain: -0.03999999910593033
+            bias: 0.30000001192092896
+          blocks:
+            - {bars: [18, 19], from: 10.667}
+          lane_row: 3
+          fx:
+            - {source: sam_cutout, seeds: auto, max_objects: 1, granularity: whole, reseed: 2.0, keep: figures, feather: 2}
         - source: footage
-          bars: [[18, 21], [40, 43]]
           file: input/esfolado/dancing/WanimateInterpolated_00061-audio.mp4
           loop: true
           flip: true
@@ -267,9 +425,9 @@ video:
             bias: 0.7
           cutout: {track: render_output/footage/dancing/WanimateInterpolated_00061-audio_segments, drop: [1], feather: 1}
           name: the creature
+          blocks:
+            - {bars: [18, 19]}
         - source: footage
-          bars: [[44, 51]]
-          fade_out: 3
           file: input/esfolado/dancing/WanimateInterpolated_00069-audio.mp4
           loop: true
           scale: 0.6
@@ -278,11 +436,18 @@ video:
             period: 4/1
             gain: 0.1
             bias: 0.25
-          y: 0.68
+          y:
+            hits:
+              track: kick
+            envelope: 0.2
+            gain: -0.025
+            bias: 0.72
           cutout: {track: render_output/footage/dancing/WanimateInterpolated_00069-audio_segments, drop: [1], feather: 1}
           name: the masked pair
+          blocks:
+            - {bars: [36, 37]}
+          lane_row: 5
         - source: footage
-          bars: [[44, 47]]
           file: input/esfolado/dancing/WanimateInterpolated_00070-audio.mp4
           loop: true
           flip: true
@@ -295,70 +460,103 @@ video:
             bias: 0.75
           y: 0.68
           cutout: {track: render_output/footage/dancing/WanimateInterpolated_00070-audio_segments, drop: [1], feather: 1}
-        - source: footage
-          file: input/esfolado/dancing/WanimateInterpolated_00057.png
-          scale:
-            hits:
-              track: ez-hihat
-              notes:
-                - 46
-            envelope: 0.3
-            gain: 0.4
-          x:
-            random_on:
-              track: ez-hihat
-              notes:
-                - 46
-            seed: 1
-            gain: 0.7
-            bias: 0.15
-          y:
-            random_on:
-              track: ez-hihat
-              notes:
-                - 46
-            seed: 2
-            gain: 0.35
-            bias: 0.2
-          cutout: {track: render_output/footage/dancing/WanimateInterpolated_00057_segments, drop: [1], feather: 1}
-          name: stickers
           blocks:
-            - {bars: [36, 47]}
-        - source: footage
-          file: input/esfolado/dancing/WanimateInterpolated_00065.png
-          scale:
-            hits:
-              track: snare
-            envelope: 0.25
-            gain: 0.35
-          x:
-            random_on:
-              track: snare
-            seed: 3
-            gain: 0.7
-            bias: 0.15
-          y:
-            random_on:
-              track: snare
-            seed: 4
-            gain: 0.3
-            bias: 0.25
-          cutout: {track: render_output/footage/dancing/WanimateInterpolated_00065_segments, drop: [1], feather: 1}
-          blocks:
-            - {bars: [36, 47]}
+            - {bars: [40, 41]}
+          lane_row: 5
+          fx:
+            - {source: sam_cutout, seeds: {at: 0.0, objects: [box: [0.2125, 0.2375, 0.6406, 1.0]]}, keep: all, feather: 2}
         - source: footage
           role: foreground
-          file: C:\Users\marco\Videos\ltx2\published\2026-09-02_Dcyg-ItkeJs_07__LTX23_multifram_api_05955_.mp4
+          file: C:\Users\marco\Videos\ltx2\published\2026-06-18_DZvh1y4j0vq_07__video2_cutback_8f.mp4
           fit: contain
           loop: true
           scale: 0.6
+          x: 0.7000000476837158
+          y:
+            hits:
+              track: kick
+              notes:
+                - 36
+            envelope: 0.25
+            gain: -0.03999999910593033
+            bias: 0.30000001192092896
+          blocks:
+            - {bars: [20, 21]}
+          lane_row: 3
+          fx:
+            - {source: sam_cutout, seeds: {at: 0.0, objects: [box: [0.1979, 0.0396, 0.7188, 0.9938]]}, keep: all, feather: 2}
+        - source: footage
+          file: input/esfolado/dancing/WanimateInterpolated_00063-audio.mp4
+          loop: true
+          scale: 0.55
+          x: 0.6700000762939453
+          y: 0.2199999988079071
+          cutout: {track: render_output/footage/dancing/WanimateInterpolated_00063-audio_segments, drop: [1], feather: 1}
+          name: the lion
+          blocks:
+            - {bars: [36, 37]}
+          lane_row: 3
+        - source: footage
+          role: foreground
+          file: C:\Users\marco\Videos\ltx2\LTX-2_00238_.mp4
+          fit: contain
+          loop: true
+          scale:
+            hits:
+              track: kick
+              notes:
+                - 36
+            envelope: 0.25
+            gain: 0.05000000074505806
+            bias: 1.5
+          x: 0.44999998807907104
+          y: 0.6000000238418579
+          blocks:
+            - {bars: [38, 39]}
+          lane_row: 3
+          fx:
+            - {source: sam_cutout, seeds: {at: 0.0, objects: [box: [0.3128, 0.5104, 0.7859, 0.9979]]}, keep: all, feather: 2}
+        - source: footage
+          role: foreground
+          file: C:\Users\marco\Videos\ltx2\emojibots\LTX23_multiframe_00246_.mp4
+          fit: contain
+          loop: true
+          scale: 0.6
+          x: 0.24999995529651642
+          y: 0.31999993324279785
+          blocks:
+            - {bars: [40, 41]}
+          lane_row: 4
+          fx:
+            - {source: sam_cutout, seeds: {at: 0.0, objects: [points: [[0.2812, 0.7167, 1]], points: [[0.6688, 0.8979, 1]], points: [[0.7958, 0.625, 1]], points: [[0.5896, 0.4229, 1]], points: [[0.8875, 0.4521, 1]], points: [[0.2542, 0.4167, 1]], points: [[0.3917, 0.2771, 1]], points: [[0.55, 0.2729, 1]]]}, keep: all, feather: 2}
+        - source: footage
+          role: foreground
+          file: C:\Users\marco\Videos\ltx2\LTX-2_00019_.mp4
+          fit: contain
+          loop: true
+          scale:
+            lfo: sine
+            period: 1/1
           x: 0.5
           y: 0.62
           blocks:
-            - {bars: [15, 16], from: 8.0}
-          lane_row: 4
+            - {bars: [46, 46]}
+          lane_row: 5
           fx:
             - {source: sam_cutout, seeds: auto, max_objects: 4, granularity: whole, reseed: 2.0, keep: figures, feather: 2}
+        - source: footage
+          role: foreground
+          file: C:\Users\marco\Videos\ltx2\curadoria\agosto\MiniMax_H3_api_00270_.mp4
+          fit: contain
+          loop: true
+          scale: 1.0000001192092896
+          x: 0.6000000238418579
+          y: 0.62
+          blocks:
+            - {bars: [49, 51], rate: 0.6999999284744263}
+          lane_row: 4
+          fx:
+            - {source: sam_cutout, seeds: {at: 0.0, objects: [points: [[0.489, 0.4917, 1], [0.575, 0.6458, 1], [0.6434, 0.7292, 1], [0.3544, 0.7021, 1], [0.5154, 0.8792, 1], [0.7426, 0.9062, 1], [0.6985, 0.5917, 1]]]}, keep: all, feather: 2}
         - source: footage
           file: input/esfolado/MiniMax_H3_00039_.mp4
           cues:
@@ -421,16 +619,59 @@ video:
                 - 1.45
           fit: cover
           name: the slap
+          mute:
+            -   - 35
+                - 36
+        - source: footage
+          role: foreground
+          file: C:\Users\marco\Videos\ltx2\published\2026-08-02_Dbi0h-sA6_g__final.mp4
+          fit: contain
+          loop: true
+          scale: 0.8500000834465027
+          x: 0.3999999761581421
+          y:
+            hits:
+              track: snare
+            envelope: 0.25
+            gain: -0.04
+            bias: 0.7
+          blocks:
+            - {bars: [20, 21]}
+          lane_row: 0
+          fx:
+            - {source: sam_cutout, seeds: {at: 0.0, objects: [points: [[0.3104, 0.4437, 1]], points: [[0.7271, 0.3812, 1]]]}, keep: all, feather: 2}
+        - source: footage
+          role: foreground
+          file: C:\Users\marco\Videos\ltx2\curadoria\LTX23_multiframe_02116_.mp4
+          fit: contain
+          loop: true
+          scale: 0.6
+          x: 0.5
+          y: 0.62
+          blocks:
+            - {bars: [48, 48]}
+          lane_row: 4
+          fx:
+            - {source: sam_cutout, seeds: {at: 0.0, objects: [box: [0.3104, 0.1458, 0.9708, 0.9854]]}, keep: all, feather: 2}
+        - source: footage
+          role: foreground
+          file: C:\Users\marco\Videos\ltx2\mini_dalle\video3.mp4
+          fit: contain
+          loop: true
+          scale:
+            lfo: sine
+            period: 1/1
+          x: 0.5
+          y: 0.62
+          blocks:
+            - {bars: [47, 47]}
+          lane_row: 4
+          fx:
+            - {source: sam_cutout, seeds: {at: 0.0, objects: [points: [[0.4625, 0.0667, 1], [0.2187, 0.4521, 1], [0.7896, 0.4417, 1], [0.4958, 0.4333, 1], [0.4729, 0.9438, 1]]]}, keep: all, feather: 2}
     - source: rgb_split
-      bars: [[5, 21], [36, 47]]
+      bars: [[5, 21], [36, 45]]
       amount: 10
       trigger: {track: snare, envelope: 0.15}
-    - source: grain
-      bars: [[22, 35]]
-      amount: 0.07
-      size: 1.4
-      trigger: {track: piano, envelope: 0.4}
-      burst: 0.05
     - source: rgb_split
       amount: 70
       trigger: {track: strong-clap, envelope: 0.9}
@@ -442,3 +683,5 @@ video:
       color: [0, 0, 0]
       bars: [[52, 54]]
       fade_in: 2
+    - source: datamosh
+      bars: [[46, 47]]

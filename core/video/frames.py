@@ -3,7 +3,7 @@ work on a render after it is made (SAM2 masks, followed drops)."""
 from __future__ import annotations
 
 import subprocess
-from typing import Iterator, Tuple
+from typing import Iterator, Optional, Tuple
 
 import numpy as np
 
@@ -17,12 +17,18 @@ def probe_video(path: str) -> Tuple[int, int, float]:
     return int(out[0]), int(out[1]), float(num) / float(den)
 
 
-def iter_frames(path: str) -> Iterator[np.ndarray]:
-    """Every frame in order, H×W×3 uint8 RGB (read-only arrays)."""
-    W, H, _ = probe_video(path)
+def iter_frames(path: str, first: int = 0, count: Optional[int] = None) -> Iterator[np.ndarray]:
+    """Every frame in order, H×W×3 uint8 RGB (read-only arrays); from frame ``first`` (ffmpeg
+    seeks there: the frames before are not decoded), ``count`` of them (None: to the end)."""
+    W, H, fps = probe_video(path)
     size = W * H * 3
-    dec = subprocess.Popen(["ffmpeg", "-v", "error", "-i", str(path), "-f", "rawvideo",
-                            "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE)
+    cmd = ["ffmpeg", "-v", "error"]
+    if first > 0:                                    # the first frame whose time is past half a frame before
+        cmd += ["-ss", f"{(first - 0.5) / fps:.6f}"]
+    cmd += ["-i", str(path)]
+    if count is not None:
+        cmd += ["-frames:v", str(int(count))]
+    dec = subprocess.Popen(cmd + ["-f", "rawvideo", "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE)
     try:
         while True:
             buf = dec.stdout.read(size)

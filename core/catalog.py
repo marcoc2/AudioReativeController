@@ -42,7 +42,7 @@ GENERATOR_CATEGORIES = ("Fractals", "Organic & particles", "Faces", "Patterns & 
 FX_CATEGORIES = ("Colour & light", "Time & trails", "Lens & distortion", "Matter", "Cuts", "Figures", "Tools")
 
 # numbers that set the work up rather than the look: not for the music to move
-SETUP_KEYS = {"seed", "supersample", "oversample", "resolution", "samples", "subframes"}
+SETUP_KEYS = {"seed", "supersample", "oversample", "resolution", "samples", "subframes", "rows"}
 
 # keys every layer has: the GUI sets them itself (the layer row, the timeline's blocks)
 COMMON_KEYS = {"source", "enabled", "blend", "opacity", "bars", "fade_in", "fade_out", "mask", "role",
@@ -171,7 +171,7 @@ def _example(doc: str, source: str) -> List[Param]:
                 value = yaml.safe_load(km.group(3)) if km.group(3) else None
             except yaml.YAMLError:
                 value = None
-            if isinstance(value, (dict, list)):
+            if isinstance(value, dict) or isinstance(value, list) and not _scalars(value):
                 value = None
             out.append(Param(km.group(2), value, (km.group(4) or "").strip()))
         elif out and line.strip().startswith("#") and indent is not None and len(line) - len(line.lstrip()) > len(indent):
@@ -179,6 +179,12 @@ def _example(doc: str, source: str) -> List[Param]:
         elif indent is not None and len(line) - len(line.lstrip()) < len(indent):
             break
     return out
+
+
+def _scalars(value) -> bool:
+    """A short list of plain values (a colour, a size): a default the GUI can show and edit."""
+    return isinstance(value, (list, tuple)) and 0 < len(value) <= 8 and \
+        all(isinstance(v, (int, float, str, bool)) for v in value)
 
 
 def _read_keys(cls) -> List[Param]:
@@ -203,7 +209,11 @@ def _read_keys(cls) -> List[Param]:
               and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str)):
             key = node.slice.value
         if key and key not in found:
-            found[key] = (getattr(node, "lineno", 0), default if not isinstance(default, (dict, list, tuple)) else None)
+            if isinstance(default, (list, tuple)) and _scalars(default):
+                default = list(default)
+            elif isinstance(default, (dict, list, tuple)):
+                default = None
+            found[key] = (getattr(node, "lineno", 0), default)
     return [Param(k, d) for k, (_, d) in sorted(found.items(), key=lambda kv: kv[1][0])]
 
 

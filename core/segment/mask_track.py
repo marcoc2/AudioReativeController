@@ -125,7 +125,10 @@ def write_mask_track(video: str, frames: Callable[[], Iterable[np.ndarray]], seg
                      reseed: float = 2.0, cut: float = 40.0, points_per_side: int = 32,
                      min_iou: float = 0.6, min_stability: float = 0.7, preview=None,
                      model: str = "", log: Callable[[str], None] = print,
-                     cuts: Optional[List[int]] = None, seeds: Optional[dict] = None) -> dict:
+                     cuts: Optional[List[int]] = None, seeds: Optional[dict] = None,
+                     ranges: Optional[List[tuple]] = None,
+                     frames_at: Optional[Callable[[int, int], Iterable[np.ndarray]]] = None,
+                     total: Optional[int] = None, first_id: int = 1) -> dict:
     """Find and follow the objects of a video; write the folder described above.
 
     ``frames()`` gives a fresh pass over the frames (called twice: cuts, then masks);
@@ -134,34 +137,56 @@ def write_mask_track(video: str, frames: Callable[[], Iterable[np.ndarray]], seg
     ``segmenter`` is a RegionTracker (or anything with its set_frame/add/step/forget/
     auto_masks); ``preview``, when given, gets ``.stdin.write`` of each tinted frame.
     ``seeds`` ({frame, objects: [{box, points}]} in pixels, ``seeds_in_pixels``): the objects
-    are the ones given, from that frame to the end (nothing before it); none found by SAM2."""
+    are the ones given, from that frame on (nothing before it); none found by SAM2.
+    ``ranges`` ([(first, end)], end not included): only those frames, each range as a shot
+    of its own to begin with (``frames_at(first, count)`` gives them; ``total``: the video's
+    frame count); the others get no labels. The track says which it has (``done``).
+    ``first_id``: the first object's id (a track grown by another run goes on numbering)."""
     out = Path(out_dir)
     (out / "labels").mkdir(parents=True, exist_ok=True)
     for old in (out / "labels").glob("*.png"):
         old.unlink()
 
-    if seeds is not None:                            # the objects asked for: followed to the end
-        n = sum(1 for _ in frames())
-        starts = [0]
-    elif cuts is None:
-        starts, n = find_cuts(frames(), cut)
+    if ranges is None:                               # every frame: one pass for the cuts, one for the masks
+        if seeds is not None:
+            n = sum(1 for _ in frames())
+            found = [0]
+        elif cuts is None:
+            found, n = find_cuts(frames(), cut)
+        else:
+            n = sum(1 for _ in frames())
+            found = sorted({0} | {int(c) for c in cuts if 0 < int(c) < n})
+        ranges = [(0, n)]
+        shots = [found]
+        passes = [lambda: frames()]
     else:
-        n = sum(1 for _ in frames())
-        starts = sorted({0} | {int(c) for c in cuts if 0 < int(c) < n})
-    ends = starts[1:] + [n]
-    shot_of = np.zeros(n, int)
-    for s, (a, b) in enumerate(zip(starts, ends)):
-        shot_of[a:b] = s
-    log(f"{n} frames, {len(starts)} shot(s)")
+        n = int(total) if total is not None else max(b for _, b in ranges)
+        ranges = [(max(0, int(a)), min(n, int(b))) for a, b in ranges if min(n, int(b)) > max(0, int(a))]
+        shots, passes = [], []
+        for a, b in ranges:
+            if seeds is not None:
+                found = [a]
+            elif cuts is not None:
+                found = sorted({a} | {int(c) for c in cuts if a < int(c) < b})
+            else:
+                inner, _ = find_cuts(frames_at(a, b - a), cut)
+                found = [a + k for k in inner]
+            shots.append(found)
+            passes.append(lambda a=a, b=b: frames_at(a, b - a))
+    log(f"{n} frames; {sum(b - a for a, b in ranges)} to follow in {len(ranges)} range(s), "
+        f"{sum(len(s) for s in shots)} shot(s)")
 
     objects: Dict[int, dict] = {}
     live: List[int] = []
     rows = []                     # (frame, id, share, cx, cy, w, h)
-    next_id, last_seed, labels = 1, 0, None
+    next_id, labels = int(first_id), None
     reseed_frames = int(round(reseed * fps)) if reseed and reseed > 0 else 0
-    t0 = time.time()
+    seed_frame = int(seeds["frame"]) if seeds is not None else -1
+    shot_list = []                # (first, last) of every shot followed
+    t0, done_frames = time.time(), 0
+    todo = sum(b - a for a, b in ranges)
 
-    def seed(i, frame, shot_end, taken=None):
+    def seed(i, frame, shot, shot_end, taken=None):
         nonlocal next_id
         room = max_objects - len(live)
         found = pick_objects(segmenter.auto_masks(frame, points_per_side, min_iou, min_stability),
@@ -171,64 +196,71 @@ def write_mask_track(video: str, frames: Callable[[], Iterable[np.ndarray]], seg
             next_id += 1
             segmenter.add(oid, frames=shot_end - i, mask=m)
             ys, xs = np.nonzero(m)
-            objects[oid] = {"id": oid, "shot": int(shot_of[i]), "first": i, "last": i,
+            objects[oid] = {"id": oid, "shot": shot, "first": i, "last": i,
                             "found": "shot" if taken is None else "reseed",
                             "colour": [int(v) for v in frame[ys, xs].mean(axis=0)],
                             "share": round(float(m.mean()), 5)}
             live.append(oid)
         return len(found)
 
-    seed_frame = min(int(seeds["frame"]), max(0, n - 1)) if seeds is not None else -1
-    for i, frame in enumerate(frames()):
-        if i >= n:
-            break
-        segmenter.set_frame(i, frame)
-        s = int(shot_of[i])
-        if seeds is not None:
-            if i == seed_frame:
-                for prompt in seeds["objects"]:
-                    oid = next_id
-                    next_id += 1
-                    segmenter.add(oid, frames=n - i, prompt=prompt)
-                    objects[oid] = {"id": oid, "shot": 0, "first": i, "last": i, "found": "seed",
-                                    "colour": [0, 0, 0], "share": 0.0}
-                    live.append(oid)
-        elif i == starts[s]:
-            for oid in live:
-                segmenter.forget(oid)
-            live.clear()
-            seed(i, frame, ends[s])
-            last_seed = i
-        elif reseed_frames and i - last_seed >= reseed_frames and len(live) < max_objects:
-            seed(i, frame, ends[s], taken=labels > 0)
-            last_seed = i
-        masks = segmenter.step()
-        live[:] = [oid for oid in live if oid in masks]
-        for oid, m in masks.items():                  # a seeded object: its colour once it is seen
-            if objects.get(oid, {}).get("found") == "seed" and not objects[oid]["share"] and m.any():
-                ys, xs = np.nonzero(m)
-                objects[oid]["colour"] = [int(v) for v in frame[ys, xs].mean(axis=0)]
-                objects[oid]["share"] = round(float(m.mean()), 5)
+    for (a, b), starts, frames_of in zip(ranges, shots, passes):
+        ends = starts[1:] + [b]
+        last_seed = a
+        s = -1
+        for k, frame in enumerate(frames_of()):
+            i = a + k
+            if i >= b:
+                break
+            segmenter.set_frame(i, frame)
+            if s + 1 < len(starts) and i == starts[s + 1]:   # a shot starts: what was followed is let go
+                s += 1
+                for oid in live:
+                    segmenter.forget(oid)
+                live.clear()
+                shot_list.append((i, ends[s] - 1))
+                if seeds is None:
+                    seed(i, frame, len(shot_list) - 1, ends[s])
+                    last_seed = i
+            if seeds is not None:
+                if i == seed_frame:
+                    for prompt in seeds["objects"]:
+                        oid = next_id
+                        next_id += 1
+                        segmenter.add(oid, frames=b - i, prompt=prompt)
+                        objects[oid] = {"id": oid, "shot": len(shot_list) - 1, "first": i, "last": i,
+                                        "found": "seed", "colour": [0, 0, 0], "share": 0.0}
+                        live.append(oid)
+            elif reseed_frames and i - last_seed >= reseed_frames and len(live) < max_objects:
+                seed(i, frame, len(shot_list) - 1, ends[s], taken=labels > 0)
+                last_seed = i
+            masks = segmenter.step()
+            live[:] = [oid for oid in live if oid in masks]
+            for oid, m in masks.items():              # a seeded object: its colour once it is seen
+                if objects.get(oid, {}).get("found") == "seed" and not objects[oid]["share"] and m.any():
+                    ys, xs = np.nonzero(m)
+                    objects[oid]["colour"] = [int(v) for v in frame[ys, xs].mean(axis=0)]
+                    objects[oid]["share"] = round(float(m.mean()), 5)
 
-        H, W = frame.shape[:2]
-        labels = np.zeros((H, W), np.uint16)
-        order = sorted(masks.items(), key=lambda kv: -int(kv[1].sum()))   # small ones end on top
-        for oid, m in order:
-            labels[m] = oid
-        for oid in np.unique(labels):
-            if oid == 0:
-                continue
-            m = labels == oid
-            ys, xs = np.nonzero(m)
-            x0, x1, y0, y1 = xs.min(), xs.max() + 1, ys.min(), ys.max() + 1
-            rows.append((i, int(oid), m.mean(), xs.mean() / W, ys.mean() / H, (x1 - x0) / W, (y1 - y0) / H))
-            objects[int(oid)]["last"] = i
-        cv2.imwrite(str(out / "labels" / f"{i:06d}.png"), labels)
-        if preview is not None:
-            preview.stdin.write(preview_frame(frame, labels).tobytes())
-        if (i + 1) % max(1, int(round(fps))) == 0:
-            log(f"  {i + 1:5d}/{n}  objects in view={len(masks)}  found so far={next_id - 1}  "
-                f"{(i + 1) / (time.time() - t0):.1f} fps")
+            H, W = frame.shape[:2]
+            labels = np.zeros((H, W), np.uint16)
+            order = sorted(masks.items(), key=lambda kv: -int(kv[1].sum()))   # small ones end on top
+            for oid, m in order:
+                labels[m] = oid
+            for oid in np.unique(labels):
+                if oid == 0:
+                    continue
+                m = labels == oid
+                ys, xs = np.nonzero(m)
+                x0, x1, y0, y1 = xs.min(), xs.max() + 1, ys.min(), ys.max() + 1
+                rows.append((i, int(oid), m.mean(), xs.mean() / W, ys.mean() / H, (x1 - x0) / W, (y1 - y0) / H))
+                objects[int(oid)]["last"] = i
+            cv2.imwrite(str(out / "labels" / f"{i:06d}.png"), labels)
+            if preview is not None:
+                preview.stdin.write(preview_frame(frame, labels).tobytes())
+            done_frames += 1
+            if done_frames % max(1, int(round(fps))) == 0:
+                log(f"  {done_frames:5d}/{todo}  objects in view={len(masks)}  found so far={next_id - first_id}  "
+                    f"{done_frames / (time.time() - t0):.1f} fps")
 
     stats = np.zeros((n, next_id, len(STATS)), np.float32)
     for i, oid, *vals in rows:
@@ -241,10 +273,11 @@ def write_mask_track(video: str, frames: Callable[[], Iterable[np.ndarray]], seg
                        "granularity": granularity, "reseed": reseed, "cut": cut,
                        "points_per_side": points_per_side, "min_iou": min_iou,
                        "min_stability": min_stability, "seeds": seeds},
-            "shots": [{"first": a, "last": b - 1} for a, b in zip(starts, ends)],
+            "done": [[a, b] for a, b in ranges],
+            "shots": [{"first": a, "last": b} for a, b in shot_list],
             "objects": [objects[k] for k in sorted(objects)]}
     (out / "track.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
-    log(f"done: {out}  ({len(objects)} objects in {len(starts)} shot(s))")
+    log(f"done: {out}  ({len(objects)} objects in {len(shot_list)} shot(s))")
     return meta
 
 
@@ -271,12 +304,21 @@ class MaskTrack:
         return i if 0 <= i < self.frames else None
 
     def labels(self, i: int) -> np.ndarray:
+        """Frame ``i``'s label map; a frame the track was not made for (``done``: the ranges it
+        has) has none: nothing there."""
         if self._cached[0] != i:
             lab = cv2.imread(str(self.folder / "labels" / f"{i:06d}.png"), cv2.IMREAD_UNCHANGED)
             if lab is None:
-                raise FileNotFoundError(f"{self.folder}: no labels for frame {i}")
+                if self.has(i):
+                    raise FileNotFoundError(f"{self.folder}: no labels for frame {i}")
+                lab = np.zeros((self.height, self.width), np.uint16)
             self._cached = (i, lab)
         return self._cached[1]
+
+    def has(self, i: int) -> bool:
+        """The track was made for frame ``i`` (an old one, without ``done``: for all of them)."""
+        done = self.meta.get("done")
+        return 0 <= i < self.frames if done is None else any(a <= i < b for a, b in done)
 
     def labels_at(self, t: float) -> Optional[np.ndarray]:
         i = self.frame_at(t)

@@ -901,14 +901,18 @@ class EyesLayer:
           seed: 3
           supersample: 2
           depth: 0.9             # how far in front of the wall the gaze point floats (bigger = eyes look straighter)
-          hue: 0.55              # iris colour; a ``harmony:`` block lets the chord choose it,
+          hue: 0.55              # iris colour (0..1 round the wheel); a ``harmony:`` block lets the chord choose it,
           iris_hues: [0.08, 0.6] # ... mapped onto real iris colours: amber -> green -> blue
-          pupil_from: texture.loudness   # feature that dilates the pupils (0..1)
+          pupil_from: texture.loudness   # what dilates the pupils (0..1): a feature or any knob
           wander: 0.15           # how far the gaze drifts on its own (frame height units)
+          light: 1.0             # how lit the wall is
           hits:                  # gestures: saccade (gaze jumps) | dilate | blink
             - {track: snare, gesture: saccade}
             - {track: kick, gesture: dilate, envelope: 0.25}
             - {track: lead, gesture: blink, envelope: 0.20}
+
+    depth, hue, pupil_from, wander and light are knobs (``_knob``): a number, or something in the
+    music that moves them; rows, seed and supersample are fixed (the wall is laid out once).
     """
 
     GESTURES = ("saccade", "dilate", "blink")
@@ -919,12 +923,17 @@ class EyesLayer:
         self.fps = fps
         self.features_at = features_at
         self.sys = EyesSystem(width, height, rows=float(spec.get("rows", 5)), seed=int(spec.get("seed", 0)),
-                              supersample=int(spec.get("supersample", 2)), depth=float(spec.get("depth", 0.9)))
+                              supersample=int(spec.get("supersample", 2)))   # depth: a knob, each frame
         self.aspect = width / height
-        self._pupil_from = spec.get("pupil_from", "texture.loudness")
+        knob = lambda key, default: _music_knob(key, spec.get(key, default), notes, features_at,  # noqa: E731
+                                                onset_loader, grid)
+        self._pupil_from = knob("pupil_from", "texture.loudness")
         lo, hi = spec.get("iris_hues", (0.08, 0.6))
         self._iris_hues = (float(lo), float(hi))
-        self._wander = float(spec.get("wander", 0.15))
+        self._wander = knob("wander", 0.15)
+        self._depth = knob("depth", 0.9)
+        self._light = knob("light", 1.0)
+        self._hue = knob("hue", 0.55)
         self._rng = np.random.default_rng(int(spec.get("seed", 0)))
         hspec = spec.get("harmony")
         self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
@@ -942,7 +951,7 @@ class EyesLayer:
         self._gaze = np.zeros(2)
         self._smooth: dict = {}
         self._last_t: Optional[float] = None
-        self.hue = float(spec.get("hue", 0.55))
+        self.hue = None
 
     def _lowpass(self, name, value, dt, tau):
         prev = self._smooth.get(name, value)
@@ -953,8 +962,7 @@ class EyesLayer:
     def frame_at(self, t: float) -> np.ndarray:
         dt = 1.0 / self.fps if self._last_t is None else min(0.1, max(0.0, t - self._last_t))
         self._last_t = t
-        feats = (self.features_at(t) or {}) if self.features_at else {}
-        pupil = self._lowpass("pupil", _feature(feats, self._pupil_from, 0.3), dt, 0.15)
+        pupil = self._lowpass("pupil", float(self._pupil_from(t)), dt, 0.15)
         dilate = blink = 0.0
         for gesture, times, dur in self._gestures:
             i = int(np.searchsorted(times, t, side="right")) - 1
@@ -970,16 +978,20 @@ class EyesLayer:
             self._n_sacc = n_sacc
             self._target = self._rng.uniform(-1, 1, 2) * np.array([self.aspect * 0.8, 0.7])
         # slow drift around the target
-        drift = self._wander * np.array([math.sin(0.37 * t), math.sin(0.23 * t + 1.0)])
+        drift = float(self._wander(t)) * np.array([math.sin(0.37 * t), math.sin(0.23 * t + 1.0)])
         self._gaze += (self._target + drift - self._gaze) * (1 - math.exp(-dt / 0.06))
-        if len(self._chords):
-            i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
-            if i >= 0:
-                lo, hi = self._iris_hues
-                target_hue = lo + (hi - lo) * VeilsLayer.hue_of_root(self._chords[i].pitch)
-                self.hue += (target_hue - self.hue) * (1 - math.exp(-dt / 1.2))
+        hue = float(self._hue(t))
+        if self.hue is None or not len(self._chords):
+            self.hue = hue
+        i = int(np.searchsorted(self._chord_times, t, side="right")) - 1 if len(self._chords) else -1
+        if i >= 0:                                                        # the chord chooses it
+            lo, hi = self._iris_hues
+            target_hue = lo + (hi - lo) * VeilsLayer.hue_of_root(self._chords[i].pitch)
+            self.hue += (target_hue - self.hue) * (1 - math.exp(-dt / 1.2))
+        self.sys.depth = float(self._depth(t))
         return self.sys.render(t, gaze=tuple(self._gaze), saccade=n_sacc,
-                               pupil=min(1.0, 0.15 + 0.5 * pupil + 0.6 * dilate), blink=blink, hue=self.hue)
+                               pupil=min(1.0, 0.15 + 0.5 * pupil + 0.6 * dilate), blink=blink, hue=self.hue,
+                               light=float(self._light(t)))
 
 
 class MouthsLayer:
@@ -992,11 +1004,16 @@ class MouthsLayer:
           voice: stems_output/<hash>/demucs/<song>_(Vocals)_htdemucs_6s.flac
                                  # the vocal stem: its level and F1 drop the jaw, its F2
                                  # spreads the lips ("i") or rounds them ("u"); see core/voice
-          jaw_from: stems.vocals # without ``voice:``, a feature that opens the mouths (0..1)
+          jaw_from: stems.vocals # without ``voice:``, what opens the mouths (0..1): a feature or any knob
+          tint: 0.0              # how bruised the lips are (0..1); a ``harmony:`` block lets the chord choose it
+          light: 1.0             # how lit the wall is
           harmony: {score: input/song/sheetsage, snap: auto}   # the chord bruises the lips
           hits:                  # gestures: clench (teeth bared) | tremble | gasp (jaw drops)
             - {track: snare, gesture: clench, envelope: 0.2}
             - {track: kick, gesture: tremble, envelope: 0.15}
+
+    jaw_from, tint and light are knobs (``_knob``): a number, or something in the music that
+    moves them; rows, seed and supersample are fixed (the wall is laid out once).
     """
 
     GESTURES = ("clench", "tremble", "gasp")
@@ -1012,7 +1029,11 @@ class MouthsLayer:
         if spec.get("voice"):
             from core.voice import read_voice
             self._voice = read_voice(spec["voice"])
-        self._jaw_from = spec.get("jaw_from", "stems.vocals")
+        knob = lambda key, default: _music_knob(key, spec.get(key, default), notes, features_at,  # noqa: E731
+                                                onset_loader, grid)
+        self._jaw_from = knob("jaw_from", "stems.vocals")
+        self._tint = knob("tint", 0.0)
+        self._light = knob("light", 1.0)
         hspec = spec.get("harmony")
         self._chords = _layer_events(hspec, notes, onset_loader, grid) if hspec else []
         self._chord_times = np.array([e.time for e in self._chords], dtype=float)
@@ -1024,7 +1045,7 @@ class MouthsLayer:
                                    max(1e-3, float(g.get("envelope", 0.2)))))
         self._smooth: dict = {}
         self._last_t: Optional[float] = None
-        self.tint = float(spec.get("tint", 0.0))
+        self.tint = None
 
     def _lowpass(self, name, value, dt, tau):
         prev = self._smooth.get(name, value)
@@ -1038,8 +1059,7 @@ class MouthsLayer:
         if self._voice is not None:
             jaw, spread, _ = self._voice.at(t)
         else:
-            feats = (self.features_at(t) or {}) if self.features_at else {}
-            jaw, spread = _feature(feats, self._jaw_from, 0.0), 0.0
+            jaw, spread = float(self._jaw_from(t)), 0.0
         # the jaw drops fast and closes a little slower, as a real one does
         tau = 0.025 if jaw > self._smooth.get("jaw", 0.0) else 0.05
         jaw = self._lowpass("jaw", jaw, dt, tau)
@@ -1056,13 +1076,15 @@ class MouthsLayer:
                 tremble = max(tremble, k)
             else:
                 gasp = max(gasp, math.sin(math.pi * min(1.0, (t - times[i]) / dur)))
-        if len(self._chords):
-            i = int(np.searchsorted(self._chord_times, t, side="right")) - 1
-            if i >= 0:
-                target = VeilsLayer.hue_of_root(self._chords[i].pitch)
-                self.tint += (target - self.tint) * (1 - math.exp(-dt / 1.2))
+        tint = float(self._tint(t))
+        if self.tint is None or not len(self._chords):
+            self.tint = tint
+        i = int(np.searchsorted(self._chord_times, t, side="right")) - 1 if len(self._chords) else -1
+        if i >= 0:                                                        # the chord chooses it
+            target = VeilsLayer.hue_of_root(self._chords[i].pitch)
+            self.tint += (target - self.tint) * (1 - math.exp(-dt / 1.2))
         return self.sys.render(t, jaw=max(jaw, 0.9 * gasp), spread=spread * (1.0 - gasp), clench=clench,
-                               tremble=tremble, tint=self.tint)
+                               tremble=tremble, tint=self.tint, light=float(self._light(t)))
 
 
 class FerrofluidLayer:
@@ -2679,6 +2701,7 @@ class CubesLayer:
           n_cubes: 40                     # cubes in the periodic corridor
           faces_with_clips: 3             # 0..6 faces showing the clip screen
           face_resolution: 256            # per-face texture size (RAM/CPU)
+          samples: 8                      # smooth cube edges (MSAA samples; 0 off)
           crop_faces: true                # center-crop 16:9 clips to fill (no bars)
           one_clip_per_face: false        # false: same screen on all faces;
                                           # true: an independent clip per face-index
@@ -2769,7 +2792,7 @@ class CubesLayer:
 def build_compositor(base, video_cfg: dict, notes: Sequence,
                      width: int, height: int, onset_loader=None,
                      fps: int = 24, features_at=None, grid=None,
-                     masks: Optional[str] = None) -> "Compositor":
+                     masks: Optional[str] = None, span=None) -> "Compositor":
     """Compose ``base`` (ClipComposer) with the scene's extra layers.
 
     Layers with ``source: clips`` map to the base; unknown sources raise.
@@ -2792,7 +2815,8 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
     from core.video.track_fx import expand_groups
     layers_cfg = expand_groups(video_cfg.get("layers") or [{"source": "clips"}])   # the background lane, spliced
     from core.video import sam_cutout                   # a clip's sam_cutout FX: its cutout (SAM2 once, cached)
-    layers_cfg = [sam_cutout.resolve(spec) for spec in layers_cfg]
+    layers_cfg = [sam_cutout.resolve(spec, grid=grid, span=span) for spec in layers_cfg]   # span: the
+    # song's seconds being rendered (None: all of it): SAM2 cuts out only what shows there
     windows: list = []
     tracks: dict = {}                                   # one mask-track reader per folder, shared
     for spec in layers_cfg:
@@ -2931,7 +2955,7 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             def build(layers, given):
                 return build_compositor(given, {"layers": layers}, notes, width, height,
                                         onset_loader=onset_loader, fps=fps, features_at=features_at,
-                                        grid=grid, masks=masks)
+                                        grid=grid, masks=masks, span=span)
             comp.add(Group(spec, build, width, height, base), blend if len(comp) else "normal", op_fn)
             continue
         if src_name == "flythrough":
@@ -3032,7 +3056,7 @@ def build_compositor(base, video_cfg: dict, notes: Sequence,
             def build(layers, given):
                 return build_compositor(given, {"layers": layers}, notes, width, height,
                                         onset_loader=onset_loader, fps=fps, features_at=features_at,
-                                        grid=grid, masks=masks)
+                                        grid=grid, masks=masks, span=span)
             comp._layers[i] = (with_fx(src, spec["fx"], build, base, bool(spec.get("spill", False))),
                                blend, opacity, matte)
     for i, (window, spec) in enumerate(zip(windows, enabled)):   # post-ops are added without opacity:

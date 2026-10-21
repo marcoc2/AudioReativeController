@@ -435,3 +435,61 @@ def test_an_opacity_knob_survives_the_layer_editor():
     assert "opacity" in rows[1]["params"]
     assert _rows_to_layers(rows, doc)[1]["opacity"] == {"hits": {"track": "kick"}}
     assert _rows_to_layers(_layers_to_rows({"layers": [{"source": "julia", "opacity": 0.5}]}))[0]["opacity"] == 0.5
+
+
+def test_the_arrange_renders_the_whole_song_or_some_bars(monkeypatch):
+    """The Arrange's Render: the whole song from 0 (whatever the studio's start and bars),
+    or bars a..b from bar a's downbeat, each to a file of its own."""
+    import numpy as np
+    import arc_studio
+    from core.rhythm.grid import RhythmGrid
+    _reset_state()
+    S.start_time, S.render_job = 130.0, None
+    S.grid = RhythmGrid(bpm=90.0, fps=30, beats=np.arange(40) * 0.6667,
+                        downbeats=np.array([0.0, 2.0, 4.667, 7.333, 10.0]))
+    ran = []
+    monkeypatch.setattr(arc_studio, "_run_render", lambda cmd, start: ran.append((cmd, start)))
+    host = arc_studio._ArrangeHost()
+    assert host.render() == ""
+    cmd, start = ran[-1]
+    assert cmd[cmd.index("--bars") + 1] == "0" and "--start-time" not in cmd and start == 0.0
+    assert cmd[cmd.index("--output") + 1] == "render_output/song_clips_enxame.mp4"
+    assert host.render(4, 3) == ""                                       # bars 3..4, either way round
+    cmd, start = ran[-1]
+    assert cmd[cmd.index("--bars") + 1] == "2" and cmd[cmd.index("--start-time") + 1] == "4.667"
+    assert cmd[cmd.index("--output") + 1] == "render_output/song_clips_enxame_bars3-4.mp4" and start == 4.667
+    S.render_job = {"running": True}
+    assert "already" in host.render()
+    S.render_job = None
+
+
+def test_a_render_tells_how_far_it_is_and_stops(monkeypatch):
+    """Its lines reach the terminal; "frames=N" and "  n/N  t=" lines say how far it is."""
+    import time
+    import arc_studio
+    monkeypatch.setattr(arc_studio, "_log", lambda msg: None)
+    monkeypatch.setattr(arc_studio, "_set_status", lambda msg: None)
+    monkeypatch.setattr(arc_studio.dpg, "does_item_exist", lambda tag: False)   # no window here
+    script = ("import time\nprint('BPM=90.0  frames=48  clips=3')\n"
+              "for i in range(0, 48, 24): print(f'  {i:5d}/48  t={i/24:.1f}s', flush=True)\n"
+              "print('Done! -> out.mp4')\n")
+    arc_studio._run_render([sys.executable, "-c", script, "--output", "out.mp4"], 0.0)
+    host = arc_studio._ArrangeHost()
+    for _ in range(100):
+        if not host.render_state()["running"]:
+            break
+        time.sleep(0.05)
+    st = host.render_state()
+    assert st["result"] == "done" and st["done"] == st["total"] == 48 and st["out"] == "out.mp4"
+    arc_studio._run_render([sys.executable, "-c", "import time; print('frames=10', flush=True); time.sleep(30)",
+                            "--output", "x.mp4"], 0.0)
+    for _ in range(100):
+        if host.render_state()["total"] == 10:
+            break
+        time.sleep(0.05)
+    host.stop_render()
+    for _ in range(100):
+        if not host.render_state()["running"]:
+            break
+        time.sleep(0.05)
+    assert host.render_state()["result"] == "stopped"
