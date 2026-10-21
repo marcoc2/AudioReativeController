@@ -147,6 +147,7 @@ class Session(Edits, KnobEditor, Plugin, LayerText, ProjectEdits, Clips):
             self.montage_gen = 0
             self.segments: list = []
             self.stem_names: list = []      # the stems the features have (stems.<name> a knob reads)
+            self.stem_waves: list = []      # the stems with sound as the timeline draws them (load.stem_waves)
             self.board_links = None         # what Copy took: music links, FX
             self.board_fx = None
 

@@ -107,6 +107,7 @@ const ON = {
   state: st => { if (S) later(() => apply(st)); },
   montage: segs => { montage = segs || []; streamEdited(); later(() => { renderTimeline(); if (sel && sel.type === "montage") renderInspector(); }); },
   knobs: () => { knobs.clear(); if (sel && sel.type === "member") renderInspector(); },
+  stems: e => { stemWaves = (e && e.list) || []; if (S) later(renderTimeline); },
   covers: got => { for (const [clip, cover] of Object.entries(got || {})) thumbs.set(clip, cover); scheduleThumbRedraw(); },
   lengths: got => { Object.assign(clipLens, got || {}); scheduleThumbRedraw(); },
   dropped: e => onDropped(e),
@@ -156,6 +157,7 @@ const xToBar = x => Math.max(1, Math.min(NB(), Math.floor(x / ppb) + 1));
 let actx = null, audioBuf = null, src = null, playing = false, startCtx = 0, startPos = 0, startPerf = 0, pausedAt = 0;
 let loop = null;               // [first bar, last bar]
 let peaks = null, peaksHz = 200;
+let stemWaves = [];            // [{name, hz, values}]: the stems with sound (core/web/load.py stem_waves)
 let holding = false;            // playing, but the song waits for the engine's frames
 function now() {
   if (!playing || holding) return pausedAt;
@@ -781,6 +783,7 @@ function syncEngineVideo(t) {
 // row more, to put something new on.
 const LANES = [
   { id: "audio", name: "Audio", kind: "audio", c: "var(--muted)" },
+  { id: "stems", name: "Stems", kind: "stems", c: "var(--muted)" },       // one lane per stem with sound
   { id: "midi", name: "MIDI", kind: "midi", c: "var(--accent)" },
   { id: "master", name: "Master", sub: "FX over everything", kind: "track", c: "var(--lane-fx)" },
   { id: "fg", name: "FG", sub: "foreground, on its own", kind: "track", c: "var(--lane-fg)", group: "FG" },
@@ -809,6 +812,11 @@ function computeLayout() {
   let y = 0; const L = [];
   for (const d of LANES) {
     let hh = 0, shown = 0;
+    if (d.kind === "stems") {                    // compact: the song's parts, under the mix
+      const sh = Math.max(18, Math.min(44, Math.round(rowH * 0.8)));
+      stemWaves.forEach((sw, i) => { L.push({ id: `stem:${sw.name}`, name: sw.name, sub: "stem", kind: "stem", c: STEM_COLORS[i % STEM_COLORS.length], wave: sw, top: y, h: sh, shown: 0 }); y += sh; });
+      continue;
+    }
     if (d.kind === "audio") hh = Math.max(34, Math.min(90, Math.round(rowH * 1.5)));
     else if (d.kind === "midi") hh = 8 + 9 * Math.max(1, (S ? S.tracks.length : 1));
     else if (d.kind === "clips") { if (!has.clips) continue; hh = Math.max(26, rowH + 6); }   // a scene may have no montage
@@ -861,6 +869,7 @@ function renderTimeline() {
     const lit = sel && ((sel.type === "lane" && l.group === sel.group) || (sel.type === "master" && l.id === "master") || ((sel.type === "clips" || sel.type === "montage") && l.id === "clips"));
     const lane = h("div", { class: "lane " + l.kind + (lit ? " lit" : ""), dataset: { lane: l.id }, style: `top:${l.top}px; height:${l.h}px; background-image: repeating-linear-gradient(to right, var(--line-2) 0 1px, transparent 1px ${4 * ppb}px), repeating-linear-gradient(to right, var(--line) 0 1px, transparent 1px ${ppb}px);` });
     if (l.kind === "audio") { const c = canvasFor(width, l.h); lane.append(c); drawWave(c); }
+    if (l.kind === "stem") { const c = canvasFor(width, l.h); lane.append(c); drawStem(c, l.wave, l.c); }
     if (l.kind === "midi") { const c = canvasFor(width, l.h); lane.append(c); drawMidi(c); }
     if (l.kind === "clips") drawCells(lane, l);
     if (l.kind === "track") {
@@ -917,6 +926,20 @@ function drawWave(cv) {
     const hh = Math.min(1, m) * (mid - 2 * d);
     g.fillRect(x, mid - hh, 1.2 * d, hh * 2);
   }
+}
+// a stem's energy, mirrored like the mix's wave, in its own colour
+const STEM_COLORS = ["#6aa7d8", "#9fb36a", "#d78bb0", "#e3c15b", "#3fb6a8", "#c27cf0"];
+function drawStem(cv, sw, colour) {
+  if (!sw || !sw.values.length) return;
+  const g = cv.getContext("2d"), d = devicePixelRatio || 1, mid = cv.height / 2, v = sw.values, hz = sw.hz;
+  g.fillStyle = colour; g.globalAlpha = 0.85;
+  for (let x = 0; x < cv.width; x += 2) {
+    const t0 = xToT(x / d), t1 = xToT((x + 2) / d);
+    let m = 0; for (let i = Math.floor(t0 * hz); i <= Math.floor(t1 * hz) && i < v.length; i++) if (v[i] > m) m = v[i];
+    const hh = m * (mid - 1 * d);
+    if (hh > 0.3) g.fillRect(x, mid - hh, 1.2 * d, hh * 2);
+  }
+  g.globalAlpha = 1;
 }
 const TRACK_COLORS = ["#f0a04b", "#c27cf0", "#3fb6a8", "#6aa7d8", "#e3c15b", "#e2665a", "#9fb36a", "#d78bb0"];
 function drawMidi(cv) {
@@ -2736,7 +2759,7 @@ async function openProject(source) {
   const name = typeof source === "string" ? source : "the command line's project";
   log("out", `open ${name}`);
   loadGen++;
-  S = null; members = []; montage = []; pins = {}; sel = null; loop = null; engine = null; peaks = null; audioBuf = null; audioUrl = null;
+  S = null; members = []; montage = []; pins = {}; sel = null; loop = null; engine = null; peaks = null; audioBuf = null; audioUrl = null; stemWaves = [];
   blockCovers.clear(); coversAsked.clear(); entryKey = null; showEntryPanel();
   picked = null; pickedFx = null; rowsOf = {}; groups = {}; has = {}; board = {}; montageBars = []; lastNote = ""; showPicked();
   knobs.clear(); thumbs.clear(); shaders.clear(); dirty = false; savedAt = "";
@@ -2763,6 +2786,7 @@ function onOpened(st) {
   document.title = `${st.project.name} · ARC Studio`;
   apply(st);
   if (st.montage) montage = st.montage;
+  stemWaves = st.stems || [];
   buildMeters(); renderBrowser(); renderTimeline(); showResolution();
   loadClipList(st.clips_dir || "");
   if (st.song.audio_url) loadAudio(st.song.audio_url);

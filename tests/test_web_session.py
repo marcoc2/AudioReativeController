@@ -461,3 +461,18 @@ def test_without_a_montage_the_cuts_are_where_the_bg_blocks_begin(tmp_path):
     s.new_member("bg", "chladni", 5, 8)
     db = s.bars()
     assert s.cut_times() == [pytest.approx(db[4])]               # bar 5 begins
+
+
+def test_each_stem_with_sound_is_a_timeline_lane():
+    import numpy as np
+    from core.web.load import STEM_HZ, stem_waves
+
+    class Extractor:
+        times = np.arange(0, 400) / 100.0                 # 4 s at 100 frames a second
+        stems_energy = {"vocals": np.zeros(400),        # the AI's, skipped: no sound
+                        "guitar": np.r_[np.zeros(200), np.full(200, 0.5)],
+                        "piano": np.r_[np.full(100, 0.25), np.zeros(300)]}
+    got = stem_waves(Extractor())
+    assert [w["name"] for w in got] == ["guitar", "piano"] and got[0]["hz"] == STEM_HZ
+    assert got[0]["values"][2 * STEM_HZ - 1] == 0.0 and got[0]["values"][2 * STEM_HZ] == 0.5
+    assert max(got[1]["values"][:STEM_HZ]) == 0.25 and max(got[1]["values"][STEM_HZ:]) == 0.0

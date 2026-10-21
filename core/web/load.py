@@ -39,6 +39,26 @@ NAMES = dict(STEPS)
 COVERS_MAX = 400
 
 
+STEM_HZ = 50                    # a stem lane's values a second
+
+
+def stem_waves(ex) -> list:
+    """Each stem with sound (the project's own, or the AI's) as a timeline lane draws it: its
+    energy (0..1), the loudest of each 1/STEM_HZ s, in the order the features have them."""
+    import numpy as np
+    times = np.asarray(ex.times if ex.times is not None else [], float)
+    out = []
+    for name, energy in (ex.stems_energy or {}).items():
+        e = np.asarray(energy if energy is not None else [], float)[:len(times)]
+        if not len(e) or float(e.max()) <= 0:
+            continue
+        idx = (times[:len(e)] * STEM_HZ).astype(int)
+        v = np.zeros(int(idx.max()) + 1)
+        np.maximum.at(v, idx, np.clip(e, 0.0, 1.0))
+        out.append({"name": str(name), "hz": STEM_HZ, "values": [round(float(x), 3) for x in v]})
+    return out
+
+
 class Cancelled(BaseException):
     """A newer opening (or Cancel) made this one stale; BaseException, so the ``except
     Exception`` inside the extractor's stem separation lets it through."""
@@ -215,7 +235,8 @@ class Loader:
         s = self.s
         with s.lock:
             return {**s.state(), "project": s.project_info(), "song": s.song(), "tracks": s.tracks(),
-                    "catalog": s.catalog(), "clips": s.clips(), "knob_hz": 30, "load": self.view()}
+                    "catalog": s.catalog(), "clips": s.clips(), "knob_hz": 30, "load": self.view(),
+                    "stems": s.stem_waves}
 
     # -- each step -----------------------------------------------------------------------
     def _project(self, gen: int, source) -> None:
@@ -307,6 +328,8 @@ class Loader:
             raise Cancelled()
         s.set_features(lambda t: ex.get_features_at_time(t, apply_gate=False))
         s.stem_names = sorted(ex.stems_energy)
+        s.stem_waves = stem_waves(ex)
+        self.events.emit("stems", {"gen": gen, "list": s.stem_waves})
         self.extractor = ex
         self._set(gen, "features", "running", message=f"{ex.duration:.1f} s of features")
         self.events.emit("knobs", {"gen": gen})
