@@ -48,6 +48,10 @@ def _guarded(fn):
     return call
 
 
+UI_PREFS = {"theme": str, "right_w": int}     # the window's look, kept between runs (the page's
+# storage is not: pywebview runs private)
+
+
 def prefs() -> dict:
     try:
         got = json.loads(PREFS.read_text(encoding="utf-8"))
@@ -123,7 +127,20 @@ class Api:
         first = self._first
         self._first = None
         return {"first": first if isinstance(first, (str, dict)) else None, "recent": self.recent(),
-                "projects": self.projects(), "in_window": not self._browser}
+                "projects": self.projects(), "in_window": not self._browser, "ui": self.ui_prefs()}
+
+    @_guarded
+    def ui_prefs(self):
+        """How the window looks, as it was left: its theme, the right column's width."""
+        got = prefs().get("ui")
+        return {k: v for k, v in (got if isinstance(got, dict) else {}).items() if k in UI_PREFS}
+
+    @_guarded
+    def set_ui_pref(self, key: str, value):
+        if key not in UI_PREFS or not isinstance(value, UI_PREFS[key]):
+            return {"error": f"{key}: not a setting of the window"}
+        remember(ui={**self.ui_prefs(), key: value})
+        return self.ui_prefs()
 
     @_guarded
     def projects(self):

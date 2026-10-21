@@ -38,3 +38,13 @@ def test_a_song_folder_becomes_a_project(tmp_path, monkeypatch):
     assert set(proj["stems"]) == {"guitar", "piano"} and proj["skip_separation"] is True
     assert (tmp_path / "scenes" / "cerne.yaml").is_file()
     assert "exists" in api.new_song_project(spec)["error"]
+
+
+def test_the_windows_look_is_kept_for_the_next_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_mod, "PREFS", tmp_path / ".arrange.json")
+    api = api_mod.Api()
+    assert api.ui_prefs() == {}
+    api.set_ui_pref("theme", "fine")
+    assert api.set_ui_pref("right_w", 520) == {"theme": "fine", "right_w": 520}
+    assert "error" in api.set_ui_pref("right_w", "wide") and "error" in api.set_ui_pref("colour", "red")
+    assert api_mod.Api().boot()["ui"] == {"theme": "fine", "right_w": 520}

@@ -40,7 +40,12 @@ let loadGen = 0;            // the opening the loading events belong to
 let gpuBusy = [];           // Python's work on the GPU now (the live preview waits for it)
 let steps = [];             // the loading steps, as Python tells them
 
-const $ = id => document.getElementById(id);
+// the panels in windows of their own (detachPanel): their documents are searched too
+const outWins = {};            // "inspector" | "subpanel" -> its window
+const outDocs = () => Object.values(outWins).map(w => { try { return w.closed ? null : w.document; } catch (e) { return null; } }).filter(Boolean);
+const $ = id => document.getElementById(id) || outDocs().map(d => d.getElementById(id)).find(Boolean) || null;
+const $q = sel => document.querySelector(sel) || outDocs().map(d => d.querySelector(sel)).find(Boolean) || null;
+let menuDoc = document;        // where the pointer last was: menus and notes open there
 function h(tag, props, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
@@ -65,8 +70,9 @@ const idOf = ref => JSON.stringify(ref);
 const stem = name => String(name).replace(/\.[^.]+$/, "");
 let toastTimer = 0;
 function toast(msg, bad = false) {
-  let el = document.querySelector(".toast");
-  if (!el) { el = h("div", { class: "toast", role: "status" }); document.body.append(el); }
+  const doc = menuDoc && menuDoc.defaultView && !menuDoc.defaultView.closed ? menuDoc : document;
+  let el = doc.querySelector(".toast");
+  if (!el) { el = h("div", { class: "toast", role: "status" }); doc.body.append(el); }
   el.textContent = msg; el.hidden = false; el.classList.toggle("bad", bad);
   clearTimeout(toastTimer); toastTimer = setTimeout(() => { el.hidden = true; }, bad ? 4500 : 2200);
 }
@@ -1399,8 +1405,16 @@ function duplicateSpan(m, k) {
 // ---------------------------------------------------------------------------
 // Menus: what Python says can be done there; the catalog's entries by category
 // ---------------------------------------------------------------------------
-function closeCtx() { document.querySelectorAll(".ctx").forEach(x => x.remove()); }
-document.addEventListener("pointerdown", e => { if (!e.target.closest(".ctx")) closeCtx(); });
+function closeCtx() { for (const d of [document, ...outDocs()]) d.querySelectorAll(".ctx").forEach(x => x.remove()); }
+function wireDoc(d) {                           // a document the page's panels live in
+  d.addEventListener("pointerdown", e => { menuDoc = d; if (!e.target.closest(".ctx")) closeCtx(); }, true);
+  d.addEventListener("pointerover", e => {      // a select too narrow for its choice: all of it on hover
+    const s = e.target.closest && e.target.closest("select"), o = s && s.selectedOptions[0];
+    if (o && (!s.title || s.dataset.autoTitle)) { s.title = o.textContent; s.dataset.autoTitle = "1"; }
+  }, true);
+  d.addEventListener("contextmenu", () => { menuDoc = d; }, true);
+}
+wireDoc(document);
 function catalogItems(kind, choose) {
   const byCat = new Map();
   for (const c of S.catalog) if (c.kind === kind) { if (!byCat.has(c.cat)) byCat.set(c.cat, []); byCat.get(c.cat).push(c); }
@@ -1455,11 +1469,12 @@ function menuAt(x, y, items, parent = null) {
     if (!it.sub) b.addEventListener("pointerenter", () => box.querySelectorAll(":scope > .ctx").forEach(c => c.remove()));
     box.append(b);
   }
-  (parent || document.body).append(box);
+  const doc = parent ? parent.ownerDocument : menuDoc, view = doc.defaultView || window;
+  (parent || doc.body).append(box);
   const r = box.getBoundingClientRect();
   if (parent) { box.style.position = "fixed"; }
-  box.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 6)) + "px";
-  box.style.top = Math.max(4, Math.min(y, innerHeight - r.height - 6)) + "px";
+  box.style.left = Math.max(4, Math.min(x, view.innerWidth - r.width - 6)) + "px";
+  box.style.top = Math.max(4, Math.min(y, view.innerHeight - r.height - 6)) + "px";
   if (!parent) box.querySelector("button")?.focus();
   return box;
 }
@@ -2056,7 +2071,8 @@ function centreInPanel(el) {
 }
 function subBusy() {
   toast("The link or FX below first: Apply it or Cancel it", true);
-  const p = document.querySelector(".subpanel"); if (p) { p.classList.remove("flash"); void p.offsetWidth; p.classList.add("flash"); }
+  const p = $q(".subpanel"); if (p) { p.classList.remove("flash"); void p.offsetWidth; p.classList.add("flash"); }
+  if (outWins.subpanel) outWins.subpanel.focus();
 }
 // the inspector's row the bottom of the stack came from (a parameter, x / y / scale), and the FX row
 function editingRow(ref, param) { const b = subStack[0]; return !!b && b.type === "knob" && b.param != null && b.param === param && idOf(b.ref) === idOf(ref); }
@@ -2121,7 +2137,7 @@ function inspKnob(box) {
     h("canvas", { class: "strip", id: "knobStrip", title: "the whole song: the hits, the layer's bars shaded, the playhead" }));
   box.append(sect("It writes"), yamlOut, err);
   if (k.mode === "knob" && !k.link) box.append(h("div", { class: "fxhead" }, h("span", { class: "sect", text: "Its curve" }),
-    h("select", { "aria-label": "Over", onchange: e => { k.span = e.target.value; checkKnob(); } }, [["around", "16 s around the playhead"], ["view", "the bars in view"], ["here", "8 bars from the playhead"], ["song", "the whole song"]].map(([v, t]) => h("option", { value: v, selected: v === (k.span || "around"), text: t })))), cv);
+    h("select", { "aria-label": "Over", onchange: e => { k.span = e.target.value; checkKnob(); } }, [["around", "16 s around"], ["view", "the bars in view"], ["here", "8 bars on"], ["song", "the whole song"]].map(([v, t]) => h("option", { value: v, selected: v === (k.span || "around"), text: t })))), cv);
   fill($("subActions"), h("button", { class: "btn sm primary", onclick: applyKnob }, "Apply"), h("button", { class: "btn sm", onclick: closeKnob }, "Cancel"));
   checkKnob();
 }
@@ -2211,6 +2227,8 @@ function drawState(box, st, depth, onlySource, F, d) {
       const nst = await ask("knob_new", e.target.value, st); if (!nst) return;
       for (const key of Object.keys(st)) delete st[key]; Object.assign(st, nst); renderSub(); } },
       [...groups].map(([g, xs]) => h("optgroup", { label: g }, xs.map(([key, label]) => h("option", { value: key, selected: key === st.form, text: label })))))));
+    const said = (d.schema.choices.find(([key]) => key === st.form) || [])[1];     // all of it, under it
+    if (said && said.split(" · ").slice(1).join(" · ").length > 34) box.append(h("div", { class: "about", text: said.split(" · ").slice(1).join(" · ") }));
   }
   const grid = h("div", { class: "fields" });
   if (f.main && !onlySource) grid.append(knobSetting(f.main[0], f.main[1], f.main[2], f.main[3], () => st.main, v => { st.main = v; }));
@@ -3142,13 +3160,14 @@ $("startClose").addEventListener("click", hideStart);
 $("bOpenFile").addEventListener("click", openFileDialog);
 $("bNewFromAudio").addEventListener("click", newFromAudio);
 $("pathForm").addEventListener("submit", e => { e.preventDefault(); const p = $("pathInput").value.trim(); if (p) openProject(p); });
-document.addEventListener("keydown", e => {
+document.addEventListener("keydown", onKeys);
+function onKeys(e) {
   if (!$("modal").hidden) return;
   const tag = (e.target.tagName || "").toLowerCase(), typing = tag === "input" || tag === "select" || tag === "textarea";
   const mod = e.ctrlKey || e.metaKey, key = e.key.toLowerCase();
   if (mod && key === "s") { e.preventDefault(); if (e.shiftKey) saveAs(); else save(); return; }
   if (mod && key === "o") { e.preventDefault(); openFileDialog(); return; }
-  if (e.key === "Escape") { const open = document.querySelector(".ctx"); closeCtx(); if (!$("start").hidden && S) hideStart(); else if (!open && !typing && subStack.length) popSub(); return; }
+  if (e.key === "Escape") { const open = $q(".ctx"); closeCtx(); if (!$("start").hidden && S) hideStart(); else if (!open && !typing && subStack.length) popSub(); return; }
   if (typing || !$("start").hidden) return;
   if (mod && key === "z") { e.preventDefault(); edit(e.shiftKey ? "redo" : "undo"); return; }
   if (mod && key === "y") { e.preventDefault(); edit("redo"); return; }
@@ -3157,8 +3176,94 @@ document.addEventListener("keydown", e => {
   else if (subStack.length && (e.key === "Delete" || e.key === "Backspace" || (mod && key === "d"))) subBusy();
   else if ((e.key === "Delete" || e.key === "Backspace") && sel) { e.preventDefault(); deleteSelected(); }
   else if (mod && key === "d" && sel && sel.type === "member") { e.preventDefault(); const m = memberById(sel.id); if (m) duplicateSpan(m, sel.k); }
-});
+}
 window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+window.addEventListener("pagehide", () => { for (const w of Object.values(outWins)) try { w.close(); } catch (err) { /* gone */ } });
+
+// ---------------------------------------------------------------------------
+// The window's look: a theme (Classic as it was; Fine: denser) and the right column's width,
+// both kept by Python for the next time (the page's own storage is not: pywebview runs private)
+// ---------------------------------------------------------------------------
+let ui = { theme: "", right_w: 340 };
+const RIGHT_W = [280, 340];                     // the right column: its least, its first width
+function setTheme(name, keep = true) {
+  const old = ui.theme;
+  ui.theme = name === "fine" ? "fine" : "";
+  for (const d of [document, ...outDocs()]) {
+    if (ui.theme) d.documentElement.dataset.theme = ui.theme; else delete d.documentElement.dataset.theme;
+  }
+  $("themeSel").value = ui.theme;
+  const rows = { "": 30, fine: 24 };            // the rows' height follows, unless set by hand
+  if (rowH === rows[old]) rowH = rows[ui.theme];
+  if (keep) call("set_ui_pref", "theme", ui.theme).catch(() => { });
+  if (S) later(renderTimeline);
+}
+function setRightW(px, keep = true) {
+  const work = document.querySelector(".work").getBoundingClientRect();
+  const most = Math.max(RIGHT_W[0], Math.min(900, work.width - 250 - 420));   // the Arrange keeps 420 px
+  ui.right_w = Math.round(Math.max(RIGHT_W[0], Math.min(most, px)));
+  document.documentElement.style.setProperty("--right-w", ui.right_w + "px");
+  if (keep) call("set_ui_pref", "right_w", ui.right_w).catch(() => { });
+}
+$("themeSel").addEventListener("change", e => setTheme(e.target.value));
+{
+  const vs = $("vsplit");
+  vs.addEventListener("pointerdown", e => {
+    e.preventDefault(); vs.setPointerCapture(e.pointerId); vs.classList.add("on");
+    const right = document.querySelector(".work").getBoundingClientRect().right;
+    const move = ev => setRightW(right - ev.clientX, false);
+    const up = () => { vs.classList.remove("on"); vs.removeEventListener("pointermove", move); vs.removeEventListener("pointerup", up); setRightW(ui.right_w); if (S) renderTimeline(); };
+    vs.addEventListener("pointermove", move); vs.addEventListener("pointerup", up);
+  });
+  vs.addEventListener("dblclick", () => { setRightW(RIGHT_W[1]); if (S) renderTimeline(); });
+}
+
+// ---------------------------------------------------------------------------
+// A configuration panel (the plugin, the link · FX area) in a window of its own: the panel
+// itself moves there, the page's script still driving it, and comes back with ⧉ again, the
+// toolbar's chip, or when that window closes. The others take its place meanwhile.
+// ---------------------------------------------------------------------------
+const PANELS = { inspector: "Plugin", subpanel: "Link · FX" };
+function detachPanel(cls) {
+  if (outWins[cls]) { attachPanel(cls); return; }
+  const sec = document.querySelector(`.work > .${cls}`); if (!sec) return;
+  const w = window.open("", `arc-${cls}`, cls === "inspector" ? "width=520,height=900" : "width=560,height=760");
+  if (!w) { toast("A window of its own was not allowed here", true); return; }
+  const d = w.document;
+  d.open(); d.write("<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title></title></head><body class='detached'></body></html>"); d.close();
+  d.title = `${PANELS[cls]} · ARC Studio`;
+  for (const n of document.querySelectorAll("link[rel=stylesheet]")) d.head.append(h("link", { rel: "stylesheet", href: n.href }));
+  if (ui.theme) d.documentElement.dataset.theme = ui.theme;
+  d.body.append(d.adoptNode(sec));
+  outWins[cls] = w;
+  wireDoc(d);
+  d.addEventListener("keydown", onKeys);
+  w.addEventListener("beforeunload", () => attachPanel(cls, false));
+  document.querySelector(".work").classList.add(`${cls}-out`);
+  showOutChips();
+  if (S) later(renderTimeline);
+}
+function attachPanel(cls, close = true) {
+  const w = outWins[cls]; if (!w) return;
+  delete outWins[cls];
+  let sec = null;
+  try { sec = w.document.querySelector(`.${cls}`); } catch (e) { /* gone */ }
+  if (sec) document.querySelector(".work").append(document.adoptNode(sec));
+  document.querySelector(".work").classList.remove(`${cls}-out`);
+  if (menuDoc !== document) menuDoc = document;
+  if (close) try { w.close(); } catch (e) { /* gone */ }
+  showOutChips();
+  if (S) later(renderTimeline);
+}
+function showOutChips() {
+  fill($("outChips"), ...Object.keys(outWins).map(cls => h("button", { class: "chip", title: `${PANELS[cls]} is in a window of its own: bring it back`,
+    onclick: () => attachPanel(cls) }, `${PANELS[cls]} ⧉ back`)));
+  for (const b of [document, ...outDocs()].flatMap(d => [...d.querySelectorAll(".ib.detach")])) {
+    const out = !!outWins[b.dataset.panel];
+    b.textContent = out ? "⇲" : "⧉"; b.title = out ? "Back into the window" : "In a window of its own (and back)";
+  }
+}
+for (const b of document.querySelectorAll(".ib.detach")) b.addEventListener("click", () => detachPanel(b.dataset.panel));
 for (const kind of ["keydown", "keyup"]) document.addEventListener(kind, e => {
   if (e.key !== "Shift" || drag) return;
   shiftHeld = kind === "keydown";
@@ -3184,6 +3289,7 @@ async function boot() {
     const got = await call("boot");
     if (got.error) throw new Error(got.error);
     boot0 = got;
+    if (got.ui) { setTheme(got.ui.theme || "", false); if (got.ui.right_w) setRightW(got.ui.right_w, false); }
     log("sys", inWebview ? "pywebview: the page calls Python through js_api" : "browser: the page calls Python through /api");
     if (got.first) await openProject(got.first);
     else if (!loadGen) await showStart();         // (a project opened meanwhile stays)

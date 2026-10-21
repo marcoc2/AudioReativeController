@@ -21,6 +21,8 @@
   <div class="lcd"><b id="lcdPos">1.1</b><span id="lcdTime">0:00.0</span></div>
   <span class="chip loop" id="loopChip" hidden><span id="loopText"></span><button id="loopClear" title="Play the whole song" aria-label="Clear the chosen bars">✕</button></span>
   <div class="tgroup"><span class="tlabel">Video</span><select class="btn" id="resSel" aria-label="The final video's size" title="The final video's size (render.resolution in the project)" disabled></select></div>
+  <div class="tgroup"><span class="tlabel">Look</span><select class="btn" id="themeSel" aria-label="The window's look" title="The window's look: Classic as it was, Fine denser (kept for the next time)"><option value="">Classic</option><option value="fine">Fine</option></select></div>
+  <span class="tgroup" id="outChips"></span>
   <span class="spacer"></span>
   <button class="chip loadchip" id="loadChip" hidden title="Show the loading steps"><span class="dot busy" id="loadDot"></span><span id="loadText">loading</span></button>
   <div class="tgroup">
@@ -83,9 +85,11 @@
   </section>
 
   <section class="pane inspector" aria-label="Plugin">
-    <div class="phead"><h2 id="inspTitle">Plugin</h2></div>
+    <div class="phead"><h2 id="inspTitle">Plugin</h2><span class="spacer"></span><button class="ib detach" data-panel="inspector" title="In a window of its own (and back)" aria-label="The plugin in a window of its own">⧉</button></div>
     <div class="insp" id="insp"></div>
   </section>
+
+<div class="vsplit" id="vsplit" role="separator" aria-orientation="vertical" aria-label="The plugin's width" title="Drag: the plugin's width (double-click: as it was)"></div>
 
 <section class="tl" aria-label="Arrange">
   <div class="tlbar">
@@ -112,7 +116,7 @@
 </section>
 
 <section class="pane subpanel" aria-label="A link, an FX">
-  <div class="phead"><h2 id="subTitle">Link · FX</h2><span class="spacer"></span><span class="hint" id="subTrail"></span><span class="row nowrap" id="subActions"></span></div>
+  <div class="phead"><h2 id="subTitle">Link · FX</h2><span class="spacer"></span><span class="hint" id="subTrail"></span><span class="row nowrap" id="subActions"></span><button class="ib detach" data-panel="subpanel" title="In a window of its own (and back)" aria-label="The link and FX area in a window of its own">⧉</button></div>
   <div class="insp" id="subBody"></div>
 </section>
 

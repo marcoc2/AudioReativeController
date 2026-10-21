@@ -35,6 +35,20 @@ def parse_args(argv=None):
     return args
 
 
+def own_popups() -> None:
+    """A panel the page puts in a window of its own (``window.open("")``, about:blank) opens
+    in WebView2's own popup, which the page's script reaches and drives; any other link still
+    goes to the browser, as pywebview does."""
+    from webview.platforms import edgechromium
+    original = edgechromium.EdgeChrome.on_new_window_request
+
+    def on_new_window_request(self, sender, args):
+        if str(args.get_Uri()) in ("about:blank", ""):
+            return                                   # not handled: WebView2's popup, its opener's
+        original(self, sender, args)
+    edgechromium.EdgeChrome.on_new_window_request = on_new_window_request
+
+
 def main(argv=None) -> None:
     from core.web.api import Api, project_from_args, stems_from_args
     from core.web.server import Server
@@ -53,6 +67,7 @@ def main(argv=None) -> None:
             pass
     else:
         import webview
+        own_popups()
         window = webview.create_window("ARC Studio", url, js_api=api, width=1500, height=980, min_size=(1000, 680),
                                        background_color="#111318", maximized=True)
         api._attach(window)
