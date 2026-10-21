@@ -48,7 +48,7 @@ class Demos:
                 "needs": list(e.needs),
                 "params": [{"name": p.name, "default": p.default if isinstance(p.default, (int, float, str, bool)) or p.default is None
                             else str(p.default), "about": p.about, "knob": p.knob} for p in e.params],
-                "demo": {"state": state, "url": self.media.url(video) if video.is_file() and state in ("ready", "stale", "rendering") else None,
+                "demo": {"state": state, "url": self.media.url(video, fresh=True) if video.is_file() and state in ("ready", "stale", "rendering") else None,
                          "error": info.get("error") if state == "failed" else None}}
 
     def make(self, key: str) -> dict:
@@ -201,7 +201,7 @@ class Repaint:
         stopped = self.job.get("result") == "stopped"
         self.job.update(running=False, result="stopped" if stopped else "done" if code == 0 else f"failed (exit {code})")
         if self.job["result"] == "done" and out.is_file():
-            self.job["url"] = self.media.url(out)
+            self.job["url"] = self.media.url(out, fresh=True)
             self.events.log("in", f"repainted: {shown_path(out)}")
         self.events.emit("repaint", dict(self.job))
 

@@ -128,7 +128,7 @@ class EngineRender:
         code = proc.wait()
         self.events.gpu("the engine renders", False)
         if code == 0 and out.is_file():
-            self.events.emit("engine", {"event": "done", "url": self.media.url(out), "first": first, "last": last,
+            self.events.emit("engine", {"event": "done", "url": self.media.url(out, fresh=True), "first": first, "last": last,
                                         "path": str(out)})
         else:
             self.events.emit("engine", {"event": "failed", "code": code, "tail": tail})

@@ -384,3 +384,11 @@ def test_the_video_size_is_written_in_the_project(project):
     got = s.set_resolution("1080x1920")
     assert got["resolution"] == "1080x1920"
     assert yaml.safe_load(project.read_text(encoding="utf-8"))["render"]["resolution"] == "1080x1920"
+
+
+def test_the_preview_keeps_the_projects_shape():
+    from core.web.util import preview_res
+    assert preview_res({"resolution": "480x768"}) == "400x640"
+    assert preview_res({"resolution": "854x480"}) == "640x360"
+    assert preview_res({"resolution": "1080x1920"}) == "360x640"
+    assert preview_res({"resolution": "300x200"}) == "300x200"      # never bigger than the video

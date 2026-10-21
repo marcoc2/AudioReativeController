@@ -184,7 +184,7 @@ class ExactPreview:
             proc.stdin.close()
             if proc.wait() != 0:
                 raise RuntimeError(f"ffmpeg: {proc.stderr.read().decode(errors='replace')[-300:]}")
-            self.events.emit("engine", {"event": "done", "url": self.media.url(out), "first": first, "last": last,
+            self.events.emit("engine", {"event": "done", "url": self.media.url(out, fresh=True), "first": first, "last": last,
                                         "path": str(out), "exact": True})
         except Cancelled:
             self.events.emit("engine", {"event": "stopped", "first": first, "last": last})

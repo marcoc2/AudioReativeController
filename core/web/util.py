@@ -71,9 +71,13 @@ def cue_key(spec: dict) -> str:
 
 
 def preview_res(render: dict) -> str:
-    """The preview's size: the project's shape, small (a portrait project stays portrait)."""
+    """The preview's size: the project's own shape, its long side 640 (both even, as the
+    encoder needs); never bigger than the project."""
     try:
         w, h = (int(x) for x in str(render.get("resolution", "854x480")).lower().split("x"))
     except ValueError:
         return PREVIEW_RES
-    return "360x640" if h > w else PREVIEW_RES
+    if w <= 0 or h <= 0:
+        return PREVIEW_RES
+    k = min(1.0, 640 / max(w, h))
+    return f"{max(2, round(w * k / 2) * 2)}x{max(2, round(h * k / 2) * 2)}"

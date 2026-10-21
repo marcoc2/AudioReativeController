@@ -36,13 +36,16 @@ class Media:
         self._files: dict = {}
         self._lock = threading.Lock()
 
-    def url(self, path) -> str:
+    def url(self, path, fresh: bool = False) -> str:
+        """``fresh``: a file made again under the same name gets a new URL (its time in it)."""
         p = Path(path)
         if not p.is_absolute():
             p = ROOT / p
         name = hashlib.sha1(str(p).lower().encode()).hexdigest()[:16] + p.suffix.lower()
         with self._lock:
             self._files[name] = p
+        if fresh and p.is_file():
+            return f"/media/{name}?v={p.stat().st_mtime_ns}"
         return f"/media/{name}"
 
     def get(self, name: str) -> Optional[Path]:

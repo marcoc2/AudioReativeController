@@ -89,5 +89,10 @@ exact preview itself (it needs the GPU), which was checked through its events on
 | 24-25 | a signal's name and notes | Fixed: a signal's name shown, not editable; what a signal is, said |
 | 26 | signals in stack order, Refresh | Fixed |
 
-Not checked anywhere: the exact preview and making a demo (the GPU), a repaint against
-ComfyUI, a real drag from the Explorer, a proxy made from a real `.mov`.
+Checked on the GPU (2026-10-21, on a copy of coracao_esfolado): the exact preview of 1, 2 and
+4 bars (160 frames in about 7 s), and Make it again for chladni's demo (about 22 s). That run
+found and fixed: the preview was 360x640 for a 480x768 project (now the project's own shape,
+400x640), and a file made again under the same name kept its URL (now versioned).
+
+Not checked anywhere: a repaint against ComfyUI, a real drag from the Explorer, a proxy made
+from a real `.mov`.
