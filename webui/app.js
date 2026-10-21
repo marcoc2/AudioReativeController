@@ -2067,7 +2067,7 @@ function openSubPlugin(ref, label) {
 }
 function renderSub() {
   const box = $("subBody"); if (!box) return;
-  box.replaceChildren();
+  box.replaceChildren(); $("subActions").replaceChildren();     // its buttons in its head: always in sight
   const top = subTop();
   $("subTrail").textContent = subStack.length > 1 ? subStack.map(x => x.title).join(" › ") : "";
   if (!top) {
@@ -2077,8 +2077,8 @@ function renderSub() {
   }
   if (top.type === "knob" && knobCtx) { inspKnob(box); return; }
   $("subTitle").textContent = "FX";
-  box.append(h("div", { class: "ptitle" }, h("h3", { text: top.title }), h("div", { class: "src", text: "an FX of the block above" })),
-    h("div", { class: "btnrow" }, h("span", { class: "spacer" }), h("button", { class: "btn sm primary", onclick: popSub }, "Done")));
+  box.append(h("div", { class: "ptitle" }, h("h3", { text: top.title }), h("div", { class: "src", text: "an FX of the block above" })));
+  fill($("subActions"), h("button", { class: "btn sm primary", onclick: popSub }, "Done"));
   pluginInto(box, top.ref);
 }
 
@@ -2115,11 +2115,82 @@ function inspKnob(box) {
   else drawState(body, k.state, 0, k.mode !== "knob", F, d);
   const yamlOut = h("pre", { class: "code", id: "knobYaml", text: "…" }), err = h("div", { class: "err", id: "knobErr" });
   const cv = h("canvas", { class: "curve", id: "knobCurve", width: 600, height: 120 });
-  box.append(body, sect("It writes"), yamlOut, err);
+  box.append(body);
+  const onHits = st => !!st && !!F[st.form] && (F[st.form].source === "trigger" || (st.form === "rate" && onHits(st.from)));
+  if ((k.mode === "trigger" || (k.mode === "knob" && onHits(k.state))) && !k.link) box.append(sect("Its hits"), h("div", { class: "about", id: "knobHits", text: "…" }),
+    h("canvas", { class: "strip", id: "knobStrip", title: "the whole song: the hits, the layer's bars shaded, the playhead" }));
+  box.append(sect("It writes"), yamlOut, err);
   if (k.mode === "knob" && !k.link) box.append(h("div", { class: "fxhead" }, h("span", { class: "sect", text: "Its curve" }),
     h("select", { "aria-label": "Over", onchange: e => { k.span = e.target.value; checkKnob(); } }, [["around", "16 s around the playhead"], ["view", "the bars in view"], ["here", "8 bars from the playhead"], ["song", "the whole song"]].map(([v, t]) => h("option", { value: v, selected: v === (k.span || "around"), text: t })))), cv);
-  box.append(h("div", { class: "btnrow" }, h("button", { class: "btn primary", onclick: applyKnob }, "Apply"), h("button", { class: "btn", onclick: closeKnob }, "Cancel")));
+  fill($("subActions"), h("button", { class: "btn sm primary", onclick: applyKnob }, "Apply"), h("button", { class: "btn sm", onclick: closeKnob }, "Cancel"));
   checkKnob();
+}
+// who plays, picked from what the project has: a MIDI track (all its notes, or some), the
+// attacks of one of its audio files (a stem, the song); numbers and a transcription too
+const samePath = (a, b) => String(a || "").replace(/\\/g, "/").toLowerCase() === String(b || "").replace(/\\/g, "/").toLowerCase();
+function whoPlaysInto(t, src, d) {
+  const midi = d.sources.midi || [], audios = d.sources.audios || [];
+  const names = String(src.track || "").split(",").map(x => x.trim()).filter(Boolean);
+  const tr = src.kind === "track" && names.length === 1 ? midi.find(m => m.track.toLowerCase() === names[0].toLowerCase()) : null;
+  const au = src.kind === "audio" ? audios.find(a => samePath(a.path, src.audio)) : null;
+  const cur = tr ? `track:${tr.track}` : au ? `audio:${au.path}` : src.kind === "notes" || src.kind === "melody" ? src.kind : "written";
+  const pick = h("select", { "aria-label": "Who plays", onchange: e => {
+    const v = e.target.value;
+    if (v.startsWith("track:")) Object.assign(src, { kind: "track", track: v.slice(6), notes: "" });
+    else if (v.startsWith("audio:")) Object.assign(src, { kind: "audio", audio: v.slice(6), notes: "" });
+    else if (v === "notes" || v === "melody") src.kind = v;
+    renderSub();
+  } },
+    midi.length ? h("optgroup", { label: "The MIDI: a track" }, midi.map(m => h("option", { value: `track:${m.track}`, selected: cur === `track:${m.track}`, text: `${m.label} · ${m.count} notes` }))) : null,
+    audios.length ? h("optgroup", { label: "The audio: its attacks" }, audios.map(a => h("option", { value: `audio:${a.path}`, selected: cur === `audio:${a.path}`, text: a.label }))) : null,
+    h("optgroup", { label: "Other" }, h("option", { value: "notes", selected: cur === "notes", text: "notes by number, on any track" }),
+      d.sources.score || src.kind === "melody" ? h("option", { value: "melody", selected: cur === "melody", text: "the melody (a transcription)" }) : null,
+      cur === "written" ? h("option", { value: "written", selected: true, text: `as written: ${src.kind === "audio" ? src.audio : src.track}` }) : null));
+  t.append(field("Who plays", pick, "what in the song makes a hit"));
+  if (tr) {                                     // its notes: all, or the ones chosen
+    const chosen = new Set(String(src.notes || "").split(",").map(x => parseInt(x, 10)).filter(x => !isNaN(x)));
+    const put = () => { src.notes = [...chosen].sort((a, b) => a - b).join(", "); renderSub(); };
+    t.append(field("Which of its notes", h("div", { class: "notechips" },
+      h("button", { class: "chip" + (chosen.size ? "" : " on"), onclick: () => { chosen.clear(); put(); } }, "all"),
+      tr.pitches.map(p => h("button", { class: "chip" + (chosen.has(p.pitch) ? " on" : ""), title: `MIDI ${p.pitch}: played ${p.count} times`,
+        onclick: () => { if (chosen.has(p.pitch)) chosen.delete(p.pitch); else chosen.add(p.pitch); put(); } }, `${p.name} ·${p.count}`))),
+      chosen.size ? "only these" : "every note of the track"));
+  } else if (src.kind === "track") {
+    t.append(field("Tracks", textField(src.track, "kick, snare", v => { src.track = v; checkKnob(); }, "tracks"), "names (or numbers), as in the MIDI"));
+  }
+  if (src.kind === "audio") {
+    if (!au) t.append(field("Audio file", textField(src.audio, "stems/snare.wav", v => { src.audio = v; checkKnob(); }, "audio file")));
+    const ex = src.extra || (src.extra = {});
+    t.append(h("div", { class: "fields" },
+      field("Sensitivity", numField(ex.threshold ?? 0.3, v => { ex.threshold = Math.max(0, v); checkKnob(); }, { min: 0, step: 0.05 }), "higher: only the strong attacks"),
+      field("Apart by (s)", numField(ex.min_gap ?? 0.05, v => { ex.min_gap = Math.max(0, v); checkKnob(); }, { min: 0, step: 0.01 }), "two hits at least this far apart")));
+  }
+  if (src.kind === "notes") t.append(field("Notes", textField(src.notes, "36, 38", v => { src.notes = v; checkKnob(); }, "notes"), "MIDI numbers, on any track (36: a kick in General MIDI)"));
+  if (src.kind === "melody") {
+    if (!src.score && d.sources.score) src.score = d.sources.score;
+    t.append(field("Transcription", textField(src.score || d.sources.score, "its folder", v => { src.score = v; checkKnob(); })), field("Voice", textField(src.voice, "any", v => { src.voice = v; checkKnob(); })));
+  }
+}
+// the hits of who plays over the song: how many, how many in the layer's own bars, a strip
+function showHits(r) {
+  const el = $("knobHits"), cv = $("knobStrip"), k = knobCtx;
+  if (!el || !k) return;
+  const at = k.ref.lastIndexOf("fx");             // a block's own FX: the block's bars
+  const m = memberById(idOf(k.ref)) || (at >= 2 ? memberById(idOf(k.ref.slice(0, at))) : null);
+  const spans = m && !m.always ? m.spans.map(s => [B[s.first - 1], B[s.last]]) : null;
+  const inside = spans ? r.hit_times.filter(t => spans.some(([a, b]) => t >= a && t < b)).length : null;
+  el.textContent = r.error ? "" : !r.hits ? "No hits: nothing in the song plays it." :
+    `${r.hits} hits in the song, bars ${r.first_bar}–${r.last_bar}` + (inside != null ? ` · ${inside} in ${m.label}'s bars (${m.bars_text || "all"})` : "");
+  if (!cv) return;
+  const d = devicePixelRatio || 1, w = cv.clientWidth || 300, hh = 34, dur = S.song.duration || 1;
+  cv.width = w * d; cv.height = hh * d;
+  const g = cv.getContext("2d"); g.scale(d, d);
+  g.fillStyle = "#0f1115"; g.fillRect(0, 0, w, hh);
+  const X = t => t / dur * w;
+  if (spans) { g.fillStyle = "rgba(240,160,75,.12)"; for (const [a, b] of spans) g.fillRect(X(a), 0, Math.max(1, X(b) - X(a)), hh); }
+  g.fillStyle = "#2b313d"; for (let b = 0; b < B.length; b += 4) g.fillRect(X(B[b]), 0, 1, hh);
+  g.fillStyle = "#f0a04b"; for (const t of r.hit_times) g.fillRect(X(t), 6, 1, hh - 12);
+  const p = now(); g.fillStyle = "#e9e5db"; g.fillRect(X(p), 0, 1, hh);
 }
 function knobSetting(name, def, kind, help, get, set) {
   const v = get() ?? def;
@@ -2147,14 +2218,8 @@ function drawState(box, st, depth, onlySource, F, d) {
   // its source
   const src = st.source;
   if (f.source === "trigger" && src) {
-    const t = h("div", { class: "fields" });
-    t.append(field("Who plays", h("select", { onchange: e => { src.kind = e.target.value; renderSub(); } }, d.schema.trigger_kinds.map(x => h("option", { value: x, selected: x === src.kind, text: x })))));
-    if (src.kind === "track") t.append(field("Track", h("div", { class: "row nowrap" }, textField(src.track, "kick, snare", v => { src.track = v; checkKnob(); }, "track"),
-      h("select", { "aria-label": "Add a track", onchange: e => { if (e.target.value) { src.track = src.track ? `${src.track}, ${e.target.value}` : e.target.value; renderSub(); } } }, h("option", { value: "", text: "+" }), d.sources.tracks.map(x => h("option", { value: x, text: x }))))));
-    if (src.kind === "audio") t.append(field("Audio", textField(src.audio, "stems/snare.wav", v => { src.audio = v; checkKnob(); })));
-    if (src.kind === "melody" && !src.score && d.sources.score) src.score = d.sources.score;
-    if (src.kind === "melody") t.append(field("Transcription", textField(src.score || d.sources.score, "its folder", v => { src.score = v; checkKnob(); })), field("Voice", textField(src.voice, "any", v => { src.voice = v; checkKnob(); })));
-    if (src.kind !== "audio") t.append(field("Notes", textField(src.notes, "all", v => { src.notes = v; checkKnob(); }), "MIDI numbers, like 36, 38"));
+    const t = h("div", { class: "fields one" });
+    whoPlaysInto(t, src, d);
     const sigs = d.signals.filter(s => s.kind === "trigger");
     if (sigs.length && k_mode() === "knob") t.append(field("Or a who-plays signal", h("select", { onchange: e => { src.link = e.target.value || undefined; checkKnob(); } }, h("option", { value: "", text: "-" }), sigs.map(s => h("option", { value: s.name, selected: s.name === src.link, text: `*${s.name}` })))));
     box.append(t);
@@ -2195,6 +2260,7 @@ function checkKnob() {
     if (knobCtx !== k) return;
     $("knobYaml").textContent = r.yaml || ""; $("knobErr").textContent = r.error || "";
     if (r.values) drawCurve($("knobCurve"), r, t0, t1);
+    if (r.hits != null) showHits(r);
   }, 150);
 }
 function drawCurve(cv, r, t0, t1) {

@@ -491,3 +491,12 @@ details.params summary { cursor: pointer; font-size: 11px; color: var(--dim); }
 .subpanel.flash { animation: subflash .6s ease 2; }
 @keyframes subflash { 50% { box-shadow: inset 0 0 0 2px var(--accent); } }
 @media (prefers-reduced-motion: reduce) { .subpanel.flash { animation: none; outline: 2px solid var(--accent); } }
+
+/* who plays: a track's notes to pick, the hits over the song; Apply always in reach */
+.fields.one { grid-template-columns: minmax(0, 1fr); }
+.notechips { display: flex; flex-wrap: wrap; gap: 4px; }
+.notechips .chip { cursor: pointer; font-family: var(--f-mono); }
+.notechips .chip.on { border-color: var(--accent); color: var(--accent); }
+canvas.strip { width: 100%; height: 34px; border-radius: 6px; border: 1px solid var(--line); }
+.subpanel .phead #subActions { gap: 6px; }
+#subTrail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

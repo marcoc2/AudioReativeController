@@ -22,11 +22,14 @@ from core.web.util import copy_keeping_signals, num
 
 SCORES = ("harmony",)
 PULSES = ("zoom_pulse", "invert")
+# a pulse's envelope when it says none (the layers' own defaults), and what it does
+PULSE_ENVELOPE = {("mandelbulb", "zoom_pulse"): 0.3, ("mandelbox", "zoom_pulse"): 0.3, ("julia", "invert"): 0.1}
+PULSE_ABOUT = {"zoom_pulse": "each hit of who plays pushes the camera in; it eases back over the envelope's seconds",
+               "invert": "each hit of who plays flips the colours, for the envelope's seconds"}
 CLIP_ACTIONS = ("next_clip", "random_clip", "restart", "reverse")
 CLIP_ORDERS = ("sequential", "shuffle", "random")
 CLIP_ENDS = ("bounce", "loop")
 GRAVITY = {"peak": 3.0, "floor": 0.3, "radius": 0.45, "curve": 2.0}
-NEW_TRIGGER = {"notes": [36], "actions": ["next_clip"]}
 PICK_DIR = ("_dir", "dir", "folder", "_folder", "masks")
 PICK_FILE = ("file", "_file", "path", "_path", "image", "video", "audio", "lut", "voice")
 WHO = ("largest", "second", "third", "fourth", "leftmost", "rightmost", "topmost", "bottommost", "all", "background")
@@ -143,7 +146,7 @@ class Plugin:
     def _row(self, spec, prm, keypath, raw, sig, value) -> dict:
         from core.knob_forms import form_of
         name = prm.name
-        row = {"name": name, "keypath": keypath, "about": prm.about, "set": value is not None,
+        row = {"name": name, "keypath": keypath, "about": prm.about or PULSE_ABOUT.get(name, ""), "set": value is not None,
                "default": _show(prm.default), "knob": prm.knob, "sig": sig}
         if name == "hits" and gestures_of(spec):
             return {**row, "widget": "gestures", "gestures": list(gestures_of(spec)),
@@ -171,7 +174,8 @@ class Plugin:
         elif (value is None and (is_trigger(name, None) or name in SCORES)) or (value is not None and (
                 sig or isinstance(value, dict) and (form_of(value) is not None or is_trigger(name, value)))):
             row.update(widget="knob", summary=_summary(value) if value is not None else "-",
-                       envelope=num(value.get("envelope", 0.25)) if name in PULSES and isinstance(value, dict) else None)
+                       envelope=num(value.get("envelope", PULSE_ENVELOPE.get((spec.get("source"), name), 0.25)))
+                       if name in PULSES and isinstance(value, dict) else None)
         else:
             is_text = isinstance(value, str) or (value is None and isinstance(prm.default, str))
             row.update(widget="text", is_text=is_text, pick=picks(name),
@@ -311,7 +315,7 @@ class Plugin:
             trs = holder.get(key) if isinstance(holder, dict) else None
             names = set(trs or {})
             name = next(n for n in ["kick", "snare"] + [f"trigger{i}" for i in range(1, 99)] if n not in names)
-            got = self._edit_at(path, keypath, lambda t: {**dict(t or {}), name: dict(NEW_TRIGGER)})
+            got = self._edit_at(path, keypath, lambda t: {**dict(t or {}), name: {**self.default_hits(), "actions": ["next_clip"]}})
             return {**got, "added": name}
 
     def rename_trigger(self, path, keypath, old: str, new: str) -> dict:
@@ -368,7 +372,7 @@ class Plugin:
 
     # gestures: hits rows
     def add_gesture(self, path, keypath, gesture: str) -> dict:
-        got = self._edit_at(path, keypath, lambda hs: list(hs or []) + [{"notes": [36], "gesture": gesture, "envelope": 0.2}])
+        got = self._edit_at(path, keypath, lambda hs: list(hs or []) + [{**self.default_hits(), "gesture": gesture, "envelope": 0.2}])
         holder, key = self._holder(path, list(keypath))
         return {**got, "added": len(holder.get(key) or []) - 1}
 
@@ -378,7 +382,7 @@ class Plugin:
 
     # the cast's roles
     def add_role(self, path, keypath) -> dict:
-        got = self._edit_at(path, keypath, lambda rs: list(rs or []) + [{"who": "largest", "plays": {"notes": [36]}, "act": "punch"}])
+        got = self._edit_at(path, keypath, lambda rs: list(rs or []) + [{"who": "largest", "plays": self.default_hits(), "act": "punch"}])
         holder, key = self._holder(path, list(keypath))
         return {**got, "added": len(holder.get(key) or []) - 1}
 

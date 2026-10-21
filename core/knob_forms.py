@@ -187,8 +187,8 @@ def _trigger_spec(st: dict) -> dict:
         out["score"], out["events"] = st.get("score", ""), "melody"
         if str(st.get("voice", "")).strip():
             out["voice"] = str(st["voice"]).strip()
-    elif kind == "track":
-        names = split_tracks(st.get("track", ""))
+    elif kind == "track":                             # a track with no name: its index in the file
+        names = [int(n) if n.isdigit() else n for n in split_tracks(st.get("track", ""))]
         out["track"] = names[0] if len(names) == 1 else names
     if notes and kind != "audio":
         out["notes"] = notes

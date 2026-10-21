@@ -476,3 +476,39 @@ def test_each_stem_with_sound_is_a_timeline_lane():
     assert [w["name"] for w in got] == ["guitar", "piano"] and got[0]["hz"] == STEM_HZ
     assert got[0]["values"][2 * STEM_HZ - 1] == 0.0 and got[0]["values"][2 * STEM_HZ] == 0.5
     assert max(got[1]["values"][:STEM_HZ]) == 0.25 and max(got[1]["values"][STEM_HZ:]) == 0.0
+
+
+def test_who_plays_offers_the_projects_tracks_and_counts_the_hits(project):
+    s = _session(project)
+    midi = s.midi_tracks()
+    assert midi[0]["track"] == "kick" and midi[0]["count"] == 64
+    assert midi[0]["pitches"] == [{"pitch": 36, "name": "C2", "count": 64}]
+    assert s.default_hits() == {"track": "kick"}                       # the most played track, not note 36
+    st = s.knob_open(["BG", "layers", 0], ["zoom_pulse"], "trigger")["state"]
+    assert st["source"]["kind"] == "track" and st["source"]["track"] == "kick"
+    got = s.knob_check(st, "trigger")
+    assert got["hits"] == 64 and got["first_bar"] == 1 and got["last_bar"] == 16
+
+
+def test_a_track_with_no_name_is_written_by_its_index():
+    from core import knob_forms as kf
+    st = kf.state_of({"hits": {"track": 2}})
+    assert kf.spec_of(st) == {"hits": {"track": 2}}
+
+
+def test_a_new_who_plays_anywhere_is_the_projects_own_and_a_link_shows_its_hits(project):
+    s = _session(project)
+    st = s.knob_new("hits")                                  # a Link's "a pulse on each hit"
+    assert st["source"]["kind"] == "track" and st["source"]["track"] == "kick"
+    got = s.knob_check(st, "knob")
+    assert got["hits"] == 64 and len(got["hit_times"]) == 64 and "values" in got
+    rate = s.knob_new("rate")                                # what moves a rate: hits, the project's
+    assert rate["from"]["source"]["track"] == "kick"
+    assert s.knob_check(rate, "knob")["hits"] == 64           # the hits that move it
+    assert s.knob_check(s.knob_new("constant"), "knob").get("hits") is None
+    ref = ["BG", "layers", 0]
+    s.add_trigger(ref, ["clip_reactivity", "triggers"])
+    trs = s.get(ref)["clip_reactivity"]["triggers"]
+    assert all(t.get("track") == "kick" and "notes" not in t for t in trs.values())
+    s.add_gesture(ref, ["hits"], "spin")
+    assert s.get(ref)["hits"][-1]["track"] == "kick"

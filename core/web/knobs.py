@@ -42,6 +42,27 @@ def signal_kind(value) -> str:
     return "knob" if form_of(value) is not None else "other"
 
 
+NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
+
+def _trigger_in(state: dict, spec):
+    """The who-plays spec a knob's form follows (a pulse on each hit, a rate moved by hits), or None."""
+    from core import knob_forms as kf
+    form = (state or {}).get("form")
+    if not isinstance(spec, dict) or form not in kf.FORMS:
+        return None
+    if kf.FORMS[form]["source"] == "trigger" and isinstance(spec.get(form), dict):
+        return spec[form]
+    if form == "rate" and state.get("from"):
+        return _trigger_in(state["from"], spec.get("from"))
+    return None
+
+
+def _note_name(pitch: int) -> str:
+    """A MIDI pitch as a musician reads it (60: C4)."""
+    return f"{NOTE_NAMES[int(pitch) % 12]}{int(pitch) // 12 - 1}"
+
+
 class KnobEditor:
     """Mixed into the Session (it brings get, items, specs, lock, _push, _edited...)."""
 
@@ -148,7 +169,55 @@ class KnobEditor:
                 score = (self.audio.parent / "sheetsage").as_posix()
         features = (["centroid", "flux"] + [f"subbands.{k}" for k in AudioFeatureExtractor.SUBBAND_RANGES]
                     + [f"texture.{n}" for n in TEXTURE_NAMES] + [f"stems.{n}" for n in stems])
-        return {"tracks": tracks, "features": features, "score": score}
+        return {"tracks": tracks, "features": features, "score": score, "midi": self.midi_tracks(),
+                "audios": self.project_audios()}
+
+    def midi_tracks(self) -> list:
+        """Who can play in the MIDI: each track (the most played first) as a trigger names it
+        (its name, or its index when it has none), its notes and how often each is played."""
+        with self.lock:
+            notes = list(self.notes)
+        by: dict = {}
+        for n in notes:
+            by.setdefault(n.track_index, []).append(n)
+        out = []
+        for i, ns in sorted(by.items(), key=lambda kv: -len(kv[1])):
+            name = ns[0].track or ""
+            pitches: dict = {}
+            for n in ns:
+                pitches[n.pitch] = pitches.get(n.pitch, 0) + 1
+            out.append({"track": name or str(i), "label": name or f"channel {ns[0].channel + 1}", "count": len(ns),
+                        "pitches": [{"pitch": p, "name": _note_name(p), "count": c} for p, c in sorted(pitches.items())]})
+        return out
+
+    def project_audios(self) -> list:
+        """Who can play in the project's audio: each stem's attacks, then the song's."""
+        from core.web.util import shown_path
+        with self.lock:
+            proj, audio = dict(self.proj or {}), self.audio
+        out = [{"label": str(name), "path": shown_path(resolve(path))}
+               for name, path in (proj.get("stems") or {}).items() if name and path and resolve(path).is_file()]
+        if audio is not None and audio.is_file():
+            out.append({"label": "the song (the mix)", "path": shown_path(audio)})
+        return out
+
+    def default_hits(self) -> dict:
+        """A new trigger's who plays: the most played MIDI track, else the first stem's attacks."""
+        midi = self.midi_tracks()
+        if midi:
+            t = midi[0]["track"]
+            return {"track": int(t) if t.isdigit() else t}
+        audios = self.project_audios()
+        return {"audio": audios[0]["path"]} if audios else {"notes": [36]}
+
+    def onsets(self, spec: dict) -> list:
+        """An audio file's attacks (core.rhythm.onset_reader), kept: the editor asks again and again."""
+        from core.rhythm.onset_reader import read_onsets
+        key = (str(resolve(spec["audio"])), float(spec.get("threshold", 0.3)), float(spec.get("min_gap", 0.05)))
+        cache = self.__dict__.setdefault("_onsets", {})
+        if key not in cache:
+            cache[key] = read_onsets(key[0], threshold=key[1], min_gap=key[2])
+        return cache[key]
 
     def knob_open(self, path, keypath, mode: str = "knob", default: float = 0.0) -> dict:
         """The editor's state for the knob at ``keypath`` in the layer at ``path`` (mode knob,
@@ -164,7 +233,7 @@ class KnobEditor:
                 shared = ("&" if self._defines(path, list(keypath), raw) else "*") + name
             value = plain(raw)
             if mode == "trigger":
-                st = kf.state_of({"hits": value or {"notes": [36]}})
+                st = kf.state_of({"hits": value or self.default_hits()})
             elif mode == "score":
                 st = kf.state_of({"harmony": value or {"score": self.knob_sources()["score"]}})
             elif value is None or isinstance(value, bool):
@@ -186,8 +255,15 @@ class KnobEditor:
                 "shaping": _jsonable(kf.SHAPING), "snaps": list(kf.SNAPS), "trigger_kinds": list(kf.TRIGGER_KINDS)}
 
     def knob_new(self, form: str, like: Optional[dict] = None) -> dict:
+        """A fresh editor state for ``form``; a new who plays is the project's own (default_hits)."""
         from core import knob_forms as kf
-        return kf.new_state(form, like)
+        st = kf.new_state(form, like)
+        same = like is not None and like.get("form") in kf.FORMS and kf.FORMS[like["form"]]["source"] == kf.FORMS[form]["source"]
+        if kf.FORMS[form]["source"] == "trigger" and not same:
+            st["source"] = kf.state_of({"hits": self.default_hits()})["source"]
+        if form == "rate" and st.get("from") is not None:        # what moves the rate: a new one, too
+            st["from"]["source"] = kf.state_of({"hits": self.default_hits()})["source"]
+        return st
 
     def _knob_spec(self, state: dict, mode: str):
         from core import knob_forms as kf
@@ -208,8 +284,13 @@ class KnobEditor:
         except Exception as exc:
             return {"error": f"{type(exc).__name__}: {exc}"}
         out = {"yaml": _flow(spec)}
+        if mode == "trigger":
+            return {**out, **self._hits_of(spec)}
         if mode != "knob":
             return out
+        who = _trigger_in(state, spec)                   # a form that follows hits: its hits too
+        if who is not None:
+            out.update(self._hits_of(who))
         with self.lock:
             notes, grid, features_at, dur = self.notes, self.grid, self.features_at, self.dur
         cuts = self.cut_times()
@@ -231,6 +312,21 @@ class KnobEditor:
         except Exception as exc:
             waiting = features_at is None and "feature" in str(exc).lower()
             out["error"] = f"{type(exc).__name__}: {exc}" + (" (the audio features are still loading)" if waiting else "")
+        return out
+
+    def _hits_of(self, spec: dict) -> dict:
+        """How a who-plays spec hits over the song: how many, when, in which bars."""
+        from core.video.layers import _layer_events
+        with self.lock:
+            notes, grid = list(self.notes), self.grid
+        try:
+            got = _layer_events(spec, notes, onset_loader=self.onsets, grid=grid)
+        except Exception as exc:
+            return {"error": f"{type(exc).__name__}: {exc}", "hits": 0, "hit_times": []}
+        times = [round(num(n.time), 3) for n in got]
+        out = {"hits": len(times), "hit_times": times[:4000]}         # (a curve's own are "times")
+        if times:
+            out.update(first_bar=self.bar_at(times[0]), last_bar=self.bar_at(times[-1]))
         return out
 
     def knob_apply(self, path, keypath, state: dict, mode: str = "knob", anchor: str = "", link: str = "") -> dict:
