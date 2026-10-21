@@ -24,6 +24,9 @@ from typing import Callable, Optional
 import yaml
 
 from core.web.edits import Edits
+from core.web.knobs import KnobEditor
+from core.web.plugin import Plugin
+from core.web.project import ProjectEdits
 from core.web.util import (PREVIEW_RES, RESOLUTIONS, copy_keeping_signals, cue_key, num, preview_res, resolve,  # noqa: F401
                            shader_live, shown_path, yaml_text)
 
@@ -81,11 +84,13 @@ def _name_from_comments(pairs: list, seq, first_lead=None) -> None:
                 base["name"] = name
 
 
-class Session(Edits):
+class Session(Edits, KnobEditor, Plugin, ProjectEdits):
     """The open project: its song and bars, its scene, the arrangement being edited."""
 
     def __init__(self, media, events):
+        from core.web.proxies import Proxies
         self.media, self.events = media, events
+        self.proxies = Proxies(media, events)
         self.lock = threading.RLock()
         self.gen = 0                        # which opening this is (a later one makes results stale)
         self.reset()
@@ -117,6 +122,7 @@ class Session(Edits):
             self.montage: Optional[list] = None
             self.montage_gen = 0
             self.segments: list = []
+            self.stem_names: list = []      # the stems the features have (stems.<name> a knob reads)
             self.board_links = None         # what Copy took: music links, FX
             self.board_fx = None
 
@@ -267,6 +273,7 @@ class Session(Edits):
                     "midi": Path(str(self.proj["midi"])).name if self.proj.get("midi") else None,
                     "converted": self.converted,
                     "resolution": str(render.get("resolution") or "854x480"),
+                    "sync_offset_ms": int(self.proj.get("sync_offset_ms") or 0),
                     "resolutions": [{"shape": shape, "sizes": list(sizes)} for shape, sizes in RESOLUTIONS],
                     "clip_fit": str(render.get("clip_fit") or "contain")}
 
@@ -327,7 +334,8 @@ class Session(Edits):
                 blocks = arr.windows_of(spec)
             spans = [{"first": b.first, "last": b.last, "from": b.start, "rate": b.rate, "file": b.file,
                       "url": self.media.url(resolve(b.file or own)) if kind == arr.CLIP and (b.file or own) else None,
-                      "missing": bool(kind == arr.CLIP and (b.file or own) and not resolve(b.file or own).is_file())}
+                      "missing": bool(kind == arr.CLIP and (b.file or own) and not resolve(b.file or own).is_file()),
+                      "proxy": self.proxies.status(resolve(b.file or own)) if kind == arr.CLIP and (b.file or own) else None}
                      for b in blocks]
             cue_state = None
         live = (kind == arr.CLIP and lane == "bg" and not cued and not spec.get("cutout")) or shader_live(entry)
@@ -391,6 +399,17 @@ class Session(Edits):
             return f"cut by the cue file {cues}"
         return f"cut by {len(cues or [])} cue(s) written in the scene"
 
+    def clip_files(self) -> list:
+        """Every clip file the lanes' blocks play."""
+        from core import arrangement as arr
+        out = []
+        with self.lock:
+            for lane in LANES:
+                for _, spec in self.track(lane):
+                    if arr.kind_of(spec) == arr.CLIP:
+                        out += [b.file for b in arr.blocks_of(spec) if b.file] + ([spec["file"]] if spec.get("file") else [])
+        return sorted(set(map(str, out)))
+
     def missing_clips(self) -> list:
         """(layer, file) of every clip block whose file is not on the disk."""
         with self.lock:
@@ -442,6 +461,7 @@ class Session(Edits):
         segs, _, _ = resolve_song(self.lib, self.grid, self.notes, cfg, self.fps, max(0.0, start), self.dur)
         paths = list(self.lib.paths)
         out = [{"t0": num(s.t0), "t1": num(s.t1), "name": s.clip_name, "from": num(s.src_t0), "dir": s.direction,
+                "proxy": self.proxies.status(paths[s.clip_idx]) if 0 <= s.clip_idx < len(paths) else None,
                 "path": str(paths[s.clip_idx]) if 0 <= s.clip_idx < len(paths) else None,
                 "url": self.media.url(paths[s.clip_idx]) if 0 <= s.clip_idx < len(paths) else None}
                for s in segs]

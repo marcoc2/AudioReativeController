@@ -686,6 +686,7 @@ class ChladniLayer:
     Reads ``features['texture']`` (loudness, swell, harmonic_change, noisiness,
     tremolo, percussive) and ``features['centroid']``.
     """
+    GESTURES = GESTURES                  # its hits: rows (the module's gestures; the GUIs list them)
 
     CENTROID_RANGE = (0.02, 0.25)     # fraction of Nyquist mapped onto ``fineness`` (log scale)
 
@@ -793,6 +794,7 @@ class FlameLayer:
     Loudness drives the light and the speed, swell the zoom, harmonic change makes
     the figure wander; the chord sets the palette and the pose.
     """
+    GESTURES = GESTURES                  # its hits: rows (the module's gestures; the GUIs list them)
 
     def __init__(self, spec: dict, notes: Sequence, width: int, height: int,
                  fps: int, features_at=None, onset_loader=None, grid=None):

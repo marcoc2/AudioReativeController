@@ -14,7 +14,9 @@ import yaml
 
 from core.web import ROOT
 from core.web.load import Loader
-from core.web.render import EngineRender, gpu
+from core.web.preview import ExactPreview
+from core.web.project import checked_render, render_settings_of, write_project
+from core.web.render import EngineRender, FinalRender, gpu
 from core.web.server import Events, Media
 from core.web.session import Session, resolve, shown_path
 
@@ -64,6 +66,8 @@ class Api:
         self._session = Session(self._media, self._events)
         self._loader = Loader(self._session, self._events, self._media)
         self._engine = EngineRender(self._session, self._events, self._media)
+        self._final = FinalRender(self._session, self._events, self._media)
+        self._preview = ExactPreview(self._session, self._loader, self._events, self._media, self._engine)
         self._loader.skip_separation = skip_separation
         self._first = first                  # what to open at start: a project path or a project dict
         self._browser = browser
@@ -74,7 +78,9 @@ class Api:
         self._events.window = window
 
     def _close(self) -> None:
+        self._preview.stop()
         self._engine.stop()
+        self._final.stop()
         self._loader.cancel()
 
     # -- starting ------------------------------------------------------------------------
@@ -223,11 +229,76 @@ class Api:
 
     @_guarded
     def render(self, first: int, last: int):
-        return self._engine.start(first, last)
+        """The exact preview of these bars (in this process when it can, else the engine's)."""
+        if self._final.running():
+            return {"error": "the final render is running: the preview waits for it"}
+        return self._preview.start(first, last)
 
     @_guarded
     def stop_render(self):
-        return self._engine.stop()
+        return self._preview.stop()
+
+    # -- the final video -------------------------------------------------------------------
+    @_guarded
+    def render_settings(self, first=None, last=None):
+        s = self._session
+        with s.lock:
+            got = render_settings_of(s.proj)
+        return {**got, "gpu": gpu(), "where": self._final.where(first, last) if s.audio and s.scene else "",
+                "job": {k: v for k, v in self._final.job.items() if k != "tail"}, "dirty": s.dirty,
+                "choices": {"codec": ["x264", "nvenc"], "clip_fit": ["contain", "cover"],
+                            "order": ["(scene)", "sequential", "random", "shuffle"]}}
+
+    @_guarded
+    def set_render(self, changes: dict):
+        """The render's settings, written into the project's render: and clips:."""
+        from core.web.project import set_in
+        s = self._session
+        try:
+            keys = checked_render(changes)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        with s.lock:
+            for k, v in keys.items():
+                set_in(s.proj, k, v)
+            if s.proj_path is not None:
+                write_project(s.proj_path, keys)
+        if any(k.startswith("clips.") for k in keys):
+            s.montage_later()
+        return self.render_settings()
+
+    @_guarded
+    def render_final(self, first=None, last=None):
+        busy = self._engine.running() or self._preview.busy()
+        got = self._final.start(first, last, busy=busy)
+        if got.get("saved"):
+            self._events.emit("state", self._session.state())
+        return got
+
+    @_guarded
+    def stop_final(self):
+        return self._final.stop()
+
+    @_guarded
+    def open_output(self, what: str = "video"):
+        return self._final.open(what)
+
+    # -- the project's inputs ------------------------------------------------------------
+    @_guarded
+    def save_project(self, changes: dict):
+        got = self._session.save_project(changes)
+        if "error" not in got and got.get("reload"):
+            self._events.log("in", f"the project: {', '.join(got['changed'])} changed; loading "
+                                   f"{', '.join(got['reload'])} again")
+            self._loader.reload(got["reload"])
+        return got
+
+    @_guarded
+    def new_scene(self, name: str):
+        got = self._session.new_scene(name)
+        if "error" not in got and got.get("reload"):
+            self._loader.reload(got["reload"])
+        return got
 
     @_guarded
     def set_resolution(self, text: str):
@@ -246,7 +317,10 @@ class Api:
 SESSION_CALLS = ("spans", "relane", "add", "remove", "set_param", "set_layer", "pin", "move", "new_member",
                  "set_block", "delete_block", "toggle", "set_windows", "mute", "set_mutes", "add_fx", "reorder",
                  "move_fx", "copy_links", "copy_fx", "paste_links", "paste_fx", "menu", "montage_menu", "set_pins",
-                 "to_bg", "put_in_montage", "video_settings", "set_video")
+                 "to_bg", "put_in_montage", "video_settings", "set_video",
+                 "plugin", "set_value", "set_text", "add_trigger", "rename_trigger", "drop_trigger", "set_trigger",
+                 "add_gesture", "drop_item", "add_role", "set_role", "set_mask", "keypath_of",
+                 "knob_open", "knob_new", "knob_check", "knob_apply", "signals", "edit_signal", "project_fields")
 
 
 def _session_call(name):

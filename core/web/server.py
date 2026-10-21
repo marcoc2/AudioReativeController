@@ -79,6 +79,16 @@ class Events:
         """A line of the log: ``kind`` is in (sent to Python), out (asked), sys, warn, err, trace."""
         self.emit("log", {"kind": kind, "text": text})
 
+    def gpu(self, what: str, on: bool) -> None:
+        """Python's work on the GPU starts (``on``) or ends: while any runs, the page's live
+        preview stops drawing (it would fight it for the card)."""
+        with self._lock:
+            jobs = getattr(self, "_gpu", set())
+            (jobs.add if on else jobs.discard)(what)
+            self._gpu = jobs
+            busy = sorted(jobs)
+        self.emit("gpu", {"busy": busy})
+
 
 class Server:
     """The page's server on 127.0.0.1 (a free port); ``api`` answers ``/api/<name>``."""

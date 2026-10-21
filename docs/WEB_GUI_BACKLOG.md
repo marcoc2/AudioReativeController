@@ -392,7 +392,7 @@ preview follow it.
 
 ## From the main window: the object, the project, the render
 
-## 17. [ ] The plugin: what the chosen object is and does
+## 17. [x] The plugin: what the chosen object is and does
 
 **Today.** Two editors of the same thing. The Arrange's plugin window (`_draw_plugin`
 L2735: on, blend, mix or opacity first, each catalog parameter with `~` for knobs, a number
@@ -432,7 +432,18 @@ each a widget instead of YAML:
   **cast**'s roles and acts (who plays which figure, punch, shake, tint… wake), which only
   YAML reaches today (docs/GUI_BACKLOG.md item 10).
 
-## 18. [ ] The knob editor
+**Done (2026-10-21).** `core/web/plugin.py` decides each parameter's editor as `_draw_plugin`
+does (number, flag, colour, number list, knob with Link / Edit / Who plays / Chords from, a text
+line with its file or folder dialog, back to default) and writes it (`set_value`, `set_text`,
+one undo step each; editing inside a signal gives that place its own copy). Its sections: clip
+reactivity with its triggers (who plays, actions, softer hits left out, until, not near, gravity;
+renaming and dropping a trigger fix the others' `until` / `exclude`), gestures (`hits:` rows; the
+Chladni and the Flame now carry their `GESTURES` as class attributes, so both windows show them as
+rows), the cast's roles (who, act, envelope, amount, colour, plays, the other keys as YAML), and
+`mask:` on any layer. An FX of a block opens its own plugin (⚙ in its list). Integers are written
+as integers. Not done: editing the layer's whole YAML text in place (it is shown, read only).
+
+## 18. [x] The knob editor
 
 **Today.** Only in the main window (`_open_knob_editor` L1195 and `core/knob_forms.py`):
 the form by what in the music (19 forms grouped by meaning), its source by kind (MIDI
@@ -451,7 +462,14 @@ track and notes, audio stem, transcription, features), the form's own settings, 
 - **18c. The curve.** `knob_forms.sample` over the visible bars, with the bars, the cuts and
   the playhead, redrawn as the form changes.
 
-## 19. [ ] Signals (the scene's anchors)
+**Done.** `core/web/knobs.py`: the page draws `knob_forms.FORMS` as Python sends it, for the
+three modes (knob, who plays, chords from); sources from the project (MIDI tracks, the features
+with the stems the load found, the transcription); shaping; `rate` with its nested `from` drawn
+in place (18b); the YAML it writes and its curve over the bars in view, 8 bars from the playhead
+or the song, with the bars and the cuts (18c, `knob_forms.sample`); Apply is one undo step. Who
+plays keeps what a trigger does (its actions, envelope, gesture).
+
+## 19. [x] Signals (the scene's anchors)
 
 **Today.** The main window's signals panel (`_draw_signals` L1588): each `&name`, its kind,
 value, where it is defined and who uses it, "edit"; the Arrange keeps aliases when a
@@ -461,7 +479,13 @@ plugin edits (`set_param` with links).
 that uses it. Editing a signal changes every layer that follows it (as `_replace_ids`
 does), and the knob editor offers "use a signal" / "name this one".
 
-## 20. [ ] The project's inputs
+**Done.** A Signals tab beside the browser's: each `&name`, its kind, value, where it is defined
+and who follows it (in the scene's stack order, as the file writes them); choosing one lights
+every block that uses it; Edit opens the knob editor where it is defined, and the places that
+follow it follow the new value (undo keeps the old one). The knob editor offers "use a signal"
+and "name this one"; a trigger's or a score's source can follow a signal.
+
+## 20. [x] The project's inputs
 
 **Today.** Main window only: audio, MIDI, MIDI offset, meter ("22:6/4,27:5/4"), scene
 (and "New…" from a template, `btn_new_scene` L2998), stems rows (name, file) and "skip AI
@@ -476,7 +500,12 @@ template (`btn_new_scene`); "New from an audio file…" makes a project with a n
 `sync_offset_ms` (the studio's −500..+500 ms between picture and sound) shifts the live
 preview against the song.
 
-## 21. [ ] Render
+**Done.** A Project tab in the dock (audio, MIDI, its offset, meter changes, scene and New
+scene…, the project's stems, skip the separation, the picture against the sound), written into
+the project file round trip (`core/web/project.py`); what changed says what loads again (the
+scene, the bars, the song, the features). `sync_offset_ms` shifts the live preview.
+
+## 21. [x] Render
 
 **Today.** Two ways. The Arrange's "Render video..." window (`open_render`, `btn_render`,
 `_render_tick`): the whole song or some bars, where it goes, Render / Stop, the frame it is
@@ -494,7 +523,14 @@ rather than written again, plus the settings above saved in the project's `rende
 too). Before any GPU work it shows the GPU's use and free memory (`nvidia-smi`), so a
 render is never started blind on a busy card.
 
-## 22. [ ] Preview through the engine, and the live one
+**Done.** "Render video…": the whole song or the chosen bars, where it goes, the GPU's use and
+memory, the settings (codec, fps, fit, order, seed, cache, start, clips and masks folders, turn
+wide, stems, profile, gravity override) saved in the project's `render:` and `clips:` (the codec
+too); it saves the scene first when it has edits; progress with the time left, Stop, open the
+video or its folder. One command builder (`render.build_cmd`, the studio's flags) for this and
+the subprocess preview.
+
+## 22. [x] Preview through the engine, and the live one
 
 **Today.** The Arrange's preview (`preview_bars` L2011) asks the studio for an in-process
 render of at most 8 bars (`_clip_preview_frames`: ClipComposer fast-forwarded,
@@ -518,6 +554,16 @@ Two things Live must not do:
   every `.mov` (ProRes), `.mkv` or `.avi` that `arrangement.VIDEOS` accepts. Such a clip
   gets a small H.264 proxy made by ffmpeg once (in `render_output/.web/proxies/`, by the
   file's hash), and until it exists the montage row and the preview say "making a proxy".
+
+**Done, the exact one not yet run.** Live and Exact. Exact (`core/web/preview.py`) runs in
+this process with the session's library and features (the montage fast-forwarded by a dry run,
+`build_compositor`, frames piped to ffmpeg), queues while the project loads, is cancelled by the
+next one, falls back to the engine's subprocess; at most 8 bars. Live stops drawing while Python
+works on the GPU (renders, the exact preview, stem separation) and says so. Clips WebView2 cannot
+play (by container and codec, ffprobe) get an H.264 proxy made once in
+`render_output/.web/proxies/`; until then the preview says "making a proxy". Not verified: the
+exact preview itself (the GPU was busy with 21 of 24 GB in use) and a proxy made for a real
+`.mov`.
 
 ## 23. [ ] Retire the Dear PyGui windows
 

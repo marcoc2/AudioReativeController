@@ -37,6 +37,7 @@ const NB = () => B.length - 1;
 let catalogByKey = new Map();
 let sel = null;             // {type: "member", id, k} | {type: "clip", bar}
 let loadGen = 0;            // the opening the loading events belong to
+let gpuBusy = [];           // Python's work on the GPU now (the live preview waits for it)
 let steps = [];             // the loading steps, as Python tells them
 
 const $ = id => document.getElementById(id);
@@ -107,6 +108,13 @@ const ON = {
   covers: got => { for (const [clip, cover] of Object.entries(got || {})) thumbs.set(clip, cover); scheduleThumbRedraw(); },
   song: e => { if (S && e.url && e.url !== audioUrl) loadAudio(e.url); },
   engine: e => onEngine(e),
+  proxies: got => { Object.assign(proxyOf, got || {}); },
+  final: j => showFinal(j),
+  gpu: e => {
+    gpuBusy = e.busy || [];
+    $("gpuNote").hidden = !gpuBusy.length;
+    $("gpuNote").textContent = gpuBusy.length ? `The GPU is busy (${gpuBusy.join(", ")}): the live preview waits` : "";
+  },
 };
 window.arc = { event: (fn, data) => { try { if (ON[fn]) ON[fn](data); } catch (e) { console.error(fn, e); } } };
 // what comes in the middle of a drag waits for it to end
@@ -407,8 +415,11 @@ function syncVid(v, want) {
   if (el.readyState >= 2) { gl.bindTexture(gl.TEXTURE_2D, v.tex); try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, el); } catch (e) { } }
   return v.tex;
 }
+// a clip the page cannot play is played from its proxy (Python makes it once)
+let proxyOf = {};
+const playable = (url, state) => !!proxyOf[url] || !(state === "making" || state === "failed");
 function drawVideo(url, want, target, t, cover = true) {
-  const v = vid(url);
+  const v = vid(proxyOf[url] || url);
   run(PROGS.fit, { u_aspect: v.aspect, u_cover: cover ? 1 : 0 }, [syncVid(v, want)], target, t);
 }
 function segAt(t) {
@@ -436,12 +447,13 @@ function drawFrame(t) {
   const fit = (S.project.clip_fit || "contain") === "cover";
   // the montage
   const seg = segAt(t);
-  if (seg && seg.url) { drawVideo(seg.url, (seg.from || 0) + (t - seg.t0) * (seg.dir || 1), cur, t, fit); chips.push(["clip", `clips · ${seg.name}`]); }
-  else { clearTarget(cur); if (seg) chips.push(["clip", "clips · nothing"]); }
+  if (seg && seg.url && playable(seg.url, seg.proxy)) { drawVideo(seg.url, (seg.from || 0) + (t - seg.t0) * (seg.dir || 1), cur, t, fit); chips.push(["clip", `clips · ${seg.name}`]); }
+  else { clearTarget(cur); if (seg) chips.push(seg.url ? ["engine", `clips · ${seg.name} · ${seg.proxy === "failed" ? "cannot play here" : "making a proxy"}`] : ["clip", "clips · nothing"]); }
   const lane = id => members.filter(m => m.lane === id && m.enabled && activeSpan(m, bar));
   // BG: its members over the montage
   for (const m of lane("bg")) {
     const sp = activeSpan(m, bar);
+    if (m.kind === "clip" && m.live && sp.url && !playable(sp.url, sp.proxy)) { chips.push(["engine", `BG · ${m.label} · making a proxy`]); continue; }
     if (m.kind === "clip" && m.live && sp.url) {
       drawVideo(sp.url, (sp.from || 0) + (t - B[sp.first - 1]) * (sp.rate || 1), TEX.e, t, true);
       chips.push(["bg", `BG · ${m.label}`]);
@@ -511,16 +523,20 @@ function setView(v) {
   $("engineVideo").hidden = v !== "engine";
 }
 function onEngine(e) {
-  if (e.event === "progress") {
-    $("progBar").style.width = (100 * e.frame / e.of) + "%";
-    $("engineText").textContent = `rendering ${e.frame}/${e.of}`;
+  if (e.event === "progress" || e.event === "queued") {
+    rendering = true;
+    $("bStop").hidden = false; $("prog").hidden = e.event === "queued"; $("engineDot").classList.add("busy");
+    if (e.event === "progress") $("progBar").style.width = (100 * e.frame / Math.max(1, e.of)) + "%";
+    $("engineText").textContent = e.event === "queued" ? `exact preview waits: ${e.why}` : `${e.what || "rendering"} ${e.frame}/${e.of}`;
+    if (e.first) renderSpan = [e.first, e.last];
     return;
   }
   rendering = false;
+  if (e.event === "stopped") { $("bRender").disabled = false; $("bStop").hidden = true; $("prog").hidden = true; $("engineDot").classList.remove("busy"); $("engineText").textContent = "engine idle"; return; }
   $("bRender").disabled = false; $("bStop").hidden = true; $("prog").hidden = true; $("engineDot").classList.remove("busy");
   if (e.event === "done") {
     $("engineText").textContent = "engine idle";
-    const span = renderSpan;
+    const span = e.first ? [e.first, e.last] : renderSpan;
     engine = { url: e.url, first: span[0], last: span[1] };
     const v = $("engineVideo"); v.src = e.url;
     $("viewEngine").disabled = false; $("viewEngine").title = `bars ${span[0]}–${span[1]}`;
@@ -729,7 +745,8 @@ function blockEl(m, s, k, l) {
   const live = m.live && (m.kind === "clip" || (shaders.get(m.key) || {}).status !== "bad");
   const laneCls = m.kind === "fx" || isFxLane(m.lane) ? "fx" : m.kind === "clip" ? `clip ${m.lane}` : m.lane;
   const chosen = sel && sel.type === "member" && sel.id === idOf(m.ref) && (sel.k === k || m.cued || m.always || sel.k == null);
-  const cls = ["block", laneCls, live ? "" : "engine", m.cued ? "cued" : "", m.always ? "always" : "", m.enabled ? "" : "off", s.missing ? "missing" : "", chosen ? "sel" : ""].filter(Boolean).join(" ");
+  const cls = ["block", laneCls, live ? "" : "engine", m.cued ? "cued" : "", m.always ? "always" : "", m.enabled ? "" : "off", s.missing ? "missing" : "", chosen ? "sel" : "",
+    sigLight && sigLight.ids.has(idOf(m.ref)) ? "sig" : ""].filter(Boolean).join(" ");
   const linked = m.params.filter(p => p.knob != null).length;
   let label = m.label;
   if (m.kind === "clip" && s.file && !m.name) label = s.file.split(/[\\/]/).pop().replace(/\.[^.]+$/, "");
@@ -994,7 +1011,7 @@ function showLoop() {
 function updateLoopChip() {
   $("loopChip").hidden = !loop;
   if (loop) $("loopText").textContent = loop[0] === loop[1] ? `bar ${loop[0]}` : `bars ${loop[0]}–${loop[1]}`;
-  $("bRender").textContent = loop ? `Render bars ${loop[0]}–${loop[1]}` : "Render 4 bars here";
+  $("bRender").textContent = loop ? `Exact bars ${loop[0]}–${Math.min(loop[1], loop[0] + 7)}` : "Exact 4 bars here";
 }
 // Preview: the chosen bars played live, over and over (at most 8)
 function previewBars(first, last) {
@@ -1142,6 +1159,7 @@ function renderBrowser() {
     el.addEventListener("dragend", () => { dragItem = null; document.querySelectorAll(".drop-ok").forEach(x => x.classList.remove("drop-ok")); });
   };
   const isPicked = it => picked && (picked.key || picked.path) === (it.key || it.path);
+  if (tab === "signals") { list.append(h("div", { class: "about", text: "…" })); renderSignals(list); return; }
   if (tab === "clips") {
     if (!S.clips.length) { list.append(h("div", { class: "empty-note", text: "The project has no clips folder." })); return; }
     for (const c of S.clips.filter(c => c.name.toLowerCase().includes(q))) {
@@ -1229,6 +1247,9 @@ function renderInspector() {
         h("span", { class: "kbd", text: "Ctrl+S" }), "save the scene (Ctrl+Shift+S: save as)"));
     return;
   }
+  if (sel.type === "knob" && knobCtx) return inspKnob(box);
+  if (sel.type === "knob") { sel = null; return renderInspector(); }
+  if (sel.type === "plugin") { $("inspTitle").textContent = "FX"; box.append(h("div", { class: "btnrow" }, h("button", { class: "btn sm", onclick: () => { sel = sel.back || null; renderInspector(); } }, "← back"))); pluginInto(box, sel.ref); return; }
   if (sel.type === "montage") return inspMontageBars(box, sel.first, sel.last);
   if (sel.type === "clips") return inspMontage(box);
   if (sel.type === "lane") return inspLane(box, sel.group);
@@ -1292,12 +1313,8 @@ function inspMember(box, m) {
   else if (m.kind === "clip" && m.own_fx) box.append(check("its FX may spill outside it (trails, glow, split edges)", m.spill, v => edit("set_layer", m.ref, "spill", v)));
   // its own FX
   if (!isFxLane(m.lane)) box.append(fxList(`FX on ${m.label.slice(0, 24)} only, in order`, m.fx.map((f, j) => ({ ...f, ref: [...m.ref, "fx", j] })), [...m.ref], true));
-  // its knobs
-  if (m.params.length) {
-    box.append(h("div", { class: "sect", dataset: { sect: "knobs" }, text: "Knobs" }));
-    for (const p of m.params) box.append(paramRow(m, p));
-  } else if (m.kind !== "clip") box.append(h("div", { class: "about", dataset: { sect: "knobs" }, text: "No knobs the catalog knows of." }));
-  box.append(sect("The layer, as the scene says (but its bars)"), h("pre", { class: "code", text: m.yaml }));
+  // what it is and does: every parameter (the plugin), mask:
+  pluginInto(box, m.ref, m).then(() => box.append(sect("The layer, as the scene says (but its bars)"), h("pre", { class: "code", text: m.yaml })));
   $("yaml").textContent = m.yaml;
 }
 const PLACES = [["x", 0.5, "0 left .. 1 right"], ["y", 0.5, "0 top .. 1 bottom"], ["scale", 1.0, "1: as tall as the frame"]];
@@ -1348,6 +1365,7 @@ function fxList(title, rows, owner, draggable) {
       h("input", { type: "checkbox", checked: f.enabled, "aria-label": `${f.label} on`, onchange: () => edit("toggle", f.ref) }),
       h("span", { class: "nm", text: `${j + 1}. ${f.label}`, title: f.label }),
       textField(f.bars_text, "all", v => edit("set_windows", f.ref, v), `${f.label}: bars`),
+      h("button", { class: "ib", title: "its parameters", "aria-label": `${f.label}: its parameters`, onclick: () => { const mm = memberById(idOf(f.ref)); if (mm) openPlugin(mm); else { sel = { type: "plugin", ref: f.ref, back: sel }; renderInspector(); } } }, "⚙"),
       h("button", { class: "ib", title: "earlier", "aria-label": "Earlier", onclick: () => edit("reorder", f.ref, -1) }, "↑"),
       h("button", { class: "ib", title: "later", "aria-label": "Later", onclick: () => edit("reorder", f.ref, 1) }, "↓"),
       h("button", { class: "ib", title: "remove", "aria-label": "Remove", onclick: () => edit("remove", f.ref) }, "✕"));
@@ -1411,37 +1429,377 @@ async function inspMontage(box) {
   box.append(sect("Triggers (YAML)"), ta, h("div", { class: "btnrow" }, h("button", { class: "btn", onclick: () => put("triggers", ta.value) }, "Apply")),
     h("div", { class: "about", text: "Who cuts the montage, what each hit does, its gravity. Their own rows come with the plugin's trigger editor." }));
 }
-function guessRange(p) {
-  const v = p.v ?? p.default, d = p.default;
-  const lo = Math.min(0, v, d), hi = Math.max(1, Math.abs(d) * 2, Math.abs(v) * 1.5);
-  return [lo, hi];
-}
 function kickTrack() {
   const t = S.tracks.find(x => /kick|bumbo/i.test(x.name)) || S.tracks[0];
   return t ? t.name : "kick";
 }
-function paramRow(m, p) {
-  const row = h("div", { class: "prm" + (p.knob != null ? " linked" : ""), dataset: { param: p.name } });
-  const out = h("output", { dataset: { out: p.name }, text: p.knob != null ? "" : fmt(p.v) });
-  row.append(h("div", { class: "top" }, h("label", { text: p.name }), out));
-  if (p.knob != null) {
-    const ta = h("textarea", { spellcheck: "false", "aria-label": `${p.name}: what in the music moves it` }, p.knob);
-    const k = knobData(p.knob), err = k && k !== "pending" && k.error;
-    row.append(ta, h("div", { class: "bar" }, h("i", { dataset: { meter: p.name } })));
-    if (err) row.append(h("div", { class: "err", text: err }));
-    row.append(h("div", { class: "btnrow" },
-      h("button", { class: "lnkbtn", onclick: () => edit("set_param", m.ref, p.name, ta.value) }, "Apply"),
-      h("button", { class: "lnkbtn", onclick: () => edit("set_param", m.ref, p.name, +fmt(paramAt(p, now()))) }, "Steady at its value now")));
-  } else {
-    const [lo, hi] = guessRange(p);
-    const num = h("input", { type: "number", step: "any", value: p.v, "aria-label": p.name, onchange: e => edit("set_param", m.ref, p.name, +e.target.value) });
-    row.append(h("div", { class: "slide" },
-      h("input", { type: "range", min: lo, max: hi, step: (hi - lo) / 400, value: p.v, "aria-label": p.name,
-        oninput: e => { p.v = +e.target.value; out.textContent = fmt(p.v); num.value = fmt(p.v); }, onchange: e => edit("set_param", m.ref, p.name, +e.target.value) }), num));
-    row.append(h("button", { class: "lnkbtn", onclick: () => edit("set_param", m.ref, p.name, `{hits: {track: '${kickTrack()}'}, envelope: 0.25, gain: ${fmt((hi - lo) / 2)}, bias: ${fmt(p.v)}}`) }, "Follow the music"));
+
+// ---------------------------------------------------------------------------
+// The plugin: every parameter of the chosen layer with the editor it takes (Python decides
+// which: core/web/plugin.py), its sections (reactivity and triggers, gestures, the cast's
+// roles), mask:
+// ---------------------------------------------------------------------------
+let pluginReq = 0;
+async function pluginInto(box, ref, m = null) {
+  const at = h("div", { class: "plugin", dataset: { sect: "knobs" } }, h("div", { class: "about", text: "…" }));
+  box.append(at);
+  const n = ++pluginReq;
+  const p = await ask("plugin", ref);
+  if (!p || n !== pluginReq) return;
+  at.replaceChildren();
+  if (!p.rows.length && !p.about) { at.append(h("div", { class: "about", text: "No parameters the catalog knows of." })); }
+  if (p.rows.length) at.append(sect(p.owner ? `${p.label}, on ${p.owner}` : "Its parameters"));
+  for (const row of p.rows) at.append(pluginRow(p, row, m));
+  at.append(maskBox(p));
+}
+const fnum = v => typeof v === "number" ? fmt(v) : v;
+function pluginRow(p, r, m) {
+  const ref = p.ref, wrap = h("div", { class: "prm" + (r.widget === "knob" && r.set ? " linked" : "") + (r.set ? " set" : ""), dataset: { param: r.name } });
+  const knobText = m && (m.params.find(x => x.name === r.name) || {}).knob;
+  const out = h("output", { dataset: { out: r.name }, text: "" });
+  wrap.append(h("div", { class: "top" }, h("label", { text: (r.follows ? "~ " : "") + r.name, title: r.about || "" }), out,
+    r.button ? h("button", { class: "lnkbtn", onclick: () => openKnob({ ref, keypath: r.keypath, mode: r.button.mode, default: typeof r.default === "number" ? r.default : 0, title: `${p.label} · ${r.name}`, fromText: r.button.from_text ? (r.value || r.default) : null }) }, r.button.label) : null,
+    r.set && !["gestures", "reactivity", "roles"].includes(r.widget) ? h("button", { class: "ib", title: "back to its default", "aria-label": `${r.name}: back to its default`, onclick: () => edit("set_value", ref, r.keypath, null) }, "↺") : null));
+  const put = v => edit("set_value", ref, r.keypath, v);
+  if (r.widget === "number") {
+    const def = r.value, lo = Math.min(0, def), hi = Math.max(1, Math.abs(def) * 2);
+    const num = h("input", { type: "number", step: r.int ? 1 : "any", value: fnum(r.value), "aria-label": r.name, onchange: e => put(r.int ? Math.round(+e.target.value) : +e.target.value) });
+    out.textContent = fnum(r.value);
+    wrap.append(h("div", { class: "slide" }, h("input", { type: "range", min: lo, max: hi, step: r.int ? 1 : (hi - lo) / 400, value: r.value, "aria-label": r.name,
+      oninput: e => { out.textContent = fmt(+e.target.value); num.value = fmt(+e.target.value); }, onchange: e => put(r.int ? Math.round(+e.target.value) : +e.target.value) }), num));
+  } else if (r.widget === "flag") {
+    wrap.append(check(r.value ? "on" : "off", r.value, v => put(v)));
+  } else if (r.widget === "colour") {
+    const hex = "#" + r.value.map(c => Math.round(c > 1 ? c : c * 255).toString(16).padStart(2, "0")).join("");
+    wrap.append(h("input", { type: "color", value: hex, "aria-label": r.name, onchange: e => { const x = e.target.value; put([1, 3, 5].map(i => parseInt(x.slice(i, i + 2), 16))); } }));
+  } else if (r.widget === "numbers") {
+    wrap.append(h("div", { class: "row" }, r.value.map((v, k) => h("input", { type: "number", step: "any", value: fnum(v), class: "small", "aria-label": `${r.name} ${k + 1}`,
+      onchange: e => { const xs = [...r.value]; xs[k] = +e.target.value; put(xs); } }))));
+  } else if (r.widget === "knob") {
+    wrap.append(h("div", { class: "about mono", text: (r.sig ? `*${r.sig}  ` : "") + r.summary }));
+    if (knobText) wrap.append(h("div", { class: "bar" }, h("i", { dataset: { meter: r.name } })));
+    if (r.envelope != null) wrap.append(field("Envelope (s)", numField(r.envelope, v => edit("set_value", ref, [...r.keypath, "envelope"], Math.max(0, v)), { min: 0, step: 0.05 })));
+  } else if (r.widget === "text") {
+    const inp = textField(r.value, r.hint, v => edit("set_text", ref, r.keypath, v, r.is_text), r.name);
+    wrap.append(h("div", { class: "row nowrap" }, inp, r.pick ? h("button", { class: "ib", title: `choose ${r.pick === "dir" ? "a folder" : "a file"}`, onclick: async () => {
+      const got = await ask("pick_file", r.pick === "dir" ? "folder" : "any"); if (got && got.path) edit("set_text", ref, r.keypath, got.path, true); } }, "…") : null));
+  } else if (r.widget === "gestures") wrap.append(gesturesBox(ref, r));
+  else if (r.widget === "reactivity") wrap.append(reactivityBox(ref, r));
+  else if (r.widget === "roles") wrap.append(rolesBox(ref, r));
+  if (r.about && !["gestures", "reactivity", "roles"].includes(r.widget)) wrap.append(h("div", { class: "about", text: r.about }));
+  return wrap;
+}
+function gesturesBox(ref, r) {
+  const box = h("div", { class: "subrows" });
+  r.items.forEach((g, i) => box.append(h("div", { class: "subrow" },
+    h("select", { "aria-label": "gesture", onchange: e => edit("set_value", ref, [...r.keypath, i, "gesture"], e.target.value) }, r.gestures.map(x => h("option", { value: x, selected: x === g.gesture, text: x }))),
+    h("button", { class: "lnkbtn", title: g.who, onclick: () => openKnob({ ref, keypath: [...r.keypath, i], mode: "trigger", title: `gesture ${i + 1} · who plays` }) }, g.who),
+    numField(g.envelope, v => edit("set_value", ref, [...r.keypath, i, "envelope"], Math.max(0.001, v)), { min: 0, step: 0.05, aria: "envelope" }),
+    h("button", { class: "ib", "aria-label": "Remove", onclick: () => edit("drop_item", ref, r.keypath, i) }, "✕"))));
+  box.append(h("button", { class: "lnkbtn", onclick: async () => { const got = await edit("add_gesture", ref, r.keypath, r.gestures[0]); if (got && got.added != null) openKnob({ ref, keypath: [...r.keypath, got.added], mode: "trigger", title: "the new gesture · who plays" }); } }, "+ gesture"));
+  return box;
+}
+function reactivityBox(ref, r) {
+  const c = r.cfg, kp = r.keypath, put = (k, v) => edit("set_value", ref, [...kp, k], v);
+  const box = h("div", { class: "subrows" },
+    h("div", { class: "fields" },
+      field("New clip", check("every bar", c.clip_per_bar, v => put("clip_per_bar", v))),
+      field("Every N bars", numField(c.bars_per_clip, v => put("bars_per_clip", Math.max(1, Math.round(v))), { min: 1, step: 1 })),
+      field("Order", h("select", { onchange: e => put("clip_order", e.target.value) }, r.orders.map(o => h("option", { value: o, selected: o === c.clip_order, text: o })))),
+      field("Shorter clip", h("select", { onchange: e => put("clip_end", e.target.value) }, r.ends.map(o => h("option", { value: o, selected: o === c.clip_end, text: o })))),
+      field("Seed", textField(c.seed ?? "", "none", v => put("seed", /^-?\d+$/.test(v.trim()) ? +v : null)))));
+  const tkp = [...kp, "triggers"], names = r.triggers.map(t => t.name);
+  box.append(h("div", { class: "fxhead" }, h("span", { class: "sect", text: "Triggers" }),
+    h("button", { class: "lnkbtn", onclick: async () => { const got = await edit("add_trigger", ref, tkp); if (got && got.added) openKnob({ ref, keypath: [...tkp, got.added], mode: "trigger", title: `${got.added} · who plays` }); } }, "+ trigger")));
+  for (const t of r.triggers) {
+    const others = names.filter(n => n !== t.name), tp = (k, v) => edit("set_trigger", ref, tkp, t.name, k, v);
+    box.append(h("div", { class: "trig" },
+      h("div", { class: "row nowrap" }, textField(t.name, "name", v => edit("rename_trigger", ref, tkp, t.name, v), "trigger name"),
+        h("button", { class: "lnkbtn", onclick: () => openKnob({ ref, keypath: [...tkp, t.name], mode: "trigger", title: `${t.name} · who plays` }) }, `Who plays: ${t.who}`),
+        h("button", { class: "ib", "aria-label": `Remove ${t.name}`, onclick: () => edit("drop_trigger", ref, tkp, t.name) }, "✕")),
+      h("div", { class: "row" }, r.actions.map(a => check(a.replace("_", " "), t.actions.includes(a), v => tp("actions", v ? [...t.actions, a] : t.actions.filter(x => x !== a))))),
+      h("div", { class: "fields" },
+        field("Softer hits left out", numField(t.min_velocity, v => tp("min_velocity", Math.round(v)), { min: 0, max: 127, step: 1 }), "below this velocity (0: none)"),
+        field("Until another comes in", h("select", { onchange: e => tp("until", e.target.value || null) }, h("option", { value: "", text: "-" }), others.map(o => h("option", { value: o, selected: o === t.until, text: o })))),
+        field("Not near another's hits", h("select", { onchange: e => tp("exclude", e.target.value || null) }, h("option", { value: "", text: "-" }), others.map(o => h("option", { value: o, selected: o === t.exclude, text: o }))))),
+      check("gravity (the clips' speed pulled around each hit)", !!t.gravity, v => tp("gravity", v)),
+      t.gravity ? h("div", { class: "fields" }, ["peak", "floor", "radius", "curve"].map(k => field(k, numField(t.gravity[k], v => tp(`gravity.${k}`, v), { step: 0.05 })))) : null));
   }
-  if (p.about) row.append(h("div", { class: "about", text: p.about }));
-  return row;
+  return box;
+}
+function rolesBox(ref, r) {
+  const box = h("div", { class: "subrows" });
+  r.items.forEach((x, i) => {
+    const sr = (k, v) => edit("set_role", ref, r.keypath, i, k, v);
+    box.append(h("div", { class: "trig" },
+      h("div", { class: "row nowrap" }, h("b", { text: `Role ${i + 1}` }), h("span", { class: "spacer" }), h("button", { class: "ib", "aria-label": `Remove role ${i + 1}`, onclick: () => edit("drop_item", ref, r.keypath, i) }, "✕")),
+      h("div", { class: "fields" },
+        field("Who", h("div", { class: "row nowrap" }, h("select", { onchange: e => sr("who", e.target.value) }, [...r.who, ...(r.who.includes(x.who) ? [] : [x.who])].map(w => h("option", { value: w, selected: w === x.who, text: w }))),
+          textField("", "or ids 1, 2", v => v.trim() && sr("who", v)))),
+        field("Act", h("select", { onchange: e => sr("act", e.target.value) }, r.acts.map(a => h("option", { value: a, selected: a === x.act, text: a })))),
+        field("Envelope (s)", numField(x.envelope ?? r.envelopes[x.act] ?? 0, v => sr("envelope", v), { min: 0, step: 0.05 })),
+        field("Amount", numField(x.amount ?? 1, v => sr("amount", v), { step: 0.05 })),
+        field("Colour", textField(x.color, "r, g, b · chord · pitch", v => sr("color", v)))),
+      h("button", { class: "lnkbtn", onclick: () => openKnob({ ref, keypath: [...r.keypath, i, "plays"], mode: "trigger", title: `role ${i + 1} · who plays it` }) }, `Plays: ${x.plays}`),
+      field("Its other keys (YAML)", textField(x.extra, "e.g. {shadow: 0.5, hold: 1}", v => sr("extra", v)))));
+  });
+  box.append(h("button", { class: "lnkbtn", onclick: () => edit("add_role", ref, r.keypath) }, "+ role"));
+  return box;
+}
+function maskBox(p) {
+  const mk = p.mask, put = ch => edit("set_mask", p.ref, ch);
+  const box = h("div", { class: "maskbox" }, sect("Mask (in or out of a mask track's figures)"), check("masked", mk.on, v => put(v ? { on: true } : { on: false })));
+  if (mk.on) box.append(h("div", { class: "fields" },
+    field("Mask track", h("div", { class: "row nowrap" }, textField(mk.track, "the render's --masks", v => put({ track: v })),
+      h("button", { class: "ib", title: "choose its folder", onclick: async () => { const got = await ask("pick_file", "folder"); if (got && got.path) put({ track: got.path }); } }, "…"))),
+    field("Where", h("select", { onchange: e => put({ where: e.target.value }) }, mk.wheres.map(w => h("option", { value: w, selected: w === mk.where, text: w })))),
+    field("Objects", textField(mk.objects, "all", v => put({ objects: v })), "ids, like 1, 3"),
+    field("Grow (px)", numField(mk.grow, v => put({ grow: v }), { step: 1 })),
+    field("Feather (px)", numField(mk.feather, v => put({ feather: v }), { min: 0, step: 1 }))));
+  return box;
+}
+
+// ---------------------------------------------------------------------------
+// The knob editor: what in the music, from where, how it responds (core/knob_forms.py's
+// forms, sent by Python), its YAML and its curve; Apply writes it (one undo step)
+// ---------------------------------------------------------------------------
+let knobCtx = null;
+async function openKnob(o) {
+  const data = await ask("knob_open", o.ref, o.keypath, o.mode || "knob", o.default || 0);
+  if (!data) return;
+  if (o.fromText && data.state.form === "constant") {            // a ..._from param: its feature first
+    const st = await ask("knob_new", "feature", null); if (st) { st.source = o.fromText; data.state = st; }
+  }
+  knobCtx = { ...o, data, state: data.state, link: data.link || "", anchor: "", back: sel };
+  sel = { type: "knob" };
+  renderInspector();
+  insp().scrollTop = 0;
+}
+function closeKnob() { const back = knobCtx && knobCtx.back; knobCtx = null; sel = back && back.type !== "knob" ? back : null; renderTimeline(); renderInspector(); }
+function inspKnob(box) {
+  const k = knobCtx, d = k.data, F = d.schema.forms;
+  $("inspTitle").textContent = k.mode === "trigger" ? "Who plays" : k.mode === "score" ? "Chords from" : "Knob";
+  box.append(h("div", { class: "ptitle" }, h("h3", { text: k.title || "a knob" }), h("div", { class: "src", text: d.shared ? `a signal: ${d.shared}` : "" })));
+  if (d.signals.length || k.mode === "knob") {
+    const sigSel = h("select", { "aria-label": "Use a signal", onchange: e => { k.link = e.target.value; renderInspector(); } },
+      h("option", { value: "", text: "its own" }), d.signals.map(s => h("option", { value: s.name, selected: s.name === k.link, text: `*${s.name} · ${s.yaml.slice(0, 40)}` })));
+    box.append(h("div", { class: "fields" }, field("Use a signal", sigSel, "it follows that one, wherever it changes"),
+      k.mode === "knob" ? field("Or name this one", textField(k.anchor, d.shared && d.shared.startsWith("&") ? d.shared.slice(1) : "a new signal", v => { k.anchor = v.trim(); }, "signal name"), d.shared && d.shared.startsWith("&") ? "it is a signal: what follows it changes too" : "others can follow it then") : null));
+  }
+  const body = h("div", { class: "knobbody" });
+  if (k.link) body.append(h("div", { class: "about", text: `It follows *${k.link}: ${(d.signals.find(s => s.name === k.link) || {}).yaml || ""}` }));
+  else drawState(body, k.state, 0, k.mode !== "knob", F, d);
+  const yamlOut = h("pre", { class: "code", id: "knobYaml", text: "…" }), err = h("div", { class: "err", id: "knobErr" });
+  const cv = h("canvas", { class: "curve", id: "knobCurve", width: 600, height: 120 });
+  box.append(body, sect("It writes"), yamlOut, err);
+  if (k.mode === "knob" && !k.link) box.append(h("div", { class: "fxhead" }, h("span", { class: "sect", text: "Its curve" }),
+    h("select", { "aria-label": "Over", onchange: e => { k.span = e.target.value; checkKnob(); } }, [["view", "the bars in view"], ["here", "8 bars from the playhead"], ["song", "the whole song"]].map(([v, t]) => h("option", { value: v, selected: v === (k.span || "view"), text: t })))), cv);
+  box.append(h("div", { class: "btnrow" }, h("button", { class: "btn primary", onclick: applyKnob }, "Apply"), h("button", { class: "btn", onclick: closeKnob }, "Cancel")));
+  checkKnob();
+}
+function knobSetting(name, def, kind, help, get, set) {
+  const v = get() ?? def;
+  let input;
+  if (Array.isArray(kind)) input = h("select", { onchange: e => { set(e.target.value); checkKnob(); } }, kind.map(c => h("option", { value: c, selected: c === v, text: c })));
+  else if (kind === "bool") input = h("input", { type: "checkbox", checked: !!v, onchange: e => { set(e.target.checked); checkKnob(); } });
+  else if (kind === "text") input = textField(String(v), String(def), x => { set(x); checkKnob(); }, name);
+  else input = h("input", { type: "number", step: kind === "int" ? 1 : "any", value: v, onchange: e => { set(kind === "int" ? Math.round(+e.target.value) : +e.target.value); checkKnob(); } });
+  return field(name, input, help);
+}
+function drawState(box, st, depth, onlySource, F, d) {
+  if (st.form === "custom") { box.append(h("div", { class: "about", text: "A knob the editor has no form for: it stays as written (edit it in the layer's YAML)." }), h("pre", { class: "code", text: JSON.stringify(st.custom) })); return; }
+  const f = F[st.form];
+  if (!onlySource) {
+    const groups = new Map();
+    for (const [key, label] of d.schema.choices) { const g = F[key].group; if (!groups.has(g)) groups.set(g, []); groups.get(g).push([key, label.split(" · ").slice(1).join(" · ")]); }
+    box.append(field(depth ? "From (what moves the rate)" : "What in the music", h("select", { onchange: async e => {
+      const nst = await ask("knob_new", e.target.value, st); if (!nst) return;
+      for (const key of Object.keys(st)) delete st[key]; Object.assign(st, nst); renderInspector(); } },
+      [...groups].map(([g, xs]) => h("optgroup", { label: g }, xs.map(([key, label]) => h("option", { value: key, selected: key === st.form, text: label })))))));
+  }
+  const grid = h("div", { class: "fields" });
+  if (f.main && !onlySource) grid.append(knobSetting(f.main[0], f.main[1], f.main[2], f.main[3], () => st.main, v => { st.main = v; }));
+  box.append(grid);
+  // its source
+  const src = st.source;
+  if (f.source === "trigger" && src) {
+    const t = h("div", { class: "fields" });
+    t.append(field("Who plays", h("select", { onchange: e => { src.kind = e.target.value; renderInspector(); } }, d.schema.trigger_kinds.map(x => h("option", { value: x, selected: x === src.kind, text: x })))));
+    if (src.kind === "track") t.append(field("Track", h("div", { class: "row nowrap" }, textField(src.track, "kick, snare", v => { src.track = v; checkKnob(); }, "track"),
+      h("select", { "aria-label": "Add a track", onchange: e => { if (e.target.value) { src.track = src.track ? `${src.track}, ${e.target.value}` : e.target.value; renderInspector(); } } }, h("option", { value: "", text: "+" }), d.sources.tracks.map(x => h("option", { value: x, text: x }))))));
+    if (src.kind === "audio") t.append(field("Audio", textField(src.audio, "stems/snare.wav", v => { src.audio = v; checkKnob(); })));
+    if (src.kind === "melody") t.append(field("Transcription", textField(src.score || d.sources.score, "its folder", v => { src.score = v; checkKnob(); })), field("Voice", textField(src.voice, "any", v => { src.voice = v; checkKnob(); })));
+    if (src.kind !== "audio") t.append(field("Notes", textField(src.notes, "all", v => { src.notes = v; checkKnob(); }), "MIDI numbers, like 36, 38"));
+    const sigs = d.signals.filter(s => s.kind === "trigger");
+    if (sigs.length && k_mode() === "knob") t.append(field("Or a who-plays signal", h("select", { onchange: e => { src.link = e.target.value || undefined; checkKnob(); } }, h("option", { value: "", text: "-" }), sigs.map(s => h("option", { value: s.name, selected: s.name === src.link, text: `*${s.name}` })))));
+    box.append(t);
+  } else if (f.source === "score" && src) {
+    box.append(h("div", { class: "fields" }, field("Transcription", textField(src.score || d.sources.score, "its folder", v => { src.score = v; checkKnob(); })),
+      field("Snap", h("select", { onchange: e => { src.snap = e.target.value; checkKnob(); } }, d.schema.snaps.map(x => h("option", { value: x, selected: x === (src.snap || "auto"), text: x }))))));
+  } else if (f.source === "feature") {
+    const feats = d.sources.features.includes(st.source) ? d.sources.features : [st.source, ...d.sources.features];
+    box.append(field("Feature", h("select", { onchange: e => { st.source = e.target.value; checkKnob(); } }, feats.map(x => h("option", { value: x, selected: x === st.source, text: x })))));
+  }
+  if (onlySource) return;
+  // how it responds
+  const ps = h("div", { class: "fields" });
+  for (const [name, def, kind, help] of f.params) ps.append(knobSetting(name, def, kind, help, () => st.params[name], v => { st.params[name] = v; if (!(st.keep || []).includes(name)) (st.keep = st.keep || []).push(name); }));
+  if (st.form !== "constant") for (const [name, def, kind, help] of d.schema.shaping) ps.append(knobSetting(name, def, kind, help, () => st[name], v => { st[name] = v; }));
+  box.append(ps);
+  if (st.form === "rate") {
+    if (st.from) {
+      const sub = h("div", { class: "nested" }); box.append(sub); drawState(sub, st.from, depth + 1, false, F, d);
+      sub.append(h("button", { class: "lnkbtn", onclick: () => { st.from = null; renderInspector(); } }, "Steady instead"));
+    } else box.append(h("button", { class: "lnkbtn", onclick: async () => { st.from = await ask("knob_new", "hits", null); renderInspector(); } }, "Make the rate follow the music"));
+  }
+}
+const k_mode = () => knobCtx ? knobCtx.mode : "knob";
+let knobTimer = 0;
+function checkKnob() {
+  clearTimeout(knobTimer);
+  knobTimer = setTimeout(async () => {
+    const k = knobCtx; if (!k) return;
+    if (k.link) { const y = $("knobYaml"); if (y) y.textContent = `*${k.link}`; return; }
+    let t0 = 0, t1 = S.song.duration;
+    if ((k.span || "view") === "view") { const sc = $("scroll"); t0 = xToT(sc.scrollLeft); t1 = xToT(sc.scrollLeft + sc.clientWidth - HEAD_W); }
+    else if (k.span === "here") { const b = barAt(now()); t0 = B[b - 1]; t1 = B[Math.min(NB(), b + 8)]; }
+    const r = await call("knob_check", k.state, k.mode, t0, t1, 600).catch(e => ({ error: e.message }));
+    if (knobCtx !== k) return;
+    $("knobYaml").textContent = r.yaml || ""; $("knobErr").textContent = r.error || "";
+    if (r.values) drawCurve($("knobCurve"), r, t0, t1);
+  }, 150);
+}
+function drawCurve(cv, r, t0, t1) {
+  if (!cv) return;
+  const d = devicePixelRatio || 1, w = cv.clientWidth || 300, hh = 120;
+  cv.width = w * d; cv.height = hh * d;
+  const g = cv.getContext("2d"); g.scale(d, d);
+  g.fillStyle = "#0f1115"; g.fillRect(0, 0, w, hh);
+  const X = t => (t - t0) / Math.max(1e-6, t1 - t0) * w;
+  const lo = Math.min(0, ...r.values), hi = Math.max(1e-6, ...r.values), Y = v => hh - 6 - (v - lo) / (hi - lo || 1) * (hh - 12);
+  g.fillStyle = "#2b313d"; for (const b of r.bars) g.fillRect(X(b), 0, 1, hh);
+  g.fillStyle = "rgba(106,167,216,.6)"; for (const c of r.cuts || []) g.fillRect(X(c), hh - 10, 1, 10);
+  g.strokeStyle = "#f0a04b"; g.lineWidth = 1.5; g.beginPath();
+  r.times.forEach((t, i) => { const x = X(t), y = Y(r.values[i]); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke();
+  const p = now(); if (p >= t0 && p <= t1) { g.fillStyle = "#e9e5db"; g.fillRect(X(p), 0, 1, hh); }
+  g.fillStyle = "#9097a7"; g.font = "10px 'IBM Plex Mono', monospace"; g.fillText(`${fmt(hi)}`, 4, 11); g.fillText(`${fmt(lo)}`, 4, hh - 3);
+}
+async function applyKnob() {
+  const k = knobCtx; if (!k) return;
+  const r = await edit("knob_apply", k.ref, k.keypath, k.state, k.mode, k.anchor, k.link);
+  if (r && !r.error) { toast("Applied"); closeKnob(); }
+}
+
+// ---------------------------------------------------------------------------
+// Signals: the scene's anchors (a browser tab); choosing one lights what follows it
+// ---------------------------------------------------------------------------
+let sigLight = null;          // {name, refs: Set of member ids}
+async function renderSignals(list) {
+  const sigs = await ask("signals");
+  if (!sigs || tab !== "signals") return;
+  list.replaceChildren();
+  if (!sigs.length) list.append(h("div", { class: "empty-note", text: "No signals: a knob named in its editor (Or name this one) becomes one; others can follow it." }));
+  for (const s of sigs) {
+    const ids = new Set([s.def, ...s.uses].filter(Boolean).map(p => idOf(p.ref)));
+    const on = sigLight && sigLight.name === s.name;
+    list.append(h("div", { class: "sig" + (on ? " picked" : ""), onclick: e => { if (e.target.closest("button")) return; sigLight = on ? null : { name: s.name, ids }; renderTimeline(); renderSignals(list); } },
+      h("div", { class: "row nowrap" }, h("b", { text: `&${s.name}` }), h("span", { class: "chip", text: s.kind }), h("span", { class: "spacer" }),
+        s.kind !== "other" && s.def ? h("button", { class: "lnkbtn", onclick: async () => { const got = await ask("edit_signal", s.name); if (got) { knobCtx = { ref: got.ref, keypath: got.keypath, mode: got.mode, title: got.title, data: got, state: got.state, link: "", anchor: "", back: sel }; sel = { type: "knob" }; renderInspector(); } } }, "Edit") : null),
+      h("div", { class: "mono small", text: s.yaml }),
+      h("div", { class: "hint", text: (s.def ? `defined in ${s.def.label}` : "defined in the scene's settings") + (s.uses.length ? ` · followed by ${s.uses.map(u => u.label).join(", ")}` : " · nothing follows it yet") })));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The project's inputs (a dock tab)
+// ---------------------------------------------------------------------------
+async function renderProject() {
+  const box = $("dockProject"), f = await ask("project_fields");
+  if (!f) return;
+  const ch = {}, set = (k, v) => { ch[k] = v; $("projSave").disabled = false; };
+  const pickBtn = (kind, k, inp) => inWebview ? h("button", { class: "ib", title: "choose", onclick: async () => { const got = await ask("pick_file", kind); if (got && got.path) { inp.value = got.path; set(k, got.path); } } }, "…") : null;
+  const fileRow = (label, k, kind, hint) => { const inp = h("input", { value: f[k], placeholder: hint, spellcheck: "false", onchange: e => set(k, e.target.value) }); return field(label, h("div", { class: "row nowrap" }, inp, pickBtn(kind, k, inp))); };
+  const stems = f.stems.map(s => ({ ...s }));
+  const stemBox = h("div", { class: "subrows" });
+  const drawStems = () => stemBox.replaceChildren(...stems.map((s, i) => h("div", { class: "subrow" },
+    h("input", { value: s.name, placeholder: "name", class: "small", onchange: e => { s.name = e.target.value; set("stems", stems); } }),
+    h("input", { value: s.path, placeholder: "its file", onchange: e => { s.path = e.target.value; set("stems", stems); } }),
+    h("button", { class: "ib", "aria-label": "Remove", onclick: () => { stems.splice(i, 1); drawStems(); set("stems", stems); } }, "✕"))),
+    h("button", { class: "lnkbtn", onclick: () => { stems.push({ name: "", path: "" }); drawStems(); } }, "+ stem"));
+  drawStems();
+  const syncOut = h("output", { class: "mono", text: `${f.sync_offset_ms} ms` });
+  box.replaceChildren(h("div", { class: "projform" },
+    h("div", { class: "fields" },
+      fileRow("Audio", "audio", "audio", "the song"), fileRow("MIDI", "midi", "any", "none: the bars from the song's beat"),
+      field("MIDI offset (s)", numField(f.midi_offset, v => set("midi_offset", v), { step: 0.001 })),
+      field("Meter changes", textField(f.meter, "like 22:6/4,27:5/4", v => set("meter", v))),
+      fileRow("Scene", "scene", "scene", "scenes/…yaml"),
+      field("", h("button", { class: "btn sm", onclick: async () => { const v = await dialog("A new scene", "Its name (letters, digits, - and _): scenes/<name>.yaml, from the template; the project opens it.", [{ label: "Make it", value: "ok", primary: true }, { label: "Cancel", value: null }], ""); if (v && v.value && v.text) { const got = await ask("new_scene", v.text); if (got) { toast("New scene"); renderProject(); } } } }, "New scene…")),
+      field("Picture against sound", h("div", { class: "row nowrap" }, h("input", { type: "range", min: -500, max: 500, step: 5, value: f.sync_offset_ms, oninput: e => { syncOut.textContent = `${e.target.value} ms`; if (S) S.project.sync_offset_ms = +e.target.value; }, onchange: e => set("sync_offset_ms", +e.target.value) }), syncOut)),
+      field("Stem separation", check("skip the AI separation", f.skip_separation, v => set("skip_separation", v)))),
+    sect("The project's own stems"), stemBox,
+    h("div", { class: "btnrow" }, h("button", { class: "btn primary", id: "projSave", disabled: true, onclick: async () => {
+      const got = await ask("save_project", ch); if (got) { toast(got.reload && got.reload.length ? `Saved: loading ${got.reload.join(", ")} again` : "Saved"); renderProject(); } } }, "Save the project"),
+      h("span", { class: "hint", text: f.path ? `into ${f.path}` : "into projects/<song>.yaml" }))));
+}
+
+// ---------------------------------------------------------------------------
+// Render: the final video (a dialog)
+// ---------------------------------------------------------------------------
+let finalJob = null;
+async function openRenderDialog() {
+  if (!S) return;
+  const m = $("renderDlg"); m.hidden = false;
+  await drawRenderDialog();
+}
+async function drawRenderDialog() {
+  const box = $("renderBody"), what = $("renderDlg").dataset.what || (loop ? "bars" : "song");
+  const r = await ask("render_settings", what === "bars" && loop ? loop[0] : null, what === "bars" && loop ? loop[1] : null);
+  if (!r) return;
+  finalJob = r.job;
+  const put = (k, v) => ask("set_render", { [k]: v }).then(x => x && drawRenderDialog());
+  const g = r.gpu;
+  box.replaceChildren(
+    h("div", { class: "row" }, h("label", { class: "toggle" }, h("input", { type: "radio", name: "rwhat", checked: what === "song", onchange: () => { $("renderDlg").dataset.what = "song"; drawRenderDialog(); } }), "the whole song"),
+      h("label", { class: "toggle" }, h("input", { type: "radio", name: "rwhat", checked: what === "bars", disabled: !loop, onchange: () => { $("renderDlg").dataset.what = "bars"; drawRenderDialog(); } }), loop ? `bars ${loop[0]}–${loop[1]}` : "bars (choose them on the ruler)")),
+    h("div", { class: "about mono", text: `→ ${r.where}` }),
+    h("div", { class: "about", style: g && g.used_mb / g.total_mb > 0.6 ? "color:var(--accent)" : "", text: g ? `GPU ${g.name}: ${g.util}% busy, ${Math.round(g.used_mb / 1024)} of ${Math.round(g.total_mb / 1024)} GB in use` : "no NVIDIA GPU found" }),
+    r.dirty ? h("div", { class: "about", style: "color:var(--accent)", text: "The scene has unsaved changes: Render saves it first (the engine reads the file)." }) : null,
+    h("div", { class: "fields" },
+      field("Codec", h("select", { onchange: e => put("codec", e.target.value) }, r.choices.codec.map(c => h("option", { value: c, selected: c === r.codec, text: c })))),
+      field("FPS", numField(r.fps, v => put("fps", Math.round(v)), { min: 1, max: 120, step: 1 })),
+      field("Clips fit", h("select", { onchange: e => put("clip_fit", e.target.value) }, r.choices.clip_fit.map(c => h("option", { value: c, selected: c === r.clip_fit, text: c })))),
+      field("Clip order", h("select", { onchange: e => put("order", e.target.value) }, r.choices.order.map(c => h("option", { value: c, selected: c === r.order, text: c })))),
+      field("Seed", numField(r.seed ?? "", v => put("seed", Math.round(v)), { step: 1 })),
+      field("Clip cache", numField(r.cache_size, v => put("cache_size", Math.round(v)), { min: 1, step: 1 })),
+      field("Start (s)", numField(r.start_time, v => put("start_time", v), { min: 0, step: 0.5 }), "the whole song from here"),
+      field("Clips folder", textField(r.clips_dir, "none", v => put("clips_dir", v))),
+      field("Masks folder", textField(r.masks, "none", v => put("masks", v)))),
+    h("div", { class: "row" }, check("turn wide clips", r.turn_wide, v => put("turn_wide", v)), check("AI stems", r.stems, v => put("stems", v)), check("profile", r.profile, v => put("profile", v)),
+      check("gravity override", r.gravity.enabled, v => put("gravity.enabled", v))),
+    r.gravity.enabled ? h("div", { class: "fields" }, ["peak", "floor", "radius", "curve"].map(k => field(k, numField(r.gravity[k], v => put(`gravity.${k}`, v), { step: 0.05 })))) : null,
+    h("div", { class: "progress wide", id: "finalProg" }, h("i", { id: "finalBar" })), h("div", { class: "about", id: "finalText" }),
+    h("div", { class: "btnrow" },
+      h("button", { class: "btn primary", id: "finalGo", onclick: async () => { const got = await ask("render_final", what === "bars" && loop ? loop[0] : null, what === "bars" && loop ? loop[1] : null); if (got && got.saved) toast(`Saved ${got.saved} first`); } }, "Render"),
+      h("button", { class: "btn danger", id: "finalStop", onclick: () => ask("stop_final") }, "Stop"),
+      h("button", { class: "btn", id: "finalOpen", onclick: () => ask("open_output", "video") }, "Open the video"),
+      h("button", { class: "btn", id: "finalFolder", onclick: () => ask("open_output", "folder") }, "Show it in its folder"),
+      h("span", { class: "spacer" }), h("button", { class: "btn", onclick: () => { $("renderDlg").hidden = true; } }, "Close")));
+  showFinal(finalJob);
+}
+function showFinal(j) {
+  finalJob = j || finalJob;
+  const jb = finalJob || {};
+  const running = !!jb.running;
+  $("bRenderVideo").classList.toggle("busy", running);
+  if (!$("finalText")) return;
+  const frac = jb.total ? jb.done / jb.total : 0, spent = jb.started ? Date.now() / 1000 - jb.started : 0;
+  const left = running && frac > 0.01 ? spent / frac * (1 - frac) : null;
+  $("finalBar").style.width = `${Math.round(frac * 100)}%`;
+  $("finalText").textContent = running ? `frame ${jb.done || 0} of ${jb.total || "?"}${left != null ? ` · about ${fmtTime(left)} left` : ""}${jb.line ? ` · ${jb.line.slice(0, 80)}` : ""}`
+    : jb.result ? `${jb.result}${jb.out ? `: ${jb.out.split(/[\\/]/).pop()}` : ""}` : "";
+  $("finalGo").disabled = running; $("finalStop").disabled = !running;
+  $("finalOpen").disabled = $("finalFolder").disabled = jb.result !== "done";
 }
 
 // ---------------------------------------------------------------------------
@@ -1479,7 +1837,7 @@ function tick() {
     if (playing && loop && t >= B[loop[1]]) { seek(B[loop[0] - 1]); t = now(); }
     if (playing && t >= S.song.duration - 0.05) { setPlaying(false); pausedAt = loop ? B[loop[0] - 1] : 0; t = pausedAt; }
     frameNo++;
-    if (gl && view === "live") { drawFrame(t); showChips(); }
+    if (gl && view === "live" && !gpuBusy.length) { drawFrame(t + ((S.project.sync_offset_ms || 0) / 1000)); showChips(); }
     syncEngineVideo(t);
     const bar = barAt(t), beats = S.song.beats;
     let beat = 1; if (beats.length) { const i = lastIdx(beats, t + 1e-4), i0 = lastIdx(beats, B[bar - 1] + 1e-4); beat = Math.max(1, i - i0 + 1); }
@@ -1700,7 +2058,8 @@ document.querySelectorAll(".browser .tab").forEach(b => b.addEventListener("clic
 $("search").addEventListener("input", renderBrowser);
 function showDock(which) {
   document.querySelectorAll(".dock .tab").forEach(b => b.setAttribute("aria-selected", b.dataset.dock === which));
-  $("dockLog").hidden = which !== "log"; $("dockYaml").hidden = which !== "yaml";
+  $("dockLog").hidden = which !== "log"; $("dockYaml").hidden = which !== "yaml"; $("dockProject").hidden = which !== "project";
+  if (which === "project") renderProject();
   $("logFilter").hidden = which !== "log";
   if (which === "log") { errorsUnseen = 0; showErrBadge(); }
 }
@@ -1746,6 +2105,7 @@ $("bSaveMenu").addEventListener("click", () => menu($("bSaveMenu"), [
   { label: "Save as…", on: saveAs, disabled: !S }, { label: "Reload from disk", hint: "the undo history goes", on: reloadScene, disabled: !S }]));
 $("bProject").addEventListener("click", projectMenu);
 $("bRender").addEventListener("click", startRender);
+$("bRenderVideo").addEventListener("click", openRenderDialog);
 $("bStop").addEventListener("click", () => call("stop_render"));
 $("viewLive").addEventListener("click", () => setView("live"));
 $("viewEngine").addEventListener("click", () => { if (engine) setView("engine"); });
@@ -1787,7 +2147,7 @@ async function boot() {
     boot0 = got;
     log("sys", inWebview ? "pywebview: the page calls Python through js_api" : "browser: the page calls Python through /api");
     if (got.first) await openProject(got.first);
-    else await showStart();
+    else if (!loadGen) await showStart();         // (a project opened meanwhile stays)
   } catch (e) { log("err", `could not start: ${e.message}`); toast(`Could not start: ${e.message}`, true); console.error(e); }
   requestAnimationFrame(tick);
 }

@@ -108,6 +108,7 @@ select.btn { padding: 0 8px; }
 .ovchip.fg { border-left-color: var(--lane-fg); }
 .ovchip.fx { border-left-color: var(--lane-fx); }
 .ovchip.clip { border-left-color: var(--lane-clip); }
+.gpunote { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; text-align: center; background: rgba(10,11,14,.82); color: var(--accent); font-size: 12.5px; }
 .ovchip.engine { border-left-color: var(--engine); color: #cfc6b3; }
 .meters { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px 12px; padding: 0 12px 12px; }
 .mtr { display: grid; gap: 3px; min-width: 0; }
@@ -343,6 +344,39 @@ pre.yaml { margin: 0; font-family: var(--f-mono); font-size: 11.5px; color: var(
 .modalcard .btnrow { justify-content: flex-end; margin-top: 4px; }
 .toast.bad { border-color: rgba(226,102,90,.7); color: #f3c4bd; }
 
+/* the plugin's rows and sections, the knob editor, signals, the project, the render */
+.plugin { display: grid; gap: 8px; }
+.prm.set .top label { color: var(--accent); }
+.prm .top .ib { margin-left: 2px; }
+.row.nowrap { flex-wrap: nowrap; }
+.row.nowrap > input { flex: 1; min-width: 0; height: 26px; border-radius: 5px; border: 1px solid var(--line-2); background: #0f1115; padding: 0 6px; font-family: var(--f-mono); font-size: 11.5px; }
+input.small { width: 64px; height: 24px; border-radius: 5px; border: 1px solid var(--line-2); background: #0f1115; padding: 0 5px; }
+input[type=color] { width: 56px; height: 26px; border: 1px solid var(--line-2); border-radius: 5px; background: none; padding: 1px; }
+.subrows { display: grid; gap: 6px; }
+.subrow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) 70px auto; gap: 6px; align-items: center; }
+.subrow select, .subrow input { height: 24px; border-radius: 5px; border: 1px solid var(--line-2); background: #0f1115; padding: 0 5px; min-width: 0; }
+.subrow .lnkbtn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trig { display: grid; gap: 6px; padding: 8px; border-radius: 7px; border: 1px solid var(--line); background: rgba(15,17,21,.5); }
+.trig .row.nowrap > input { max-width: 120px; }
+.maskbox { display: grid; gap: 6px; border-top: 1px solid var(--line); padding-top: 8px; }
+.knobbody { display: grid; gap: 10px; }
+.knobbody select, .fld select { height: 26px; border-radius: 5px; border: 1px solid var(--line-2); background: #0f1115; padding: 0 6px; min-width: 0; width: 100%; }
+.nested { border-left: 2px solid rgba(240,160,75,.5); padding-left: 10px; display: grid; gap: 8px; }
+canvas.curve { width: 100%; height: 120px; border-radius: 6px; border: 1px solid var(--line); }
+.sig { display: grid; gap: 3px; padding: 7px 8px; margin: 2px 4px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; }
+.sig:hover { background: var(--panel-2); }
+.sig.picked { border-color: var(--accent); background: rgba(240,160,75,.08); }
+.mono.small { font-family: var(--f-mono); font-size: 10.5px; color: var(--muted); overflow-wrap: anywhere; }
+.block.sig { box-shadow: 0 0 0 2px var(--accent), 0 0 10px rgba(240,160,75,.6); z-index: 3; }
+.projform { display: grid; gap: 10px; max-width: 980px; }
+.projform .fields { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.projform .fld input:not([type]) { height: 26px; border-radius: 5px; border: 1px solid var(--line-2); background: #0f1115; padding: 0 6px; min-width: 0; width: 100%; }
+.modalcard.wide { width: min(760px, 100%); max-height: calc(100vh - 40px); overflow: auto; }
+.renderbody { display: grid; gap: 10px; }
+.renderbody .fields { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+.progress.wide { width: 100%; height: 8px; }
+#bRenderVideo.busy { animation: pulse 1.2s infinite; }
+
 @media (max-width: 720px) { .startcols { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 1250px) {
   .work { grid-template-columns: 220px minmax(0, 1fr); }
@@ -351,3 +385,4 @@ pre.yaml { margin: 0; font-family: var(--f-mono); font-size: 11.5px; color: var(
   .insp > :not(.prm) { grid-column: 1 / -1; }
 }
 @media (prefers-reduced-motion: reduce) { .dot.busy, .step.running .ic { animation: none; } }
+.row.nowrap > select { width: auto; flex: 0 0 auto; max-width: 45%; }

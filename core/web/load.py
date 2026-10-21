@@ -134,6 +134,26 @@ class Loader:
             return
         threading.Thread(target=self._later, args=(gen, chain), daemon=True, name="arc-retry").start()
 
+    def reload(self, steps: list) -> None:
+        """Run again what a change of the project's inputs needs (scene, bars, song, features)."""
+        gen = self.gen
+        self._stopped.discard(gen)
+
+        def run():
+            if "song" in steps:                              # a new song: everything after the project file
+                self.start(self.source if not isinstance(self.source, dict) else dict(self.s.proj))
+                return
+            if "scene" in steps:
+                self._run(gen, "scene", self._scene)
+            if "bars" in steps:
+                self._run(gen, "bars", self._bars)
+            if "scene" in steps or "bars" in steps:
+                self.events.emit("opened", self.full_state())
+                self.s.montage_later()
+            if "features" in steps:
+                self._later(gen, ["stems", "features"])
+        threading.Thread(target=run, daemon=True, name="arc-reload").start()
+
     def _open(self, gen: int, source) -> None:
         if not self._run(gen, "project", self._project, source):
             return self._skip_rest(gen, "project")
@@ -263,16 +283,24 @@ class Loader:
         def progress(stage, done, of, message=""):
             step = "stems" if stage == "stems" else "features"
             state = (self.steps.get(step) or {}).get("state")
+            if stage == "stems" and message.startswith("separating with"):
+                self.events.gpu("stem separation", True)
+            elif stage == "stems" and done >= of:
+                self.events.gpu("stem separation", False)
             if stage == "stems" and done >= of and message.endswith("with sound"):
                 self._set(gen, "stems", "done", message=message)
             elif state != "done":
                 self._set(gen, step, "running", done=done, of=of, message=message)
         self._set(gen, "stems", "running", message="waiting for the spectrum")
-        ex = AudioFeatureExtractor(str(s.audio), fps=s.fps, prebuilt_stems=prebuilt or None,
-                                   skip_separation=skip, progress=progress)
+        try:
+            ex = AudioFeatureExtractor(str(s.audio), fps=s.fps, prebuilt_stems=prebuilt or None,
+                                       skip_separation=skip, progress=progress)
+        finally:
+            self.events.gpu("stem separation", False)
         if gen != self.gen or gen in self._stopped:
             raise Cancelled()
         s.set_features(lambda t: ex.get_features_at_time(t, apply_gate=False))
+        s.stem_names = sorted(ex.stems_energy)
         self.extractor = ex
         self._set(gen, "features", "running", message=f"{ex.duration:.1f} s of features")
         self.events.emit("knobs", {"gen": gen})
@@ -328,6 +356,11 @@ class Loader:
                 batch = {}
                 self._set(gen, "covers", "running", done=i + 1, of=len(clips))
         self._set(gen, "covers", "running", message=f"{len(clips)} clips")
+        used = [c for c in clips] + [str(resolve(f)) for f in self.s.clip_files()]
+        n = self.s.proxies.check(used)
+        if n:
+            self.events.log("sys", f"{n} clips the page cannot play as they are: making a small H.264 proxy of each "
+                                   "(the render reads the clips themselves)")
 
     def page_step(self, step: str, state: str, message: str = "") -> None:
         """What the page did for a step (the song decoded, or not)."""

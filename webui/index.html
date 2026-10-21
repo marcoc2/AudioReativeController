@@ -33,7 +33,8 @@
     <div class="menuwrap"><button class="btn icononly" id="bSaveMenu" aria-haspopup="menu" aria-expanded="false" aria-label="More: save as, reload" title="Save as…, Reload"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4z"/></svg></button></div>
   </div>
   <div class="tgroup">
-    <button class="btn primary" id="bRender" title="The engine renders the chosen bars (clip_generator.py, on the GPU)">Render bars</button>
+    <button class="btn" id="bRender" title="Exact: the chosen bars as the render makes them (on the GPU; Shift+Space)">Exact bars</button>
+    <button class="btn primary" id="bRenderVideo" title="The final video: the whole song or some bars">Render video…</button>
     <button class="btn danger" id="bStop" hidden>Stop</button>
   </div>
   <span class="chip"><span class="dot" id="engineDot"></span><span id="engineText">engine idle</span></span>
@@ -46,6 +47,7 @@
       <button class="tab" role="tab" data-tab="clips" aria-selected="false">Clips</button>
       <button class="tab" role="tab" data-tab="gen" aria-selected="true">Generators</button>
       <button class="tab" role="tab" data-tab="fx" aria-selected="false">FX</button>
+      <button class="tab" role="tab" data-tab="signals" aria-selected="false" title="The scene's signals: what one knob shares with others">Signals</button>
     </div>
     <input class="search" id="search" type="search" placeholder="Filter…" aria-label="Filter the browser">
     <div class="blist" id="blist"></div>
@@ -60,13 +62,14 @@
     <div class="phead"><h2>Preview</h2>
       <div class="seg" role="group" aria-label="What the preview shows">
         <button id="viewLive" aria-pressed="true">Live</button>
-        <button id="viewEngine" aria-pressed="false" disabled title="Render some bars first">Engine render</button>
+        <button id="viewEngine" aria-pressed="false" disabled title="Make an exact preview of some bars first">Exact</button>
       </div>
       <span class="spacer"></span><span class="chip"><span class="dot"></span><span id="fpsText">live</span></span></div>
     <div class="screen" id="screen">
       <canvas id="gl" width="640" height="360"></canvas>
       <video id="engineVideo" muted playsinline hidden></video>
       <div class="ov bot" id="ovBot"></div>
+      <div class="gpunote" id="gpuNote" hidden></div>
     </div>
     <div class="meters" id="meters"></div>
   </section>
@@ -105,6 +108,7 @@
   <div class="tabs" role="tablist">
     <button class="tab" role="tab" data-dock="log" aria-selected="true">Log <span class="errbadge" id="errBadge" hidden></span></button>
     <button class="tab" role="tab" data-dock="yaml" aria-selected="false">YAML</button>
+    <button class="tab" role="tab" data-dock="project" aria-selected="false">Project</button>
     <span class="spacer"></span>
     <div class="logfilter" id="logFilter" role="group" aria-label="Show in the log">
       <button data-kind="all" aria-pressed="true">All</button>
@@ -115,6 +119,7 @@
     </div>
   </div>
   <div class="dockbody" id="dockLog"><div class="log" id="log"></div></div>
+  <div class="dockbody" id="dockProject" hidden></div>
   <div class="dockbody" id="dockYaml" hidden><pre class="yaml" id="yaml">Pick a block: its layer shows here. Save shows the whole scene.</pre></div>
 </section>
 
@@ -150,6 +155,11 @@
     </div>
   </div>
 </div>
+
+<div class="modal" id="renderDlg" hidden><div class="modalcard wide" role="dialog" aria-labelledby="renderTitle">
+  <h3 id="renderTitle">Render the video</h3>
+  <div id="renderBody" class="renderbody"></div>
+</div></div>
 
 <div class="modal" id="modal" hidden><div class="modalcard" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
   <h3 id="modalTitle"></h3><p id="modalText"></p>
