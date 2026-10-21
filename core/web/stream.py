@@ -41,6 +41,7 @@ class EngineStream:
         self.t0 = 0.0
         self.fps = 30
         self.size = (0, 0)
+        self.res = ""                # the preview's size it was started for (the project's shape)
         self.frames: dict = {}
         self.made = -1               # the last frame made (they are made in order)
         self.want = 0                # the last frame the page asked for
@@ -60,21 +61,23 @@ class EngineStream:
     def start(self, t: float, force: bool = False) -> dict:
         """The stream for second ``t``: this one when it has made it, or will soon (``force``:
         a new one anyway, after an edit)."""
+        from core.web.util import preview_res
         s = self.s
         if s.grid is None or s.doc is None:
             return {"error": "the project is loading"}
         t = max(0.0, float(t))
+        res = preview_res(s.proj.get("render") or {})
         with self.lock:
             fi = int(round((t - self.t0) * self.fps))
             same = (not force and self.gen and self.error is None and self.fps == int(s.fps)
-                    and t >= self.t0 - 1e-6)
+                    and self.res == res and t >= self.t0 - 1e-6)     # another video size: made again
             coming = self.alive() and self.made - self.fps * KEEP <= fi <= self.made + self.fps * AHEAD * 2
             if same and (fi in self.frames or coming):
                 self.want, self.asked_at = fi, time.time()
                 self.wake.set()
                 return self.info()
             self.gen += 1
-            self.t0, self.fps = t, int(s.fps)
+            self.t0, self.fps, self.res = t, int(s.fps), res
             self.frames, self.made, self.want, self.asked_at = {}, -1, 0, time.time()
             self.error, self.what, self.ended = None, "starting", False
             gen = self.gen

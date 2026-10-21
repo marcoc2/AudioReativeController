@@ -14,6 +14,7 @@ class FakeSession:
         self.lock = threading.RLock()
         self.grid, self.doc, self.features_at, self.lib = object(), object(), (lambda t: {}), object()
         self.fps, self.dur = 10, 6.0
+        self.proj = {"render": {"resolution": "854x480"}}
 
     def specs(self):
         return [{"source": "clips"}]
@@ -86,3 +87,13 @@ def test_an_engine_error_is_told(monkeypatch):
     assert _wait(lambda: st.error is not None)
     assert "no such layer" in st.frame(gen, 0)[1]["error"]
     assert any(fn == "stream" for fn, _ in ev.got)
+
+
+def test_another_video_size_makes_the_frames_again(monkeypatch):
+    monkeypatch.setattr(preview, "build_stack", lambda s, a, b, check, tell: (Stack(), 10, 8, 8))
+    s = FakeSession()
+    st = EngineStream(s, Events())
+    gen = st.start(1.0)["gen"]
+    assert _wait(lambda: st.made >= 5)
+    s.proj["render"]["resolution"] = "1080x1920"           # the toolbar's Video: the old frames are wide
+    assert st.start(1.2)["gen"] == gen + 1

@@ -2959,7 +2959,7 @@ $("resSel").addEventListener("change", async e => {
   }
   if (!want) { showResolution(); return; }
   const got = await ask("set_resolution", want);
-  if (got) { S.project = { ...S.project, ...got }; setSize(got.resolution); canvas.style.aspectRatio = `${W} / ${H}`; toast(`The video: ${got.resolution}`); }
+  if (got && !got.error) { S.project = { ...S.project, ...got }; setSize(got.resolution); canvas.style.aspectRatio = `${W} / ${H}`; streamEdited(); toast(`The video: ${got.resolution}`); }
   showResolution();
 });
 function showResolution() {

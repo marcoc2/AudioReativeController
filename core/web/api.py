@@ -503,6 +503,7 @@ class Api:
     def set_resolution(self, text: str):
         got = self._session.set_resolution(text)
         if "error" not in got:
+            self._stream.stop()                        # its frames have the old shape: Live makes them again
             self._events.log("in", f"the video's size: {got['resolution']}"
                              + (f" (written in {got['path']})" if got.get("path") else " (no project file to keep it)"))
         return got
