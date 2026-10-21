@@ -42,6 +42,7 @@ let steps = [];             // the loading steps, as Python tells them
 
 // the panels in windows of their own (detachPanel): their documents are searched too
 const outWins = {};            // "inspector" | "subpanel" -> its window
+const outSecs = {};            // and the panel itself (it comes back even when its window just went)
 const outDocs = () => Object.values(outWins).map(w => { try { return w.closed ? null : w.document; } catch (e) { return null; } }).filter(Boolean);
 const $ = id => document.getElementById(id) || outDocs().map(d => d.getElementById(id)).find(Boolean) || null;
 const $q = sel => document.querySelector(sel) || outDocs().map(d => d.querySelector(sel)).find(Boolean) || null;
@@ -3235,7 +3236,7 @@ function detachPanel(cls) {
   for (const n of document.querySelectorAll("link[rel=stylesheet]")) d.head.append(h("link", { rel: "stylesheet", href: n.href }));
   if (ui.theme) d.documentElement.dataset.theme = ui.theme;
   d.body.append(d.adoptNode(sec));
-  outWins[cls] = w;
+  outWins[cls] = w; outSecs[cls] = sec;
   wireDoc(d);
   d.addEventListener("keydown", onKeys);
   w.addEventListener("beforeunload", () => attachPanel(cls, false));
@@ -3246,8 +3247,7 @@ function detachPanel(cls) {
 function attachPanel(cls, close = true) {
   const w = outWins[cls]; if (!w) return;
   delete outWins[cls];
-  let sec = null;
-  try { sec = w.document.querySelector(`.${cls}`); } catch (e) { /* gone */ }
+  const sec = outSecs[cls]; delete outSecs[cls];
   if (sec) document.querySelector(".work").append(document.adoptNode(sec));
   document.querySelector(".work").classList.remove(`${cls}-out`);
   if (menuDoc !== document) menuDoc = document;
@@ -3298,3 +3298,4 @@ async function boot() {
 }
 window.addEventListener("pywebviewready", boot);
 setTimeout(() => { if (!window.pywebview) boot(); }, 700);
+setInterval(() => { for (const [cls, w] of Object.entries(outWins)) if (w.closed) attachPanel(cls, false); }, 500);   // its window closed

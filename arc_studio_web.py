@@ -37,15 +37,43 @@ def parse_args(argv=None):
 
 def own_popups() -> None:
     """A panel the page puts in a window of its own (``window.open("")``, about:blank) opens
-    in WebView2's own popup, which the page's script reaches and drives; any other link still
-    goes to the browser, as pywebview does."""
+    in a plain window of the app (a WinForms form, no address bar), whose WebView2 is handed
+    to the page as that popup, so the page's script reaches and drives it; any other link
+    still goes to the browser, as pywebview does."""
     from webview.platforms import edgechromium
     original = edgechromium.EdgeChrome.on_new_window_request
 
     def on_new_window_request(self, sender, args):
-        if str(args.get_Uri()) in ("about:blank", ""):
-            return                                   # not handled: WebView2's popup, its opener's
-        original(self, sender, args)
+        if str(args.get_Uri()) not in ("about:blank", ""):
+            original(self, sender, args)
+            return
+        WinForms = edgechromium.WinForms
+        deferral = args.GetDeferral()
+        form = WinForms.Form()
+        form.Text = "ARC Studio"
+        form.Icon = self.form.Icon
+        form.BackColor = self.webview.DefaultBackgroundColor
+        feats = args.WindowFeatures
+        form.Width = int(feats.Width) if feats.HasSize else 560
+        form.Height = int(feats.Height) if feats.HasSize else 800
+        view = edgechromium.WebView2()
+        view.DefaultBackgroundColor = self.webview.DefaultBackgroundColor
+        view.Dock = WinForms.DockStyle.Fill
+        form.Controls.Add(view)
+
+        def ready(_sender, _args):
+            core = view.CoreWebView2
+            args.NewWindow = core                    # the page's popup is this window's view
+            args.Handled = True
+            deferral.Complete()
+            core.DocumentTitleChanged += lambda s, e: setattr(form, "Text", core.DocumentTitle or "ARC Studio")
+            core.WindowCloseRequested += lambda s, e: form.Close()
+        view.CoreWebView2InitializationCompleted += ready
+        form.Show()
+        env = sender.Environment
+        options = env.CreateCoreWebView2ControllerOptions()   # the same profile as the page's
+        options.IsInPrivateModeEnabled = sender.Profile.IsInPrivateModeEnabled
+        view.EnsureCoreWebView2Async(env, options)
     edgechromium.EdgeChrome.on_new_window_request = on_new_window_request
 
 
