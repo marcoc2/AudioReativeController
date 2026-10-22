@@ -9,11 +9,21 @@ const TOKEN = new URLSearchParams(location.search).get("t") || "";
 let inWebview = false;
 
 async function call(name, ...args) {
-  if (inWebview) return await window.pywebview.api[name](...args);
-  const r = await fetch(`/api/${name}`, { method: "POST", headers: { "X-ARC-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify(args) });
-  if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
-  return r.json();
+  // a call that takes a while is said in the timeline's bar (busy), but the ones that run all
+  // the time on their own, or say their wait in their own place
+  const quiet = QUIET_CALLS.has(name), n = ++callSeq;
+  const said = quiet ? 0 : setTimeout(() => busy(`call${n}`, `${name.replace(/_/g, " ")}…`), 350);
+  try {
+    if (inWebview) return await window.pywebview.api[name](...args);
+    const r = await fetch(`/api/${name}`, { method: "POST", headers: { "X-ARC-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify(args) });
+    if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
+    return await r.json();
+  } finally { if (!quiet) { clearTimeout(said); busy(`call${n}`); } }
 }
+const QUIET_CALLS = new Set(["stream_start", "stream_stop", "knob", "knob_check", "knob_stages", "knob_draft", "knob_draft_clear",
+  "lab_heard", "lab_wave", "lab_prepare", "page_step", "load_state", "set_ui_pref", "ui_prefs", "boot", "open", "start_render",
+  "start_preview", "stop_render", "pick_file", "covers_for", "clip_frame", "sam_check"]);
+let callSeq = 0;
 // a call whose error is told (toast and log) and answered as null
 async function ask(name, ...args) {
   try {
@@ -1641,16 +1651,6 @@ function textField(value, placeholder, onEnter, aria) {
   inp.addEventListener("change", () => onEnter(inp.value));
   return inp;
 }
-function numField(value, onSet, opts = {}) {
-  const inp = h("input", { type: "number", step: opts.step || "any", min: opts.min, max: opts.max, value: value ?? "", "aria-label": opts.aria || "" });
-  inp.addEventListener("change", () => { if (inp.value !== "") onSet(+inp.value); });
-  return inp;
-}
-function check(label, on, onSet) {
-  return h("label", { class: "toggle" }, h("input", { type: "checkbox", checked: on, onchange: e => onSet(e.target.checked) }), label);
-}
-function openPlugin(m) {
-  select({ type: "member", id: idOf(m.ref), ref: m.ref, k: sel && sel.id === idOf(m.ref) ? sel.k : null });
 // a text that may be long: as tall as it needs (it wraps) instead of cut in one line; Enter sets it
 function growField(value, placeholder, onEnter, aria) {
   const ta = h("textarea", { class: "grow", rows: 1, spellcheck: "false", placeholder, "aria-label": aria || placeholder }, value || "");
@@ -1666,6 +1666,16 @@ function autoGrow(ta, max = 420) {
   setTimeout(fit, 0);
   return ta;
 }
+function numField(value, onSet, opts = {}) {
+  const inp = h("input", { type: "number", step: opts.step || "any", min: opts.min, max: opts.max, value: value ?? "", "aria-label": opts.aria || "" });
+  inp.addEventListener("change", () => { if (inp.value !== "") onSet(+inp.value); });
+  return inp;
+}
+function check(label, on, onSet) {
+  return h("label", { class: "toggle" }, h("input", { type: "checkbox", checked: on, onchange: e => onSet(e.target.checked) }), label);
+}
+function openPlugin(m) {
+  select({ type: "member", id: idOf(m.ref), ref: m.ref, k: sel && sel.id === idOf(m.ref) ? sel.k : null });
   const knobsAt = insp().querySelector("[data-sect='knobs']");
   if (knobsAt) knobsAt.scrollIntoView({ block: "start", behavior: "smooth" });
 }
@@ -2331,6 +2341,7 @@ function checkKnob() {
     if (span === "around") { const p = now(); t0 = Math.max(0, p - 8); t1 = Math.min(S.song.duration, t0 + 16); t0 = Math.max(0, t1 - 16); }
     else if (span === "view") { const sc = $("scroll"); t0 = xToT(sc.scrollLeft); t1 = xToT(sc.scrollLeft + sc.clientWidth - HEAD_W); }
     else if (k.span === "here") { const b = barAt(now()); t0 = B[b - 1]; t1 = B[Math.min(NB(), b + 8)]; }
+    if (labOn()) labRefresh();                       // its lanes at the same time (they say their own wait)
     const r = await call("knob_check", k.state, k.mode, t0, t1, 600).catch(e => ({ error: e.message }));
     if (knobCtx !== k) return;
     $("knobYaml").textContent = r.yaml || ""; $("knobErr").textContent = r.error || "";
@@ -2338,7 +2349,7 @@ function checkKnob() {
     if (r.values) drawCurve($("knobCurve"), r, t0, t1);
     if (r.hits != null) showHits(r);
     if (!r.error) sendDraft(k, r.yaml);
-    if (labOn()) { lab.hits = r.hit_times || null; labRefresh(); }
+    if (labOn()) { lab.hits = r.hit_times || null; labDraw(); }
   }, 150);
 }
 function drawCurve(cv, r, t0, t1) {
@@ -2392,7 +2403,17 @@ async function clearDraft(remake = true) {
 // stay in the area on the right; every change redraws the lanes and goes to Live at once.
 // The curves are the render's own (core/web/lab.py knob_stages), for the bars in view.
 // ---------------------------------------------------------------------------
-let lab = null;          // {k: the link (knobCtx) it is for, data, heard, wave, hear: mix | heard, map, hits}
+// what is loading now, said in the timeline's bar (a spinner and its words), so a wait never
+// looks like a hang: busy(key, words) while it runs, busy(key) when it is done
+const busyNow = new Map();
+function busy(key, text) {
+  if (text) busyNow.set(key, text); else busyNow.delete(key);
+  const el = $("tlBusy"); if (!el) return;
+  el.hidden = !busyNow.size;
+  fill(el, h("i", { class: "spin" }), h("span", { text: [...busyNow.values()].join(" · ") }));
+}
+
+let lab = null;          // {k: the link (knobCtx) it is for, data, heard, wave, hear: mix | heard, map, hits, pending}
 const labOn = () => !!lab && !!knobCtx && lab.k === knobCtx;
 const LAB_HEAD_W = 300;  // the lanes' heads are where the link is set: wider than the timeline's
 const LAB_ROW = 25;      // one line of settings in a head
@@ -2403,18 +2424,19 @@ const stemBufs = new Map();   // a file's URL -> its decoded audio (the Lab play
 let labSeq = 0, labScrollT = 0;
 function openLab() {
   const k = knobCtx; if (!k || k.mode !== "knob" || k.link) return;
-  lab = { k, data: null, heard: null, wave: null, feature: null, hear: lab ? lab.hear : "mix", map: null, hits: null, ppb };
+  lab = { k, data: null, heard: null, wave: null, feature: null, hear: lab ? lab.hear : "mix", map: null, hits: null, ppb, pending: new Set(["stages"]) };
   showLabBar(); renderTimeline(); renderSub(); labRefresh();
 }
 function closeLab() {
   if (!lab) return;
   const was = lab.hear; lab = null;
+  for (const key of ["lab", "labwave", "hear"]) busy(key);
   showLabBar(); renderTimeline();
   if (was !== "mix") rehear();
   if (knobCtx) renderSub();
 }
 // a setting changed in the Lab: its heads and lanes again, the curve, Live
-function labEdited() { lab.map = null; renderTimeline(); checkKnob(); }
+function labEdited() { lab.map = null; lab.pending.add("stages"); busy("lab", "computing the link's lanes…"); renderTimeline(); checkKnob(); }
 const formParams = st => ((lab.k.data.schema.forms[st.form] || {}).params || []);
 function labLayout() {
   const L = [];
@@ -2538,17 +2560,28 @@ async function labRefresh() {
   const k = lab.k, n = ++labSeq, [t0, t1] = labSpan();
   const cols = Math.max(20, Math.min(4000, Math.round(tToX(t1) - tToX(t0))));
   const which = isFeatureForm(k.state) ? `${k.state.source}|${k.state.audio || ""}` : null;
+  const audio = isFeatureForm(k.state) ? k.state.audio || null : null;
+  const label = audio ? ((k.data.sources.audio_sources || []).find(a => a.path === audio) || {}).label || String(audio).split(/[\\/]/).pop() : "the song";
   if (which && lab.feature !== which) {
-    lab.feature = which; lab.heard = null; lab.wave = null;
-    const [feature, audio] = [k.state.source, k.state.audio || null];
+    lab.feature = which; lab.heard = null; lab.wave = null; lab.pending.add("wave");
+    busy("labwave", `reading ${label}'s waveform…`);
+    const feature = k.state.source;
     call("lab_heard", feature, audio).then(r => { if (labOn() && lab.feature === which) { lab.heard = r && !r.error ? r : null; renderTimeline(); showLabBar(); if (lab.hear !== "mix") rehear(); } }).catch(() => { });
-    call("lab_wave", feature, audio).then(r => { if (labOn() && lab.feature === which) { lab.wave = r && !r.error ? r : null; labDraw(); } }).catch(() => { });
+    call("lab_wave", feature, audio).then(r => {
+      if (!labOn() || lab.feature !== which) return;
+      lab.wave = r && !r.error ? r : null; lab.pending.delete("wave"); busy("labwave"); labDraw();
+    }).catch(() => { if (lab) { lab.pending.delete("wave"); busy("labwave"); } });
   }
-  if (!which) { lab.feature = null; lab.heard = null; lab.wave = null; }
-  lab.busy = true; showLabBar();
+  if (!which) { lab.feature = null; lab.heard = null; lab.wave = null; lab.pending.delete("wave"); busy("labwave"); }
+  lab.pending.add("stages"); busy("lab", "computing the link's lanes…"); labDraw();
+  if (audio) {                                   // a stem read for the first time: seconds, said
+    const pre = await call("lab_prepare", audio).catch(() => null);
+    if (n !== labSeq || !labOn()) return;
+    if (pre && !pre.known) busy("lab", `analysing ${label}: the first time takes a few seconds…`);
+  }
   const r = await call("knob_stages", k.state, t0, t1, cols).catch(e => ({ error: e.message }));
   if (n !== labSeq || !labOn()) return;
-  lab.busy = false;
+  lab.pending.delete("stages"); busy("lab");
   lab.data = r && !r.error ? r : null; lab.error = r && r.error; lab.ppb = ppb;
   if (!lab.map) lab.map = mapOf(k.state);
   showLabBar(); labDraw();
@@ -2594,13 +2627,13 @@ function hearing() {
 async function rehear() {
   const hd = labOn() && lab.hear === "heard" && lab.heard ? lab.heard.heard : null;
   if (hd && hd.url && !stemBufs.has(hd.url)) {
-    stemBufs.set(hd.url, "loading"); showLabBar();
+    stemBufs.set(hd.url, "loading"); showLabBar(); busy("hear", `loading ${hd.label} to hear it…`);
     try {
       if (!actx) actx = new AudioContext();
       const r = await fetch(hd.url); if (!r.ok) throw new Error(`HTTP ${r.status}`);
       stemBufs.set(hd.url, await actx.decodeAudioData(await r.arrayBuffer()));
     } catch (e) { stemBufs.delete(hd.url); toast(`It could not be played: ${e.message}`, true); }
-    showLabBar();
+    busy("hear"); showLabBar();
   }
   if (playing && !holding) { const t = now(); stopSource(); pausedAt = t; startSource(); }
 }
@@ -2616,7 +2649,6 @@ function showLabBar() {
     h("span", { class: "hint", text: `${k.title || p.name || "a link"}: set it beside each lane; Live shows it at once` }),
     feat ? h("span", { class: "tgroup" }, h("span", { class: "tlabel", text: "Hear" }), seg("mix", "the song", "the song as it is"),
       seg("heard", loading ? "loading…" : "what it hears", plain ? "it listens to the whole song" : hd ? `${hd.label} alone` : "…")) : null,
-    lab.busy ? h("span", { class: "hint", text: "reading…" }) : null,
     lab.error ? h("span", { class: "err", text: lab.error }) : null,
     h("span", { class: "spacer" }),
     h("span", { class: "hint mono", id: "labYaml", title: "what it writes" }),
@@ -2634,6 +2666,15 @@ function labDraw() {
     g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, cv.width, cv.height); g.setTransform(d, 0, 0, d, 0, 0);
     if (l.kind === "labheard") drawHeard(g, l);
     else drawLabLane(g, l);
+    const waits = l.kind === "labheard" ? lab.pending.has("wave") : lab.pending.has("stages");
+    if (waits) { g.fillStyle = "rgba(17,19,24,.62)"; g.fillRect(0, 0, cv.width / d, l.h); }
+  }
+  for (const el of inner.querySelectorAll(".lanebusy")) el.remove();
+  for (const l of layout.lanes) {
+    const waits = l.kind === "labheard" ? lab.pending.has("wave") : ["labfeat", "labshape", "labparam"].includes(l.kind) && lab.pending.has("stages");
+    const lane = inner.querySelector(`.lane[data-lane="${l.id}"]`);
+    if (waits && lane) lane.append(h("div", { class: "lanebusy" }, h("i", { class: "spin" }),
+      h("span", { text: l.kind === "labheard" ? busyNow.get("labwave") || "reading it…" : busyNow.get("lab") || "computing…" })));
   }
   for (const el of inner.querySelectorAll(".labhandle")) el.remove();
   if (lab.data && isFeatureForm(lab.k.state)) labHandles();

@@ -143,6 +143,16 @@ class Lab:
         return got
 
     # -- what the feature listens to -----------------------------------------------------------
+    def lab_prepare(self, audio: Optional[str] = None) -> dict:
+        """Whether ``audio``'s features are analysed already (the first time takes a few seconds:
+        the page says so while it waits)."""
+        if not audio:
+            return {"known": True}
+        from core.feature_bank import known
+        with self.lock:
+            fps = int(getattr(self.grid, "fps", 0) or self.fps)
+        return {"known": known(audio, fps)}
+
     def audio_sources(self) -> list:
         """Where a feature can be read from: the song (the mix), then each stem with a file (the
         project's own, the AI's) as {label, path, stem}; path None is the song."""

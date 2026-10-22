@@ -555,7 +555,7 @@ SESSION_CALLS = ("spans", "relane", "add", "remove", "set_param", "set_layer", "
                  "knob_open", "knob_new", "knob_check", "knob_apply", "signals", "edit_signal", "project_fields",
                  "list_clips", "clip_info", "covers_for", "place_clips", "clip_frame", "sam_open", "sam_check", "sam_apply", "sam_for_clip",
                  "layer_text", "set_layer_text",
-                 "param_range", "knob_stages", "lab_heard", "lab_wave", "knob_draft", "knob_draft_clear")
+                 "param_range", "knob_stages", "lab_heard", "lab_wave", "lab_prepare", "knob_draft", "knob_draft_clear")
 
 
 def _session_call(name):
