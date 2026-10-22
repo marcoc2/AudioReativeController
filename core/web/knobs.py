@@ -169,6 +169,7 @@ class KnobEditor:
         features = feature_info.names(stems)
         info = {n: feature_info.describe(n, stems) for n in features}
         return {"tracks": tracks, "features": features, "feature_info": info, "feature_groups": list(feature_info.GROUPS),
+                "audio_sources": self.audio_sources(),
                 "score": score, "midi": self.midi_tracks(), "audios": self.project_audios()}
 
     def midi_tracks(self) -> list:

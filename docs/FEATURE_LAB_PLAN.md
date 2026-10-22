@@ -37,6 +37,28 @@ low-res"). Built:
 - **Phase 2, in part.** Any link opens in the Lab. A trigger form shows the MIDI lane and its
   hits; pitch, chord and time forms show the Parameter lane only.
 
+Marco's review of the first Lab (2026-10-21): the values were still set in the narrow area on
+the right, and a stem gave only its level. Now:
+- **The Lab is where the link is set.** Each lane's head (300 px wide in the Lab) holds the
+  settings of the step it draws:
+  - Song: what in the music (the form), with a non-feature form's own settings;
+  - Heard: listen to (the song, or any stem with a file);
+  - Who plays: a trigger form's who plays;
+  - Feature: what of it;
+  - Shaped: window / attack / release;
+  - Parameter: gain, bias, hold inside, its range, Fit.
+
+  Apply and Cancel are on the Lab's bar. The right area only shows what it writes.
+- **Source, then feature.** Every source has the same features: its level, the 7 bands, the 7
+  texture features, brightness and change.
+  - The source is a file: `{feature: texture.noisiness, audio: input/cerne/piano.mp3}`, the
+    way a trigger names whose attacks.
+  - `core/feature_bank.py` analyses each file once per process (the render's knob reads it
+    the same way).
+  - `stems.<name>` stays, as "the older way" (the song's analysis of that stem, falling
+    slowly).
+  - `level` (RMS against its loudest moment) is new for the song too.
+
 Not done:
 - The Lab in a window of its own.
 - A piano roll for pitch / voice and the chord names for chord / harmony.

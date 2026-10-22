@@ -14,6 +14,7 @@ and Cancel takes it away.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -81,13 +82,15 @@ class Lab:
 
         steps = []                                       # (key, label, fn): run together, in order
         if src is not None:
-            steps.append(("feature", "the feature", knob(str(src))))
+            whose = {"audio": state["audio"]} if state.get("audio") else {}           # a file's own, else the song's
+            raw = {"feature": src, **whose}
+            steps.append(("feature", "the feature", knob(raw)))
         p = state.get("params") or {}
-        if form == "feature" and (float(p.get("attack") or 0) > 0 or float(p.get("release") or 0) > 0):
+        if form == "feature":                            # its own lane, where attack / release are set (0: as it is)
             steps.append(("glided", "after attack / release",
-                          knob({"feature": src, "attack": float(p.get("attack") or 0), "release": float(p.get("release") or 0)})))
+                          knob({**raw, "attack": float(p.get("attack") or 0), "release": float(p.get("release") or 0)})))
         if form == "relative":
-            steps.append(("average", "its recent average", _average(knob(str(src)), float(p.get("window") or 6.0))))
+            steps.append(("average", "its recent average", _average(knob(raw), float(p.get("window") or 6.0))))
             bare = {k: v for k, v in spec.items() if k not in ("gain", "bias", "clip")}
             steps.append(("ratio", "against its average (1 = as usual)", knob(bare)))
         steps.append(("final", "what the parameter gets", knob(spec)))
@@ -117,17 +120,20 @@ class Lab:
                         "min": num(v.min()), "max": num(v.max())})
         got = {"t0": t0, "t1": t1, "cols": cols, "stages": out, "yaml": _flow_of(spec)}
         if src is not None:
-            got["song"] = self._feature_spread(str(src))
+            got["song"] = self._feature_spread(str(src), state.get("audio"))
         return got
 
-    def _feature_spread(self, path: str) -> dict:
+    def _feature_spread(self, path: str, audio: Optional[str] = None) -> dict:
         """The feature's spread over the whole song (kept: it does not change with the link)."""
-        key = ("lab-spread", path)
+        key = ("lab-spread", path, audio)
         with self.lock:
             got = self.knobs.get(key)
             features_at, fps, dur = self.features_at, int(self.fps), float(self.dur)
         if got is not None:
             return got
+        if audio:
+            from core.feature_bank import features_of
+            features_at = features_of(str(audio), fps)
         from core.video.layers import _feature
         v = np.array([_feature(features_at(i / fps) or {}, path) for i in range(int(dur * fps))]) if dur > 0 else np.zeros(1)
         got = {"p5": num(np.percentile(v, 5)), "p50": num(np.percentile(v, 50)), "p95": num(np.percentile(v, 95)),
@@ -137,46 +143,69 @@ class Lab:
         return got
 
     # -- what the feature listens to -----------------------------------------------------------
-    def lab_heard(self, feature: str) -> dict:
-        """What the feature listens to, and how the page plays and draws it: a stem's file (its
-        URL), the mix through a band (lo..hi Hz, the page filters the song), or the mix."""
+    def audio_sources(self) -> list:
+        """Where a feature can be read from: the song (the mix), then each stem with a file (the
+        project's own, the AI's) as {label, path, stem}; path None is the song."""
+        from core.web.util import shown_path
+        with self.lock:
+            files = dict(getattr(self, "stem_files", {}) or {})
+            proj = dict(self.proj or {})
+        for name, path in (proj.get("stems") or {}).items():
+            files.setdefault(str(name), str(path))
+        out = [{"label": "the song (the mix)", "path": None, "stem": None}]
+        for name, path in sorted(files.items()):
+            if path and resolve(path).is_file():
+                out.append({"label": f"the {name} stem", "path": shown_path(resolve(path)), "stem": name})
+        return out
+
+    def lab_heard(self, feature: str, audio: Optional[str] = None) -> dict:
+        """What the feature listens to, and how the page plays and draws it: ``heard`` is {label,
+        url (a file's; none: the song), lo / hi (Hz: a band of it, the page filters it)}."""
         from core import feature_info
+        from core.web.util import shown_path
         with self.lock:
             stems = list(self.stem_names)
             files = dict(getattr(self, "stem_files", {}) or {})
         info = feature_info.describe(feature, stems)
         if info is None:
             return {"error": f"{feature}: not a feature the Lab knows"}
-        heard = dict(info["heard"])
-        if heard["kind"] == "stem":
-            path = files.get(heard["stem"])
+        kind = info["heard"]
+        heard: dict = {"label": "the mix"}
+        if audio:
+            if not resolve(audio).is_file():
+                return {"error": f"no audio at {audio}"}
+            name = next((n for n, f in files.items() if resolve(f) == resolve(audio)), None)
+            heard = {"label": f"the {name} stem" if name else Path(str(audio)).name, "url": self.media.url(resolve(audio)),
+                     "path": shown_path(resolve(audio))}
+        elif kind.get("kind") == "stem":
+            path = files.get(kind["stem"])
             if path and resolve(path).is_file():
-                heard["url"] = self.media.url(resolve(path))
+                heard = {"label": f"the {kind['stem']} stem", "url": self.media.url(resolve(path)), "path": shown_path(resolve(path))}
             else:
-                heard = {"kind": "mix", "why": f"the {heard['stem']} stem's file is not known: the mix instead"}
+                heard["why"] = f"the {kind['stem']} stem's file is not known: the mix instead"
+        if kind.get("kind") == "band":
+            heard.update(lo=kind["lo"], hi=kind["hi"], label=f"{heard['label']}, {_hz(kind['lo'])}-{_hz(kind['hi'])}")
         return {**info, "heard": heard}
 
-    def lab_wave(self, feature: str) -> dict:
+    def lab_wave(self, feature: str, audio: Optional[str] = None) -> dict:
         """The waveform of what ``feature`` listens to: its peaks (0..1, scaled to its loudest),
-        ``WAVE_HZ`` a second over the song; the mix's is the page's own."""
-        got = self.lab_heard(feature)
+        ``WAVE_HZ`` a second over the song; the song's own, unfiltered, is the page's."""
+        got = self.lab_heard(feature, audio)
         if "error" in got:
             return got
         heard = got["heard"]
-        if heard["kind"] == "mix":
+        if not heard.get("path") and heard.get("lo") is None:
             return {"kind": "mix"}
-        key = ("lab-wave", heard["kind"], heard.get("stem"), heard.get("lo"), heard.get("hi"))
+        key = ("lab-wave", heard.get("path"), heard.get("lo"), heard.get("hi"))
         with self.lock:
             kept = self.knobs.get(key)
-            audio, files = self.audio, dict(getattr(self, "stem_files", {}) or {})
+            song = self.audio
         if kept is not None:
             return kept
         import librosa
-        if heard["kind"] == "stem":
-            y, sr = librosa.load(str(resolve(files[heard["stem"]])), sr=WAVE_SR, mono=True)
-        else:
+        y, sr = librosa.load(str(resolve(heard["path"]) if heard.get("path") else song), sr=WAVE_SR, mono=True)
+        if heard.get("lo") is not None:
             from scipy.signal import butter, sosfiltfilt
-            y, sr = librosa.load(str(audio), sr=WAVE_SR, mono=True)
             nyq = sr / 2.0
             lo, hi = float(heard["lo"]), min(float(heard["hi"]), nyq * 0.98)
             y = sosfiltfilt(butter(4, [lo / nyq, hi / nyq], btype="band", output="sos"), y)
@@ -184,7 +213,7 @@ class Lab:
         n = len(y) // step
         peaks = np.abs(y[:n * step]).reshape(n, step).max(axis=1) if n else np.zeros(0)
         top = float(peaks.max()) if n else 0.0
-        kept = {"kind": heard["kind"], "hz": WAVE_HZ, "scale": num(1.0 / top) if top > 0 else 1.0,
+        kept = {"kind": "file" if heard.get("path") else "band", "hz": WAVE_HZ, "scale": num(1.0 / top) if top > 0 else 1.0,
                 "peaks": [round(float(x), 3) for x in (peaks / top if top > 0 else peaks)]}
         with self.lock:
             self.knobs[key] = kept
@@ -262,6 +291,10 @@ def _average(raw, window: float):
         state["t"] = t
         return state["avg"]
     return avg
+
+
+def _hz(f: float) -> str:
+    return f"{f / 1000:g} kHz" if f >= 1000 else f"{f:g} Hz"
 
 
 def _flow_of(spec) -> str:

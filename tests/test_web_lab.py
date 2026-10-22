@@ -87,13 +87,36 @@ def test_the_lab_hears_a_stem_s_file_and_a_band_of_the_mix(project, tmp_path):  
     sf.write(tmp_path / "kick.wav", kick, sr)
     sf.write(tmp_path / "song.wav", kick + 0.2 * np.sin(2 * np.pi * 3000 * t).astype(np.float32), sr)
     s.audio, s.stem_names, s.stem_files = tmp_path / "song.wav", ["kick"], {"kick": str(tmp_path / "kick.wav")}
-    heard = s.lab_heard("stems.kick")
-    assert heard["heard"]["url"] == "/media/kick.wav" and heard["label"].startswith("kick")
+    heard = s.lab_heard("stems.kick")["heard"]
+    assert heard["url"] == "/media/kick.wav" and heard["label"] == "the kick stem"
     wave = s.lab_wave("stems.kick")
     assert wave["hz"] == 200 and len(wave["peaks"]) == 800 and max(wave["peaks"]) == 1.0
     assert wave["peaks"][10] > 0.5 and wave["peaks"][40] < 0.05          # on at 0.05 s, off at 0.2 s
-    band = s.lab_wave("subbands.sub_bass")                                # 20-60 Hz: the kick, not the 3 kHz tone
+    band = s.lab_wave("subbands.sub_bass")                                # 20-60 Hz of the song: the kick, not the 3 kHz tone
     assert band["kind"] == "band" and band["peaks"][40] < 0.1 < band["peaks"][10]
     assert s.lab_wave("texture.loudness") == {"kind": "mix"}
+    of = s.lab_heard("subbands.high_mid", str(tmp_path / "kick.wav"))["heard"]   # a band of a stem: its file, filtered
+    assert of["url"] == "/media/kick.wav" and (of["lo"], of["hi"]) == (2000, 4000) and of["label"].startswith("the kick stem")
+    assert [a["label"] for a in s.audio_sources()] == ["the song (the mix)", "the kick stem"]
     s.stem_files = {}
-    assert s.lab_heard("stems.kick")["heard"]["kind"] == "mix"           # no file: the mix, said why
+    assert "why" in s.lab_heard("stems.kick")["heard"]                    # no file: the mix, said why
+
+
+def test_any_feature_of_any_stem(project, tmp_path):  # noqa: F811
+    """A stem's own texture, bands, level, read by the render's knob (audio: its file)."""
+    from core.video.layers import _music_knob
+    sr = 22050
+    t = np.arange(6 * sr) / sr
+    noise = np.random.default_rng(0).normal(0, 0.3, len(t)) * (t >= 3)      # tonal, then noise
+    tone = 0.3 * np.sin(2 * np.pi * 440 * t) * (t < 3)
+    sf.write(tmp_path / "hat.wav", (noise + tone).astype(np.float32), sr)
+    s = _session(project)
+    knob = _music_knob("k", {"feature": "texture.noisiness", "audio": str(tmp_path / "hat.wav")}, [], grid=s.grid)
+    assert knob(1.5) < 0.3 < knob(4.5)
+    level = _music_knob("k", {"feature": "level", "audio": str(tmp_path / "hat.wav")}, [], grid=s.grid)
+    assert level(1.5) > 0.1 and level(4.5) > 0.1
+    s.set_features(_loud)
+    st = state_of({"feature": "texture.noisiness", "audio": str(tmp_path / "hat.wav"), "attack": 0.1, "release": 0.3})
+    got = s.knob_stages(st, 0.0, 6.0, 60)
+    feat = {x["key"]: x for x in got["stages"]}["feature"]
+    assert feat["lo"][10] < 0.3 < feat["hi"][50] and got["song"]["max"] > 0.5

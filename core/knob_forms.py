@@ -200,7 +200,7 @@ def _trigger_spec(st: dict) -> dict:
 def state_of(spec: Any) -> dict:
     """An editor state for a knob spec: {form, main, source, params, gain, bias, from, extra}."""
     form = form_of(spec)
-    st = {"form": form or "custom", "main": None, "source": None, "params": {},
+    st = {"form": form or "custom", "main": None, "source": None, "audio": None, "params": {},
           "gain": 1.0, "bias": 0.0, "clip": None, "from": None, "extra": {}, "keep": [],
           "custom": spec if form is None else None}
     if form is None:
@@ -230,6 +230,8 @@ def state_of(spec: Any) -> dict:
                         "extra": {k: v for k, v in sc.items() if k not in ("score", "snap")}}
     elif f["source"] == "feature":
         st["source"] = str(spec[form])
+        st["audio"] = str(spec["audio"]) if spec.get("audio") else None        # whose: a file's own, else the song's
+        used.add("audio")
     elif form == "bar":
         st["params"].update(dict(spec["bar"] or {}))
         st["keep"] += list(dict(spec["bar"] or {}))
@@ -257,7 +259,7 @@ def spec_of(st: dict) -> Any:
         return float(st["main"])
     shaped = abs(float(st.get("gain", 1.0)) - 1.0) > 1e-9 or abs(float(st.get("bias", 0.0))) > 1e-9 or bool(st.get("clip"))
     glides = form == "feature" and any(float(st["params"].get(p[0], p[1]) or 0) != p[1] for p in f["params"])
-    if form == "feature" and not shaped and not glides and not st.get("extra") and not st.get("keep"):
+    if form == "feature" and not shaped and not glides and not st.get("audio") and not st.get("extra") and not st.get("keep"):
         return str(st["source"])
     out: dict = {}
     if f["source"] == "trigger":
@@ -271,6 +273,8 @@ def spec_of(st: dict) -> Any:
         out[form] = sc
     elif f["source"] == "feature":
         out[form] = str(st["source"])
+        if st.get("audio"):
+            out["audio"] = str(st["audio"])
     elif form == "bar":
         defaults = {p[0]: p[1] for p in f["params"]}
         out["bar"] = {k: v for k, v in st["params"].items()
@@ -299,7 +303,7 @@ def new_state(form: str, like: Optional[dict] = None) -> dict:
     """A fresh state for ``form``, keeping the source of ``like`` when it has the same kind."""
     f = FORMS[form]
     st = {"form": form, "main": f["main"][1] if "main" in f else None, "source": None,
-          "params": {p[0]: p[1] for p in f["params"]}, "gain": 1.0, "bias": 0.0, "clip": None, "from": None,
+          "params": {p[0]: p[1] for p in f["params"]}, "gain": 1.0, "bias": 0.0, "clip": None, "audio": None, "from": None,
           "extra": {}, "keep": list(KEEP.get(form, ())), "custom": None}
     same = like is not None and like.get("form") in FORMS and FORMS[like["form"]]["source"] == f["source"]
     if f["source"] == "trigger":
@@ -309,6 +313,7 @@ def new_state(form: str, like: Optional[dict] = None) -> dict:
                                                                     "keep_snap": True, "extra": {}}
     elif f["source"] == "feature":
         st["source"] = like["source"] if same else "subbands.bass"
+        st["audio"] = like.get("audio") if same else None
     if form == "feature":                            # a new one glides: raw, a feature jumps every frame
         st["params"].update(attack=0.1, release=0.5)
     if form == "constant":

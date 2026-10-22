@@ -464,6 +464,16 @@ def _feature(feats: dict, path: str, default: float = 0.0) -> float:
         return default
 
 
+def _source_features(how: dict, features_at, grid):
+    """The features a feature or relative knob reads: the song's, or ``audio``'s (a file's own,
+    core.feature_bank, at the grid's fps)."""
+    audio = how.get("audio")
+    if not audio:
+        return features_at
+    from core.feature_bank import features_of
+    return features_of(str(audio), int(getattr(grid, "fps", 0) or 24))
+
+
 class _Glided:
     """``raw(t)`` followed with ``attack`` seconds up and ``release`` seconds down (one pole),
     stepped on a fixed grid of ``hz`` from a few time constants back, so a frame's value is
@@ -2006,6 +2016,8 @@ def _knob(name: str, how, notes: Sequence, features_at=None, onset_loader=None, 
         subbands.bass                             an audio feature
         {feature: texture.noisiness, gain: 1, bias: 0}   an audio feature, scaled: bias + gain * feature
         {feature: subbands.bass, attack: 0.1, release: 0.5}   ... gliding: seconds to rise, to fall (0: as is)
+        {feature: texture.noisiness, audio: stems/piano.wav}   ... of that audio file (a stem): its level,
+                                                  sub-bands, texture, centroid, flux (the song's without it)
                                                   (and every form takes clip: [lo, hi], the value held inside)
                                                   (every form below takes gain and bias too)
         {hits: <trigger>, envelope: 0.25, amount: 1}   1 -> 0 after each hit
@@ -2064,6 +2076,8 @@ def _knob(name: str, how, notes: Sequence, features_at=None, onset_loader=None, 
         return lambda t, v=float(how): v
     if isinstance(how, str):
         return lambda t: _feature((features_at(t) if features_at else None) or {}, how)
+    if isinstance(how, dict) and ("feature" in how or "relative" in how):
+        features_at = _source_features(how, features_at, grid)       # audio: that file's own features
     if isinstance(how, dict) and "feature" in how:
         path, gain, bias = str(how["feature"]), float(how.get("gain", 1.0)), float(how.get("bias", 0.0))
         raw = lambda t: _feature((features_at(t) if features_at else None) or {}, path)  # noqa: E731

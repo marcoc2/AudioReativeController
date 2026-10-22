@@ -164,6 +164,12 @@ class AudioFeatureExtractor:
             e_max = float(energy.max())
             self.subbands[name] = energy / (e_max + 1e-6) if e_max > 0 else energy
 
+        # 3.5b the level: its RMS against its loudest moment (^1.3), as a stem's energy is read
+        rms = librosa.feature.rms(y=self.y, hop_length=self.hop_length)[0][:n_frames]
+        rms = np.pad(rms, (0, n_frames - len(rms)))
+        r_max = float(rms.max())
+        self.level = (rms / r_max) ** 1.3 if r_max > 0 else rms
+
         # 3.6 texture: loudness, swell, harmonic change, ... for material without attacks
         self.texture_names = list(TEXTURE_NAMES)
         self.texture = texture_features(self.stft_mag, sr, self.n_fft, self.hop_length)
@@ -341,6 +347,7 @@ class AudioFeatureExtractor:
         current_features["onset"] = bool(self.onset_mask[idx])
         current_features["subbands"] = {n: float(self.subbands[n][idx]) for n in self.subband_names}
         current_features["texture"] = {n: float(self.texture[n][idx]) for n in self.texture_names}
+        current_features["level"] = float(self.level[idx]) if idx < len(self.level) else 0.0
         current_features["nyquist"] = self.sample_rate / 2.0               # the spectrum spans 0 .. this (Hz)
         i0 = int(max(0.0, time_sec) * self.sample_rate)
         current_features["wave"] = self.y[i0:i0 + 512]                      # the waveform from here on (-1 .. 1)
@@ -356,7 +363,7 @@ class AudioFeatureExtractor:
             smoothed["mid"]   = _safe_mean(smoothed["bands"][b_point:m_point])
             smoothed["high"]  = _safe_mean(smoothed["bands"][m_point:])
             smoothed["pulse"], smoothed["frame_idx"] = 1.0 + (smoothed["bass"] ** 2) * 0.15, idx
-            for k in ("centroid", "chroma", "dominant_pitch", "flux", "onset", "subbands", "texture", "nyquist", "wave"):
+            for k in ("centroid", "chroma", "dominant_pitch", "flux", "onset", "subbands", "texture", "nyquist", "wave", "level"):
                 smoothed[k] = current_features[k]
             self.prev_features = smoothed
             return smoothed

@@ -807,7 +807,8 @@ const LANES = [
 ];
 const FX_LANES = ["bgfx", "fgfx", "master"];
 const SAME_KIND = [["bg", "fg"], ["bgfx", "fgfx"]];
-const RULER_H = 42, DENS_H = 10, HEAD_W = 132, EDGE = 7, ROW_MIN = 20, ROW_MAX = 120;
+const RULER_H = 42, DENS_H = 10, EDGE = 7, ROW_MIN = 20, ROW_MAX = 120;
+let HEAD_W = 132;              // the lanes' heads (wider in the Feature Lab, where they hold its settings)
 let rowH = 30;                 // a row's height: the vertical zoom
 let layout = null;
 let rowsOf = {};               // lane -> how many sub-rows its members take (Python's pack)
@@ -853,6 +854,7 @@ function canvasFor(width, height) {
 function renderTimeline() {
   const heads = $("heads"), inner = $("inner"), ruler = $("ruler");
   if (!S) { heads.replaceChildren(); inner.replaceChildren(); ruler.replaceChildren(); inner.style.height = "120px"; return; }
+  HEAD_W = labOn() ? LAB_HEAD_W : 132;
   layout = computeLayout();
   const width = NB() * ppb;
   $("tgrid").style.gridTemplateColumns = `${HEAD_W}px ${width}px`;
@@ -872,6 +874,7 @@ function renderTimeline() {
     const head = h("div", { class: "head" + (l.kind === "midi" ? " midi" : "") + (chosen ? " chosen" : "") + (["track", "clips"].includes(l.kind) ? " pick" : ""),
       style: `height:${l.h}px; --c:${l.c}`, dataset: { lane: l.id }, title: l.kind === "track" ? `${l.name}: click for its settings and FX` : "" }, h("b", { text: l.name }));
     const sub = l.kind === "audio" ? S.project.audio : l.id === "bg" && !has.clips ? "the background" : l.sub;
+    if (labOn()) { labHead(l, head); return head; }       // the Lab: the link's settings, beside what each does
     if (l.kind === "midi") for (const tr of S.tracks) head.append(h("div", { class: "trk", text: tr.name, title: `${tr.name}: ${tr.times.length} notes` }));
     else if (sub && (roomy() || l.h >= 30)) head.append(h("small", { text: sub, title: sub }));
     return head;
@@ -2094,6 +2097,7 @@ function openSubPlugin(ref, label) {
 }
 function renderSub() {
   const box = $("subBody"); if (!box) return;
+  if (labOn()) renderTimeline();                  // the Lab's heads hold the same settings
   box.replaceChildren(); $("subActions").replaceChildren();     // its buttons in its head: always in sight
   const top = subTop();
   $("subTrail").textContent = subStack.length > 1 ? subStack.map(x => x.title).join(" › ") : "";
@@ -2136,6 +2140,14 @@ function inspKnob(box) {
         : textField(k.anchor, "a new signal", v => { k.anchor = v.trim(); }, "signal name"),
         d.shared && d.shared.startsWith("&") ? "it is a signal (its name stays): what follows it changes too" : "others can follow it then") : null));
     box.append(h("div", { class: "hint", text: "A signal is a knob with a name (&name in the YAML): others follow it (*name) and move with it; edit it here and they all change." }));
+  }
+  if (labOn()) {                                   // set in the Lab: here only what it writes
+    box.append(h("div", { class: "about", text: "It is set in the Feature Lab, in the timeline's place: beside each lane, what that step does. Live shows each change at once." }),
+      sect("It writes"), h("pre", { class: "code", id: "knobYaml", text: "…" }), h("div", { class: "err", id: "knobErr" }));
+    fill($("subActions"), h("button", { class: "btn sm on", "aria-pressed": true, onclick: closeLab }, "Lab"),
+      h("button", { class: "btn sm primary", onclick: applyKnob }, "Apply"), h("button", { class: "btn sm", onclick: closeKnob }, "Cancel"));
+    checkKnob();
+    return;
   }
   const body = h("div", { class: "knobbody" });
   if (k.link) body.append(h("div", { class: "about", text: `It follows *${k.link}: ${(d.signals.find(s => s.name === k.link) || {}).yaml || ""}` }));
@@ -2308,6 +2320,7 @@ function checkKnob() {
     const r = await call("knob_check", k.state, k.mode, t0, t1, 600).catch(e => ({ error: e.message }));
     if (knobCtx !== k) return;
     $("knobYaml").textContent = r.yaml || ""; $("knobErr").textContent = r.error || "";
+    const ly = $("labYaml"); if (ly) { ly.textContent = (r.yaml || "").length > 90 ? r.yaml.slice(0, 88) + "…" : r.yaml || ""; ly.title = r.yaml || ""; }
     if (r.values) drawCurve($("knobCurve"), r, t0, t1);
     if (r.hits != null) showHits(r);
     if (!r.error) sendDraft(k, r.yaml);
@@ -2367,10 +2380,12 @@ async function clearDraft(remake = true) {
 // ---------------------------------------------------------------------------
 let lab = null;          // {k: the link (knobCtx) it is for, data, heard, wave, hear: mix | heard, map, hits}
 const labOn = () => !!lab && !!knobCtx && lab.k === knobCtx;
-// the lanes share the timeline's height (it stays as it is): a weight and a least height each
-const LAB_H = { audio: [0.55, 22], labheard: [0.7, 26], labfeat: [1.3, 42], labshape: [1.0, 34], labparam: [1.6, 52] };
+const LAB_HEAD_W = 300;  // the lanes' heads are where the link is set: wider than the timeline's
+const LAB_ROW = 25;      // one line of settings in a head
+// the lanes share the timeline's height (it stays as it is): a weight each, and at least their settings
+const LAB_W = { audio: 0.55, labheard: 0.7, midi: 0.6, labfeat: 1.3, labshape: 1.0, labparam: 1.6 };
 const isFeatureForm = st => st && (st.form === "feature" || st.form === "relative");
-const stemBufs = new Map();   // a stem's URL -> its decoded audio (the Lab plays it)
+const stemBufs = new Map();   // a file's URL -> its decoded audio (the Lab plays it)
 let labSeq = 0, labScrollT = 0;
 function openLab() {
   const k = knobCtx; if (!k || k.mode !== "knob" || k.link) return;
@@ -2384,33 +2399,119 @@ function closeLab() {
   if (was !== "mix") rehear();
   if (knobCtx) renderSub();
 }
+// a setting changed in the Lab: its heads and lanes again, the curve, Live
+function labEdited() { lab.map = null; renderTimeline(); checkKnob(); }
+const formParams = st => ((lab.k.data.schema.forms[st.form] || {}).params || []);
 function labLayout() {
-  const L = []; let y = 0;
-  const add = (o, hh) => { L.push({ shown: 0, ...o, top: 0, h: hh }); };
-  const st = lab.k.state, F = lab.k.data.schema.forms[st.form] || {}, info = featInfo(st);
-  add({ id: "audio", name: "Song", kind: "audio", c: "var(--dim)" }, LAB_H.audio);
-  if (isFeatureForm(st)) add({ id: "lab:heard", name: "Heard", sub: heardSub(), kind: "labheard", c: "#6aa7d8" }, LAB_H.labheard);
-  const trig = F.source === "trigger" || (st.form === "rate" && st.from && (lab.k.data.schema.forms[st.from.form] || {}).source === "trigger");
-  if (trig && S.tracks.length) add({ id: "midi", name: "MIDI", kind: "midi", c: "var(--lane-midi, #c27cf0)" }, 8 + 9 * S.tracks.length);
-  if (isFeatureForm(st)) add({ id: "lab:feature", name: "Feature", sub: info ? info.label : st.source, kind: "labfeat", c: "#9fb36a" }, LAB_H.labfeat);
-  const mid = labStage("glided") || labStage("ratio");
-  if (mid) add({ id: "lab:shape", name: "Shaped", sub: mid.label, kind: "labshape", c: "#d78bb0" }, LAB_H.labshape);
-  const p = lab.k.data.param || {};
-  add({ id: "lab:param", name: "Parameter", sub: `${p.name || "the value"}${p.range ? ` · ${fmt(p.range[0])}..${fmt(p.range[1])}` : ""}`, kind: "labparam", c: "var(--accent)" }, LAB_H.labparam);
-  const fixed = L.filter(l => !Array.isArray(l.h)).reduce((a, l) => a + l.h, 0);
-  const room = Math.max(0, $("scroll").clientHeight - RULER_H - 14 - fixed);
-  const weight = L.filter(l => Array.isArray(l.h)).reduce((a, l) => a + l.h[0], 0);
-  for (const l of L) { if (Array.isArray(l.h)) l.h = Math.max(l.h[1], Math.floor(room * l.h[0] / weight)); l.top = y; y += l.h; }
+  const L = [];
+  const add = (o, rows) => L.push({ shown: 0, ...o, top: 0, rows });
+  const st = lab.k.state, F = lab.k.data.schema.forms[st.form] || {}, feat = isFeatureForm(st);
+  const own = feat ? 0 : Math.ceil(formParams(st).length / 2) + (F.main ? 1 : 0);
+  add({ id: "audio", name: "Song", kind: "audio", c: "var(--dim)" }, 1 + own);
+  if (feat) add({ id: "lab:heard", name: "Heard", kind: "labheard", c: "#6aa7d8" }, 1);
+  const trig = F.source === "trigger";
+  if (trig) add({ id: "midi", name: "Who plays", kind: "midi", c: "var(--lane-midi, #c27cf0)" }, 4);
+  if (feat) add({ id: "lab:feature", name: "Feature", kind: "labfeat", c: "#9fb36a" }, 2);
+  if (feat) add({ id: "lab:shape", name: "Shaped", kind: "labshape", c: "#d78bb0" }, Math.ceil(formParams(st).length / 2));
+  add({ id: "lab:param", name: "Parameter", kind: "labparam", c: "var(--accent)" }, 3);
+  const least = l => Math.max(l.kind === "midi" ? 8 + 9 * S.tracks.length : 0, 22 + LAB_ROW * l.rows);
+  const sum = L.reduce((a, l) => a + least(l), 0);
+  const room = Math.max(0, $("scroll").clientHeight - RULER_H - 14 - sum);
+  const weight = L.reduce((a, l) => a + (LAB_W[l.kind] || 1), 0);
+  let y = 0;
+  for (const l of L) { l.h = least(l) + Math.floor(room * (LAB_W[l.kind] || 1) / weight); l.top = y; y += l.h; }
   return { lanes: L, height: y };
 }
 const labStage = key => lab && lab.data && lab.data.stages ? lab.data.stages.find(s => s.key === key) || null : null;
 const featInfo = st => isFeatureForm(st) && lab && lab.k.data.sources.feature_info ? lab.k.data.sources.feature_info[st.source] || null : null;
-function heardSub() {
-  const hd = lab.heard && lab.heard.heard;
-  if (!hd) return "…";
-  return hd.kind === "stem" ? `the ${hd.stem} stem` : hd.kind === "band" ? `the mix, ${fmtHz(hd.lo)}–${fmtHz(hd.hi)}` : hd.why || "the mix";
-}
 const fmtHz = f => f >= 1000 ? `${fmt(f / 1000)} kHz` : `${fmt(f)} Hz`;
+// a head's line: a word and its control
+const lf = (label, input, title) => h("label", { class: "lf", title: title || "" }, h("span", { text: label }), input);
+function labNum(get, set, title, opts = {}) {
+  return h("input", { type: "number", step: opts.step || "any", value: get() ?? "", placeholder: opts.placeholder || "", title: title || "",
+    onchange: e => { set(e.target.value === "" ? null : +e.target.value); labEdited(); } });
+}
+// what each lane's head sets: the link, step by step, beside what it does
+function labHead(l, head) {
+  const k = lab.k, st = k.state, d = k.data, F = d.schema.forms;
+  const box = h("div", { class: "labset" });
+  if (l.kind === "audio") {                       // what in the music: the form
+    const groups = new Map();
+    for (const [key, label] of d.schema.choices) { const g = F[key].group; if (!groups.has(g)) groups.set(g, []); groups.get(g).push([key, label.split(" · ").slice(1).join(" · ")]); }
+    box.append(lf("follows", h("select", { onchange: async e => {
+      const nst = await ask("knob_new", e.target.value, st); if (!nst) return;
+      for (const key of Object.keys(st)) delete st[key]; Object.assign(st, nst); renderSub(); labEdited(); } },
+      [...groups].map(([g, xs]) => h("optgroup", { label: g }, xs.map(([key, label]) => h("option", { value: key, selected: key === st.form, text: label }))))),
+      "what in the music moves the parameter"));
+    if (!isFeatureForm(st)) {                     // the form's own settings, here (it has no feature lanes)
+      const f = F[st.form] || {};
+      const grid = h("div", { class: "lfgrid" });
+      if (f.main) grid.append(labSetting(f.main[0], f.main[1], f.main[2], f.main[3], () => st.main, v => { st.main = v; }));
+      for (const [name, def, kind, help] of f.params || []) grid.append(labSetting(name, def, kind, help, () => st.params[name], v => { st.params[name] = v; keepParam(st, name); }));
+      box.append(grid);
+    }
+  } else if (l.kind === "labheard") {             // listen to: the song or a stem
+    const srcs = d.sources.audio_sources || [{ label: "the song (the mix)", path: null }];
+    const legacy = String(st.source || "").startsWith("stems.");
+    const cur = legacy ? `legacy:${st.source}` : st.audio || "";
+    box.append(lf("listen to", h("select", { onchange: e => {
+      const v = e.target.value;
+      if (v.startsWith("legacy:")) return;
+      st.audio = v || null;
+      if (String(st.source || "").startsWith("stems.")) st.source = "level";     // a stem's level, read from its own file now
+      labEdited(); } },
+      srcs.map(s => h("option", { value: s.path || "", selected: !legacy && (s.path || "") === cur, text: s.label })),
+      legacy ? h("option", { value: cur, selected: true, text: `${st.source.slice(6)} stem (the song's analysis)` }) : null),
+      "the audio the feature is read from: the whole song, or one stem"));
+    const hd = lab.heard && lab.heard.heard;
+    box.append(h("div", { class: "lfnote", text: hd ? hd.why || `you see and hear ${hd.label}` : "…" }));
+  } else if (l.kind === "labfeat") {              // what of it
+    const info = d.sources.feature_info || {}, groups = d.sources.feature_groups || [];
+    const legacy = String(st.source || "").startsWith("stems.");
+    const feats = (d.sources.features || []).filter(x => legacy ? true : !x.startsWith("stems."));
+    const opt = x => h("option", { value: x, selected: x === st.source, text: info[x] ? info[x].label : x, title: info[x] ? info[x].about : x });
+    box.append(lf("feature", h("select", { onchange: e => { st.source = e.target.value; if (!e.target.value.startsWith("stems.") && legacy) st.audio = null; labEdited(); } },
+      groups.map(g => { const xs = feats.filter(x => info[x] && info[x].group === g); return xs.length ? h("optgroup", { label: g }, xs.map(opt)) : null; }),
+      feats.includes(st.source) ? null : h("option", { value: st.source, selected: true, text: st.source })),
+      "what is measured in what it listens to"));
+    const i = info[st.source];
+    if (i) box.append(h("div", { class: "lfnote", title: i.about, text: `${i.about} · ${fmt(i.range[0])}..${fmt(i.range[1])}${i.unit ? ` ${i.unit}` : ""}` }));
+  } else if (l.kind === "labshape") {             // how it responds: the form's settings
+    const grid = h("div", { class: "lfgrid" });
+    for (const [name, def, kind, help] of formParams(st)) grid.append(labSetting(name, def, kind, help, () => st.params[name], v => { st.params[name] = v; keepParam(st, name); }));
+    box.append(grid);
+  } else if (l.kind === "labparam") {             // what the parameter gets: gain, bias, clip, its range
+    const p = d.param || {};
+    box.append(h("div", { class: "lfgrid" },
+      lf("gain", labNum(() => st.gain ?? 1, v => { st.gain = v ?? 1; }), "the value is bias + gain x it"),
+      lf("bias", labNum(() => st.bias ?? 0, v => { st.bias = v ?? 0; }), "")));
+    const on = h("input", { type: "checkbox", checked: !!st.clip, onchange: e => { st.clip = e.target.checked ? (p.range ? [...p.range] : [0, 1]) : null; labEdited(); } });
+    box.append(h("div", { class: "lfline", title: "held inside lo..hi (clip), so a rare peak cannot throw it out" }, on, h("span", { text: "hold inside" }),
+      labNum(() => st.clip ? st.clip[0] : "", v => { if (st.clip && v != null) st.clip[0] = v; }), h("span", { class: "hint", text: ".." }),
+      labNum(() => st.clip ? st.clip[1] : "", v => { if (st.clip && v != null) st.clip[1] = v; })));
+    const lo = labNum(() => p.range ? p.range[0] : "", () => { }, "", { placeholder: "lo" }), hi = labNum(() => p.range ? p.range[1] : "", () => { }, "", { placeholder: "hi" });
+    const keep = () => { if (lo.value !== "" && hi.value !== "") setLabRange(+lo.value, +hi.value); };
+    lo.onchange = keep; hi.onchange = keep;
+    box.append(h("div", { class: "lfline", title: p.from === "yours" ? "the range you set (kept for this parameter)" : p.from === "about" ? "the range its description says" : "its description says no range: set the one you want" },
+      h("span", { text: "its range" }), lo, h("span", { class: "hint", text: ".." }), hi,
+      p.from === "yours" ? h("button", { class: "lnkbtn", onclick: () => setLabRange(null, null) }, "as described") : h("span", { class: "hint", text: p.from === "about" ? "described" : "unknown" }),
+      isFeatureForm(st) ? h("button", { class: "btn sm", title: "The feature's usual values in these bars (p5..p95) mapped onto its range: writes gain and bias", onclick: labFit }, "Fit") : null));
+  } else if (l.kind === "midi" && F[st.form] && F[st.form].source === "trigger" && st.source) {
+    whoPlaysInto(box, st.source, d);
+  }
+  head.classList.add("labhead");
+  head.append(box);
+}
+function keepParam(st, name) { if (!(st.keep || []).includes(name)) (st.keep = st.keep || []).push(name); }
+function labSetting(name, def, kind, help, get, set) {
+  const v = get() ?? def;
+  let input;
+  if (Array.isArray(kind)) input = h("select", { onchange: e => { set(e.target.value); labEdited(); } }, kind.map(c => h("option", { value: c, selected: c === v, text: c })));
+  else if (kind === "bool") input = h("input", { type: "checkbox", checked: !!v, onchange: e => { set(e.target.checked); labEdited(); } });
+  else if (kind === "text") input = h("input", { value: String(v), onchange: e => { set(e.target.value); labEdited(); } });
+  else input = h("input", { type: "number", step: kind === "int" ? 1 : "any", value: v, onchange: e => { set(kind === "int" ? Math.round(+e.target.value) : +e.target.value); labEdited(); } });
+  return lf(name, input, help);
+}
 // the span the lanes are made for: the bars in view and half a view on each side
 function labSpan() {
   const sc = $("scroll"), a = xToT(sc.scrollLeft), b = xToT(sc.scrollLeft + Math.max(50, sc.clientWidth - HEAD_W));
@@ -2421,24 +2522,26 @@ async function labRefresh() {
   if (!labOn()) return;
   const k = lab.k, n = ++labSeq, [t0, t1] = labSpan();
   const cols = Math.max(20, Math.min(4000, Math.round(tToX(t1) - tToX(t0))));
-  if (isFeatureForm(k.state) && lab.feature !== k.state.source) {
-    lab.feature = k.state.source; lab.heard = null; lab.wave = null;
-    const feature = lab.feature;
-    call("lab_heard", feature).then(r => { if (labOn() && lab.feature === feature) { lab.heard = r && !r.error ? r : null; renderTimeline(); if (lab.hear !== "mix") rehear(); } }).catch(() => { });
-    call("lab_wave", feature).then(r => { if (labOn() && lab.feature === feature) { lab.wave = r && !r.error ? r : null; labDraw(); } }).catch(() => { });
+  const which = isFeatureForm(k.state) ? `${k.state.source}|${k.state.audio || ""}` : null;
+  if (which && lab.feature !== which) {
+    lab.feature = which; lab.heard = null; lab.wave = null;
+    const [feature, audio] = [k.state.source, k.state.audio || null];
+    call("lab_heard", feature, audio).then(r => { if (labOn() && lab.feature === which) { lab.heard = r && !r.error ? r : null; renderTimeline(); showLabBar(); if (lab.hear !== "mix") rehear(); } }).catch(() => { });
+    call("lab_wave", feature, audio).then(r => { if (labOn() && lab.feature === which) { lab.wave = r && !r.error ? r : null; labDraw(); } }).catch(() => { });
   }
+  if (!which) { lab.feature = null; lab.heard = null; lab.wave = null; }
+  lab.busy = true; showLabBar();
   const r = await call("knob_stages", k.state, t0, t1, cols).catch(e => ({ error: e.message }));
   if (n !== labSeq || !labOn()) return;
-  const before = lab.data ? lab.data.stages.map(s => s.key).join() : null;
+  lab.busy = false;
   lab.data = r && !r.error ? r : null; lab.error = r && r.error; lab.ppb = ppb;
   if (!lab.map) lab.map = mapOf(k.state);
-  showLabBar();
-  if (!lab.data || before !== lab.data.stages.map(s => s.key).join()) renderTimeline(); else labDraw();
+  showLabBar(); labDraw();
 }
 // the map gain / bias say: the input's lo..hi (on the step before the final) onto the output's lo..hi
 function mapOf(st) {
   const pre = labStage("glided") || labStage("ratio") || labStage("feature"), fin = labStage("final");
-  const p = lab.k.data.param || {}, g = +st.gain || 1, b = +st.bias || 0;
+  const p = lab.k.data.param || {}, g = +(st.gain ?? 1), b = +(st.bias ?? 0);
   const out = p.range ? [...p.range] : fin ? [fin.p5, fin.p95] : [0, 1];
   if (Math.abs(g) < 1e-9) return { inLo: pre ? pre.p5 : 0, inHi: pre ? pre.p95 : 1, outLo: out[0], outHi: out[1] };
   return { inLo: (out[0] - b) / g, inHi: (out[1] - b) / g, outLo: out[0], outHi: out[1] };
@@ -2448,7 +2551,7 @@ function commitMap(m) {
   if (Math.abs(m.inHi - m.inLo) < 1e-9) return;
   st.gain = +((m.outHi - m.outLo) / (m.inHi - m.inLo)).toFixed(4);
   st.bias = +(m.outLo - st.gain * m.inLo).toFixed(4);
-  lab.map = m; renderSub();
+  renderTimeline(); checkKnob(); lab.map = m;
 }
 function labFit() {
   const pre = labStage("glided") || labStage("ratio") || labStage("feature"); if (!pre) return;
@@ -2465,22 +2568,23 @@ async function setLabRange(lo, hi) {
   lab.map = null; renderTimeline(); labRefresh();
 }
 function setHear(mode) { if (!lab) return; lab.hear = mode; showLabBar(); rehear(); }
-// what plays: the song, the stem the feature listens to, or the song through its band
+// what plays: the song, or the file the feature listens to, through its band when it is one
 function hearing() {
   const hd = labOn() && lab.hear === "heard" && lab.heard ? lab.heard.heard : null;
-  if (hd && hd.kind === "stem" && stemBufs.get(hd.url) instanceof AudioBuffer) return { buf: stemBufs.get(hd.url) };
-  if (hd && hd.kind === "band" && actx) return { buf: audioBuf, lo: hd.lo, hi: Math.min(hd.hi, actx.sampleRate / 2 - 50) };
-  return { buf: audioBuf };
+  if (!hd) return { buf: audioBuf };
+  const own = hd.url && stemBufs.get(hd.url) instanceof AudioBuffer ? stemBufs.get(hd.url) : null;
+  const band = hd.lo != null && actx ? { lo: hd.lo, hi: Math.min(hd.hi, actx.sampleRate / 2 - 50) } : {};
+  return { buf: own || audioBuf, ...band };
 }
 async function rehear() {
   const hd = labOn() && lab.hear === "heard" && lab.heard ? lab.heard.heard : null;
-  if (hd && hd.kind === "stem" && !stemBufs.has(hd.url)) {
+  if (hd && hd.url && !stemBufs.has(hd.url)) {
     stemBufs.set(hd.url, "loading"); showLabBar();
     try {
       if (!actx) actx = new AudioContext();
       const r = await fetch(hd.url); if (!r.ok) throw new Error(`HTTP ${r.status}`);
       stemBufs.set(hd.url, await actx.decodeAudioData(await r.arrayBuffer()));
-    } catch (e) { stemBufs.delete(hd.url); toast(`The stem could not be played: ${e.message}`, true); }
+    } catch (e) { stemBufs.delete(hd.url); toast(`It could not be played: ${e.message}`, true); }
     showLabBar();
   }
   if (playing && !holding) { const t = now(); stopSource(); pausedAt = t; startSource(); }
@@ -2489,27 +2593,21 @@ function showLabBar() {
   const bar = $("labBar"); if (!bar) return;
   if (!labOn()) { bar.hidden = true; bar.replaceChildren(); return; }
   bar.hidden = false;
-  const k = lab.k, st = k.state, p = k.data.param || {}, info = featInfo(st), feat = isFeatureForm(st);
-  const hd = lab.heard && lab.heard.heard, loading = hd && hd.kind === "stem" && stemBufs.get(hd.url) === "loading";
-  const seg = (v, label, title) => h("button", { class: "btn sm" + (lab.hear === v ? " on" : ""), "aria-pressed": lab.hear === v, title, disabled: v === "heard" && (!hd || hd.kind === "mix"), onclick: () => setHear(v) }, label);
-  const lo = h("input", { type: "number", step: "any", value: p.range ? p.range[0] : "", placeholder: "lo", "aria-label": "the range's low end" });
-  const hi = h("input", { type: "number", step: "any", value: p.range ? p.range[1] : "", placeholder: "hi", "aria-label": "the range's high end" });
-  const keep = () => { if (lo.value !== "" && hi.value !== "") setLabRange(+lo.value, +hi.value); };
-  lo.onchange = keep; hi.onchange = keep;
-  const clip = h("input", { type: "checkbox", checked: !!st.clip, disabled: !p.range && !st.clip, onchange: e => { st.clip = e.target.checked && p.range ? [...p.range] : null; renderSub(); } });
+  const k = lab.k, st = k.state, p = k.data.param || {}, feat = isFeatureForm(st);
+  const hd = lab.heard && lab.heard.heard, loading = hd && hd.url && stemBufs.get(hd.url) === "loading";
+  const plain = hd && !hd.url && hd.lo == null;
+  const seg = (v, label, title) => h("button", { class: "btn sm" + (lab.hear === v ? " on" : ""), "aria-pressed": lab.hear === v, title, disabled: v === "heard" && (!hd || plain), onclick: () => setHear(v) }, label);
   fill(bar, h("b", { text: "Feature Lab" }),
-    h("span", { class: "hint", text: `${p.name || "the value"} ← ${info ? info.label : st.form}` }),
-    feat ? h("span", { class: "tgroup" }, h("span", { class: "tlabel", text: "Hear" }), seg("mix", "the mix", "the song as it is"),
-      seg("heard", loading ? "loading…" : "what it hears", hd && hd.kind === "mix" ? "it listens to the whole mix" : hd && hd.kind === "band" ? `the mix through ${fmtHz(hd.lo)}–${fmtHz(hd.hi)} only` : hd ? `the ${hd.stem} stem alone` : "…")) : null,
-    feat ? h("button", { class: "btn sm", title: "The feature's usual values in these bars (p5..p95) mapped onto the parameter's range: writes gain and bias", onclick: labFit }, "Fit") : null,
-    h("span", { class: "tgroup", title: p.from === "yours" ? "the range you set (kept for this parameter)" : p.from === "about" ? "the range its description says" : "its description says no range: set the one you want" },
-      h("span", { class: "tlabel", text: "Range" }), lo, h("span", { class: "hint", text: ".." }), hi,
-      p.from === "yours" ? h("button", { class: "lnkbtn", onclick: () => setLabRange(null, null) }, "as described") : h("span", { class: "hint", text: p.from === "about" ? "described" : "none" })),
-    h("label", { class: "row nowrap", title: "the value held inside the range (clip), so a rare peak cannot throw it out" }, clip, h("span", { text: "hold inside" })),
-    h("span", { class: "hint mono", text: `gain ${fmt(+st.gain || 1)} · bias ${fmt(+st.bias || 0)}${st.clip ? ` · clip ${fmt(st.clip[0])}..${fmt(st.clip[1])}` : ""}` }),
+    h("span", { class: "hint", text: `${k.title || p.name || "a link"}: set it beside each lane; Live shows it at once` }),
+    feat ? h("span", { class: "tgroup" }, h("span", { class: "tlabel", text: "Hear" }), seg("mix", "the song", "the song as it is"),
+      seg("heard", loading ? "loading…" : "what it hears", plain ? "it listens to the whole song" : hd ? `${hd.label} alone` : "…")) : null,
+    lab.busy ? h("span", { class: "hint", text: "reading…" }) : null,
     lab.error ? h("span", { class: "err", text: lab.error }) : null,
     h("span", { class: "spacer" }),
-    h("button", { class: "btn sm", onclick: closeLab }, "Back to the timeline"));
+    h("span", { class: "hint mono", id: "labYaml", title: "what it writes" }),
+    h("button", { class: "btn sm primary", onclick: applyKnob }, "Apply"),
+    h("button", { class: "btn sm", onclick: closeKnob }, "Cancel"),
+    h("button", { class: "btn sm", title: "the timeline again; the link stays open on the right", onclick: closeLab }, "Back to the timeline"));
 }
 // the lanes' pictures, for the span the data has
 function labDraw() {
