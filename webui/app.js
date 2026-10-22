@@ -1651,6 +1651,21 @@ function check(label, on, onSet) {
 }
 function openPlugin(m) {
   select({ type: "member", id: idOf(m.ref), ref: m.ref, k: sel && sel.id === idOf(m.ref) ? sel.k : null });
+// a text that may be long: as tall as it needs (it wraps) instead of cut in one line; Enter sets it
+function growField(value, placeholder, onEnter, aria) {
+  const ta = h("textarea", { class: "grow", rows: 1, spellcheck: "false", placeholder, "aria-label": aria || placeholder }, value || "");
+  ta.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); onEnter(ta.value); ta.blur(); } });
+  ta.addEventListener("change", () => onEnter(ta.value));
+  return autoGrow(ta);
+}
+// a textarea as tall as its text (up to max px), now and as it is typed in
+function autoGrow(ta, max = 420) {
+  const fit = () => { if (!ta.isConnected) return; ta.style.height = "auto"; ta.style.height = Math.min(max, ta.scrollHeight + 2) + "px"; };
+  ta.addEventListener("input", fit);
+  new ResizeObserver(fit).observe(ta);
+  setTimeout(fit, 0);
+  return ta;
+}
   const knobsAt = insp().querySelector("[data-sect='knobs']");
   if (knobsAt) knobsAt.scrollIntoView({ block: "start", behavior: "smooth" });
 }
@@ -1961,7 +1976,7 @@ function pluginRow(p, r, m) {
     if (knobText) wrap.append(h("div", { class: "bar" }, h("i", { dataset: { meter: r.name } })));
     if (r.envelope != null) wrap.append(field("Envelope (s)", numField(r.envelope, v => edit("set_value", ref, [...r.keypath, "envelope"], Math.max(0, v)), { min: 0, step: 0.05 })));
   } else if (r.widget === "text") {
-    const inp = textField(r.value, r.hint, v => edit("set_text", ref, r.keypath, v, r.is_text), r.name);
+    const inp = growField(r.value, r.hint, v => edit("set_text", ref, r.keypath, v, r.is_text), r.name);
     wrap.append(h("div", { class: "row nowrap" }, inp, r.pick ? h("button", { class: "ib", title: `choose ${r.pick === "dir" ? "a folder" : "a file"}`, onclick: async () => {
       const got = await ask("pick_file", r.pick === "dir" ? "folder" : "any", false, "", r.value || ""); if (got && got.path) edit("set_text", ref, r.keypath, got.path, true); } }, "…") : null));
   } else if (r.widget === "gestures") wrap.append(gesturesBox(ref, r));
@@ -2046,7 +2061,7 @@ function maskBox(p) {
 async function layerTextInto(box, ref) {
   const n = box.plugReq, got = await ask("layer_text", ref);
   if (!got || box.plugReq !== n) return;
-  const ta = h("textarea", { class: "codeedit", spellcheck: "false", rows: Math.min(18, got.text.split("\n").length + 1), "aria-label": "The layer's YAML" }, got.text);
+  const ta = autoGrow(h("textarea", { class: "codeedit", spellcheck: "false", rows: Math.min(18, got.text.split("\n").length + 1), "aria-label": "The layer's YAML" }, got.text));
   const err = h("div", { class: "err" });
   box.append(sect("The layer, as the scene says (but its bars)"), ta, err,
     h("div", { class: "btnrow" }, h("button", { class: "btn sm", onclick: async () => {
@@ -2263,8 +2278,7 @@ function drawState(box, st, depth, onlySource, F, d) {
       const nst = await ask("knob_new", e.target.value, st); if (!nst) return;
       for (const key of Object.keys(st)) delete st[key]; Object.assign(st, nst); renderSub(); } },
       [...groups].map(([g, xs]) => h("optgroup", { label: g }, xs.map(([key, label]) => h("option", { value: key, selected: key === st.form, text: label })))))));
-    const said = (d.schema.choices.find(([key]) => key === st.form) || [])[1];     // all of it, under it
-    if (said && said.split(" · ").slice(1).join(" · ").length > 34) box.append(h("div", { class: "about", text: said.split(" · ").slice(1).join(" · ") }));
+    if (f && f.label) box.append(h("div", { class: "about", text: f.label }));     // all of it, under its short name
   }
   const grid = h("div", { class: "fields" });
   if (f.main && !onlySource) grid.append(knobSetting(f.main[0], f.main[1], f.main[2], f.main[3], () => st.main, v => { st.main = v; }));
@@ -2414,7 +2428,8 @@ function labLayout() {
   if (feat) add({ id: "lab:feature", name: "Feature", kind: "labfeat", c: "#9fb36a" }, 2);
   if (feat) add({ id: "lab:shape", name: "Shaped", kind: "labshape", c: "#d78bb0" }, Math.ceil(formParams(st).length / 2));
   add({ id: "lab:param", name: "Parameter", kind: "labparam", c: "var(--accent)" }, 3);
-  const least = l => Math.max(l.kind === "midi" ? 8 + 9 * S.tracks.length : 0, 22 + LAB_ROW * l.rows);
+  const notes = { labheard: 1, labfeat: 1 };      // a line of words under the control
+  const least = l => Math.max(l.kind === "midi" ? 8 + 9 * S.tracks.length : 0, 24 + LAB_ROW * l.rows + 16 * (notes[l.kind] || 0));
   const sum = L.reduce((a, l) => a + least(l), 0);
   const room = Math.max(0, $("scroll").clientHeight - RULER_H - 14 - sum);
   const weight = L.reduce((a, l) => a + (LAB_W[l.kind] || 1), 0);
@@ -2442,7 +2457,7 @@ function labHead(l, head) {
       const nst = await ask("knob_new", e.target.value, st); if (!nst) return;
       for (const key of Object.keys(st)) delete st[key]; Object.assign(st, nst); renderSub(); labEdited(); } },
       [...groups].map(([g, xs]) => h("optgroup", { label: g }, xs.map(([key, label]) => h("option", { value: key, selected: key === st.form, text: label }))))),
-      "what in the music moves the parameter"));
+      (F[st.form] || {}).label || "what in the music moves the parameter"));
     if (!isFeatureForm(st)) {                     // the form's own settings, here (it has no feature lanes)
       const f = F[st.form] || {};
       const grid = h("div", { class: "lfgrid" });
@@ -3200,7 +3215,7 @@ async function renderRepaint() {
       field("It starts in the song at (s)", numField(r.start, v => put("start", v), { min: 0, step: 0.1 })),
       field("Workflow", h("select", { onchange: e => put("workflow", e.target.value) }, h("option", { value: "", text: "(the scene's)" }), r.workflows.map(w => h("option", { value: w, selected: w === r.workflow, text: w })))),
       field("Scene", h("select", { onchange: e => put("scene", e.target.value) }, r.scenes.map(sc => h("option", { value: sc, selected: sc === r.scene, text: sc })))),
-      field("Prompt", textField(r.prompt, "empty: the scene's prompts (e.g. make it claymation)", v => put("prompt", v))),
+      field("Prompt", textField(r.prompt, "empty: the scene's own", v => put("prompt", v)), "empty: the scene's prompts (e.g. make it claymation)"),
       field("FPS", numField(r.fps, v => put("fps", v), { min: 1, max: 60, step: 1 })),
       field("Seconds", numField(r.seconds, v => put("seconds", v), { min: 0, step: 1 }), "0: the whole video")),
     r.output ? h("div", { class: "about mono", text: `→ ${r.output}` }) : null,

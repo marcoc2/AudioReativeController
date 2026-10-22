@@ -130,7 +130,7 @@ select.btn { padding: 0 8px; }
 .bar i { display: block; height: 100%; width: 0; background: var(--accent); }
 
 /* inspector */
-.insp { padding: 10px 12px 14px; display: grid; gap: 12px; height: 560px; overflow: auto; align-content: start; }
+.insp { padding: 10px 12px 14px; display: grid; gap: 12px; height: 560px; overflow: auto; align-content: start; grid-auto-rows: max-content; }
 .insp .about, .about { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .keys { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; align-items: baseline; font-size: 12px; color: var(--muted); }
 .kbd { font-family: var(--f-mono); font-size: 11px; padding: 1px 5px; border: 1px solid var(--line-2); border-radius: 4px; color: var(--fg); background: var(--panel-2); }
@@ -150,10 +150,11 @@ select.btn { padding: 0 8px; }
 .prm .top { display: flex; align-items: baseline; gap: 8px; }
 .prm .top label { flex: 1; font-size: 12.5px; font-family: var(--f-mono); }
 .prm .top output { font-family: var(--f-mono); font-size: 11.5px; color: var(--accent); }
-.prm .slide { display: grid; grid-template-columns: 1fr 70px; gap: 6px; align-items: center; }
+.prm .slide { display: grid; grid-template-columns: 1fr 84px; gap: 6px; align-items: center; }
 .prm input[type=range] { width: 100%; accent-color: var(--accent); }
 .prm input[type=number] { height: 24px; border-radius: 5px; border: 1px solid var(--line-2); background: #0f1115; padding: 0 5px; width: 100%; }
 .prm textarea { width: 100%; min-height: 46px; resize: vertical; border-radius: 5px; border: 1px solid var(--line-2); background: #0f1115; padding: 5px 6px; font-family: var(--f-mono); font-size: 11.5px; }
+.prm textarea.grow { min-height: 24px; resize: none; overflow: hidden; padding: 3px 6px; line-height: 1.4; flex: 1; min-width: 0; }
 .prm .err { color: var(--danger); font-size: 11.5px; overflow-wrap: anywhere; }
 .lnkbtn { justify-self: start; border: 1px solid var(--line-2); background: none; border-radius: 5px; padding: 2px 8px; font-size: 11.5px; color: var(--muted); }
 .lnkbtn:hover { color: var(--fg); }
@@ -354,7 +355,7 @@ pre.yaml { margin: 0; font-family: var(--f-mono); font-size: 11.5px; color: var(
 
 /* the start */
 .start { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; padding: 16px; background: rgba(12,14,18,.82); backdrop-filter: blur(3px); }
-.startcard { width: min(760px, 100%); max-height: calc(100vh - 32px); overflow: auto; background: var(--panel); border: 1px solid var(--line-2); border-radius: 14px; padding: 22px 24px; display: grid; gap: 18px; box-shadow: 0 24px 60px rgba(0,0,0,.6); }
+.startcard { width: min(760px, 100%); max-height: calc(100vh - 32px); overflow: auto; background: var(--panel); border: 1px solid var(--line-2); border-radius: 14px; padding: 22px 24px; display: grid; gap: 18px; box-shadow: 0 24px 60px rgba(0,0,0,.6); grid-auto-rows: max-content; }
 .starthead { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .brand.big { font-size: 12px; }
 .startcard h1 { margin: 2px 0 0; font-family: var(--f-display); font-weight: 700; font-size: 28px; letter-spacing: .01em; }
@@ -580,7 +581,7 @@ body.detached > .pane > .insp { height: auto; flex: 1; min-height: 0; }
 :root[data-theme="fine"] .prm { padding: 5px 7px; gap: 3px; border-radius: 5px; }
 :root[data-theme="fine"] .prm .top label { font-size: 11.5px; }
 :root[data-theme="fine"] .prm .top output { font-size: 10.5px; }
-:root[data-theme="fine"] .prm .slide { grid-template-columns: 1fr 58px; gap: 5px; }
+:root[data-theme="fine"] .prm .slide { grid-template-columns: 1fr 72px; gap: 5px; }
 :root[data-theme="fine"] .prm input[type=number] { height: 20px; border-radius: 4px; }
 :root[data-theme="fine"] .prm textarea, :root[data-theme="fine"] textarea.codeedit { font-size: 10.5px; }
 :root[data-theme="fine"] .lnkbtn { padding: 1px 6px; font-size: 10.5px; border-radius: 4px; }

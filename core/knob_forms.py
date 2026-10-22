@@ -17,54 +17,55 @@ from typing import Any, Optional
 
 import numpy as np
 
+# name: what a select shows; label: all of it, said under it
 # a setting: (name, default, kind, help); kind: float | int | bool | text | a tuple of choices
 FORMS: dict = {
     "constant": {
-        "group": "fixed", "label": "a fixed value", "source": None,
+        "name": "a fixed value", "group": "fixed", "label": "a fixed value", "source": None,
         "main": ("value", 0.0, "float", "the value"), "params": []},
     "hits": {
-        "group": "beat", "label": "a pulse on each hit (1 -> 0)", "source": "trigger",
+        "name": "a pulse on each hit", "group": "beat", "label": "a pulse on each hit (1 -> 0)", "source": "trigger",
         "params": [("envelope", 0.25, "float", "seconds to fall back to 0"),
                    ("amount", 1.0, "float", "the pulse's height")]},
     "adsr": {
-        "group": "beat", "label": "each note's envelope (attack, decay, sustain, release)",
+        "name": "each note's envelope", "group": "beat", "label": "each note's envelope (attack, decay, sustain, release)",
         "source": "trigger",
         "params": [("attack", 0.02, "float", "seconds up"), ("decay", 0.2, "float", "seconds down to sustain"),
                    ("sustain", 0.6, "float", "the level while the note is held"),
                    ("release", 0.4, "float", "seconds away once it ends"),
                    ("velocity", True, "bool", "the note's velocity scales the peak")]},
     "before": {
-        "group": "beat", "label": "rises 0 -> 1 just before each hit", "source": "trigger",
+        "name": "rises before each hit", "group": "beat", "label": "rises 0 -> 1 just before each hit", "source": "trigger",
         "params": [("window", 0.5, "float", "seconds ahead of the hit it starts rising")]},
     "since": {
-        "group": "beat", "label": "seconds since the latest hit", "source": "trigger",
+        "name": "seconds since the last hit", "group": "beat", "label": "seconds since the latest hit", "source": "trigger",
         "params": [("nth", 0, "int", "1: since the hit before that, ...")]},
     "count": {
-        "group": "beat", "label": "hits so far in the bar", "source": "trigger", "params": []},
+        "name": "hits so far in the bar", "group": "beat", "label": "hits so far in the bar", "source": "trigger", "params": []},
     "random_on": {
-        "group": "beat", "label": "a new random value (0..1) on each hit", "source": "trigger",
+        "name": "a random value on each hit", "group": "beat", "label": "a new random value (0..1) on each hit", "source": "trigger",
         "params": [("ease", 0.1, "float", "seconds to slide to it"), ("seed", 0, "int", "which random")]},
     "groove": {
-        "group": "beat", "label": "the bar's pattern of hits (one bit a step)", "source": "trigger",
+        "name": "the bar's pattern of hits", "group": "beat", "label": "the bar's pattern of hits (one bit a step)", "source": "trigger",
         "params": [("division", 16, "int", "steps to a whole note (16 in 4/4)"),
                    ("ago", 0, "int", "1: the bar before"),
                    ("part", "pattern", ("pattern", "steps"), "steps: how many steps the bar has")]},
     "pitch": {
-        "group": "note", "label": "the latest note's pitch (low..high -> 0..1)", "source": "trigger",
+        "name": "the latest note's pitch", "group": "note", "label": "the latest note's pitch (low..high -> 0..1)", "source": "trigger",
         "params": [("low", 36, "float", "MIDI pitch read as 0"), ("high", 84, "float", "MIDI pitch read as 1"),
                    ("glide", 0.1, "float", "seconds to slide to a new note")]},
     "voice": {
-        "group": "note", "label": "the k-th note sounding now (lowest first)", "source": "trigger",
+        "name": "the k-th note sounding", "group": "note", "label": "the k-th note sounding now (lowest first)", "source": "trigger",
         "params": [("k", 0, "int", "0 the lowest"),
                    ("part", "pitch", ("pitch", "level"), "pitch: its MIDI pitch; level: 1 while it sounds"),
                    ("release", 0.3, "float", "seconds the level fades after"),
                    ("velocity", False, "bool", "velocity scales the level")]},
     "harmony": {
-        "group": "harmony", "label": "the chord's root as a colour (hue 0..1)", "source": "score",
+        "name": "the chord's root as a colour", "group": "harmony", "label": "the chord's root as a colour (hue 0..1)", "source": "score",
         "params": [("glide", 1.2, "float", "seconds to slide round the colour wheel"),
                    ("start", 0.6, "float", "the hue before the first chord")]},
     "chord": {
-        "group": "harmony", "label": "the chord sounding now: root, a tone, size, mode, tension",
+        "name": "the chord sounding now", "group": "harmony", "label": "the chord sounding now: root, a tone, size, mode, tension",
         "source": "score",
         "params": [("part", "root", ("root", "tone", "size", "mode", "tension"),
                     "root 0..11 · tone: its tone-th note · size: how many notes · mode: 1 major, 0 minor"
@@ -72,36 +73,36 @@ FORMS: dict = {
                    ("tone", 0, "int", "for part tone: 0 root, 1 third, 2 fifth, 3 seventh"),
                    ("glide", 0.0, "float", "seconds to slide there (0 jumps)")]},
     "cut": {
-        "group": "cuts", "label": "the clip cuts (known before they come)", "source": None,
+        "name": "the clip cuts", "group": "cuts", "label": "the clip cuts (known before they come)", "source": None,
         "main": ("cut", "count", ("count", "since", "until", "phase"),
                  "count: cuts so far · since: seconds since the last · until: seconds to the next"
                  " · phase: 0 -> 1 across the shot"),
         "params": [("morph", 0.0, "float", "for count: seconds to step up")]},
     "feature": {
-        "group": "audio", "label": "an audio feature (loudness of a band, a texture)", "source": "feature",
+        "name": "an audio feature", "group": "audio", "label": "an audio feature (loudness of a band, a texture)", "source": "feature",
         "params": [("attack", 0.0, "float", "seconds to rise to it (0: as it is, jumpy)"),
                    ("release", 0.0, "float", "seconds to fall back")]},
     "relative": {
-        "group": "audio", "label": "an audio feature against its recent average (1 = as usual)",
+        "name": "a feature against its average", "group": "audio", "label": "an audio feature against its recent average (1 = as usual)",
         "source": "feature",
         "params": [("window", 6.0, "float", "seconds of 'recently'"), ("attack", 0.05, "float", "seconds up"),
                    ("release", 0.3, "float", "seconds down")]},
     "lfo": {
-        "group": "time", "label": "an oscillator in step with the song", "source": None,
+        "name": "an oscillator in step", "group": "time", "label": "an oscillator in step with the song", "source": None,
         "main": ("lfo", "sine", ("sine", "tri", "saw", "square", "pulse"), "the wave"),
         "params": [("period", "1/1", "text", "a note value on the grid (1/1 a bar, 1/4 a beat) or seconds"),
                    ("phase", 0.0, "float", "0..1 of the period"),
                    ("width", 0.5, "float", "for pulse: how long it is high")]},
     "bar": {
-        "group": "time", "label": "steps up at each bar (a new shape per bar, melting in)", "source": None,
+        "name": "steps up at each bar", "group": "time", "label": "steps up at each bar (a new shape per bar, melting in)", "source": None,
         "params": [("step", 1.0, "float", "how much a bar adds"), ("offset", 0.0, "float", "the value at bar 1"),
                    ("morph", 0.35, "float", "seconds to melt into the next")]},
     "rate": {
-        "group": "time", "label": "keeps adding (base + rate x from) every second", "source": None,
+        "name": "keeps adding every second", "group": "time", "label": "keeps adding (base + rate x from) every second", "source": None,
         "main": ("rate", 2.0, "float", "how much 'from' adds a second"),
         "params": [("base", 0.0, "float", "what it adds a second anyway")]},
     "figure": {
-        "group": "figure", "label": "a figure of the mask track: where it is, how big", "source": None,
+        "name": "a figure of the mask track", "group": "figure", "label": "a figure of the mask track: where it is, how big", "source": None,
         "main": ("figure", "largest", ("largest", "second", "third"), "which, by its share of the frame"),
         "params": [("part", "x", ("x", "y", "size"), "x, y its centre (0..1), size its share"),
                    ("glide", 0.15, "float", "seconds to slide")]},
@@ -121,8 +122,9 @@ TRIGGER_KINDS = ("track", "notes", "audio", "melody")
 
 
 def choices() -> list:
-    """``(form, "group · label")`` in the order the editor lists them."""
-    return [(k, f"{f['group']} · {f['label']}") for g in GROUPS for k, f in FORMS.items() if f["group"] == g]
+    """``(form, "group · name")`` in the order the editor lists them (a short name, so a select
+    shows it whole; ``label`` says all of it, under the select)."""
+    return [(k, f"{f['group']} · {f['name']}") for g in GROUPS for k, f in FORMS.items() if f["group"] == g]
 
 
 def form_of(spec: Any) -> Optional[str]:
